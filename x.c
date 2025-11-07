@@ -1859,6 +1859,14 @@ kpress(XEvent *ev)
 	} else {
 		len = XLookupString(e, buf, sizeof buf, &ksym, NULL);
 	}
+
+	if (ksym == XK_Shift_R && rightshiftseq && *rightshiftseq) {
+		uint masked = e->state & ~(LockMask | Mod2Mask);
+		if (masked == 0) {
+			ttywrite(rightshiftseq, strlen(rightshiftseq), 1);
+			return;
+		}
+	}
 	/* 1. shortcuts */
 	for (bp = shortcuts; bp < shortcuts + LEN(shortcuts); bp++) {
 		if (ksym == bp->keysym && match(bp->mod, e->state)) {

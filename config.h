@@ -21,6 +21,9 @@ char *utmp = NULL;
 char *scroll = NULL;
 char *stty_args = "stty raw pass8 nl -echo -iexten -cstopb 38400";
 
+/* escape sequence emitted on standalone Right Shift press */
+static char *rightshiftseq = "\033]777;right-shift\a";
+
 /* identification sequence returned in DA and DECID */
 char *vtiden = "\033[?6c";
 
