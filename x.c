@@ -1887,7 +1887,47 @@ kpress(XEvent *ev)
 			buf[0] = '\033';
 			len = 2;
 		}
-	}
+  }
+	char modbuf[64] = "";
+  if (e->state & ControlMask) strcat(modbuf, "Ctrl+");
+  if (e->state & ShiftMask)   strcat(modbuf, "Shift+");
+  if (e->state & Mod1Mask)    strcat(modbuf, "Alt+");
+  if (e->state & Mod4Mask)    strcat(modbuf, "Super+");
+  char* key = XKeysymToString(ksym);
+  char fullkey[128] = "";
+  strcat(fullkey, modbuf); strcat(fullkey, key);
+  //printf("Key: %s\n",fullkey);
+
+  if (strcmp(fullkey,"Ctrl+e") == 0) {
+    kscrollup(&(Arg){ .i = 1 });
+    return;
+  }
+
+  if (strcmp(fullkey,"Ctrl+y") == 0) {
+    kscrolldown(&(Arg){ .i = 1 });
+    return;
+  }
+
+  if (strcmp(fullkey,"Ctrl+u") == 0) { // Hardcoded but I can't be bothered.
+    kscrollup(&(Arg){ .i = 52/2 });
+    return;
+  }
+
+  if (strcmp(fullkey,"Ctrl+d") == 0) {
+    kscrolldown(&(Arg){ .i = 52/2 });
+    return;
+  }
+
+  if (strcmp(fullkey,"Ctrl+b") == 0) { // Hardcoded but I can't be bothered.
+    kscrollup(&(Arg){ .i = 52 });
+    return;
+  }
+
+  if (strcmp(fullkey,"Ctrl+f") == 0) {
+    kscrolldown(&(Arg){ .i = 52 });
+    return;
+  }
+
 	ttywrite(buf, len, 1);
 }
 
