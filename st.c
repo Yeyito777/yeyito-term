@@ -502,6 +502,8 @@ selnormalize(void)
 int
 selected(int x, int y)
 {
+	int maxcol;
+
 	if (sel.mode == SEL_EMPTY || sel.ob.x == -1 ||
 			sel.alt != IS_SET(MODE_ALTSCREEN))
 		return 0;
@@ -510,8 +512,15 @@ selected(int x, int y)
 		return BETWEEN(y, sel.nb.y, sel.ne.y)
 		    && BETWEEN(x, sel.nb.x, sel.ne.x);
 
-	return BETWEEN(y, sel.nb.y, sel.ne.y)
-	    && (y != sel.nb.y || x >= sel.nb.x)
+	if (!BETWEEN(y, sel.nb.y, sel.ne.y))
+		return 0;
+
+	/* Don't let selection highlight extend into the virtual padding. */
+	maxcol = MIN(tlinelen(y) + 1, term.col);
+	if (x >= maxcol)
+		return 0;
+
+	return (y != sel.nb.y || x >= sel.nb.x)
 	    && (y != sel.ne.y || x <= sel.ne.x);
 }
 
