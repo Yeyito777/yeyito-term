@@ -236,6 +236,7 @@ static ssize_t xwrite(int, const char *, size_t);
 static Term term;
 static Selection sel;
 static VimNav vimnav = { .mode = VIMNAV_INACTIVE };
+static int vimnav_paste_strip_newlines = 0;
 static CSIEscape csiescseq;
 static STREscape strescseq;
 static int iofd = 1;
@@ -1013,6 +1014,18 @@ vimnav_toggle_visual_line(void)
 	tfulldirt();
 }
 
+int
+tisvimnav_paste(void)
+{
+	return vimnav_paste_strip_newlines;
+}
+
+void
+vimnav_paste_done(void)
+{
+	vimnav_paste_strip_newlines = 0;
+}
+
 static void
 vimnav_yank_selection(void)
 {
@@ -1235,6 +1248,15 @@ vimnav_handle_key(ulong ksym, uint state)
 		} else {
 			/* No selection: yank line (or just command on prompt line) */
 			vimnav_yank_line();
+		}
+		break;
+
+	/* Paste */
+	case 'p':
+		/* Only paste on prompt line, strip trailing newlines */
+		if (term.scr == 0 && vimnav.y == term.c.y) {
+			vimnav_paste_strip_newlines = 1;
+			clippaste(NULL);
 		}
 		break;
 

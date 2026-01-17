@@ -52,7 +52,7 @@ typedef struct {
 
 /* function definitions used in config.h */
 static void clipcopy(const Arg *);
-static void clippaste(const Arg *);
+void clippaste(const Arg *);  /* non-static for vimnav 'p' command */
 static void numlock(const Arg *);
 static void selpaste(const Arg *);
 static void zoom(const Arg *);
@@ -587,9 +587,18 @@ selnotify(XEvent *e)
 			*repl++ = '\r';
 		}
 
+		/*
+		 * For vimnav paste, strip trailing carriage returns
+		 * (which were newlines before conversion).
+		 */
+		if (tisvimnav_paste() && rem == 0) {
+			while (last > data && *(last - 1) == '\r')
+				last--;
+		}
+
 		if (IS_SET(MODE_BRCKTPASTE) && ofs == 0)
 			ttywrite("\033[200~", 6, 0);
-		ttywrite((char *)data, nitems * format / 8, 1);
+		ttywrite((char *)data, last - data, 1);
 		if (IS_SET(MODE_BRCKTPASTE) && rem == 0)
 			ttywrite("\033[201~", 6, 0);
 		XFree(data);
@@ -602,6 +611,9 @@ selnotify(XEvent *e)
 	 * next data chunk in the property.
 	 */
 	XDeleteProperty(xw.dpy, xw.win, (int)property);
+
+	/* Clear vimnav paste mode flag */
+	vimnav_paste_done();
 }
 
 void

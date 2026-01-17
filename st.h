@@ -131,6 +131,8 @@ char *getsel(void);
 void vimnav_enter(void);
 void vimnav_exit(void);
 int tisvimnav(void);
+int tisvimnav_paste(void);
+void vimnav_paste_done(void);
 int vimnav_handle_key(ulong ksym, uint state);
 
 size_t utf8encode(Rune, char *);
