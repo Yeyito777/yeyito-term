@@ -511,6 +511,7 @@ int
 selected(int x, int y)
 {
 	int maxcol;
+	int linelen;
 
 	if (sel.mode == SEL_EMPTY || sel.ob.x == -1 ||
 			sel.alt != IS_SET(MODE_ALTSCREEN))
@@ -523,8 +524,10 @@ selected(int x, int y)
 	if (!BETWEEN(y, sel.nb.y, sel.ne.y))
 		return 0;
 
-	/* Don't let selection highlight extend into the virtual padding. */
-	maxcol = MIN(tlinelen(y) + 1, term.col);
+	/* Don't let selection highlight extend into the virtual padding.
+	 * For vim nav mode, don't include the virtual newline character. */
+	linelen = tlinelen(y);
+	maxcol = tisvimnav() ? linelen : MIN(linelen + 1, term.col);
 	if (x >= maxcol)
 		return 0;
 

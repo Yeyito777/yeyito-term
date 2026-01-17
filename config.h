@@ -234,7 +234,10 @@ static Shortcut shortcuts[] = {
  * If you want keys other than the X11 function keys (0xFD00 - 0xFFFF)
  * to be mapped below, add them to this array.
  */
-static KeySym mappedkeys[] = { -1 };
+static KeySym mappedkeys[] = {
+	XK_0, XK_1, XK_2, XK_3, XK_4, XK_5, XK_6, XK_7, XK_8, XK_9, XK_minus,
+	-1
+};
 
 /*
  * State bits to ignore when matching key or button events.  By default,
@@ -248,6 +251,18 @@ static uint ignoremod = Mod2Mask|XK_SWITCH_MOD;
  */
 static Key key[] = {
 	/* keysym           mask            string      appkey appcursor */
+	/* Ctrl+0-9,-: send F14-F24 sequences for neovim */
+	{ XK_1,             ControlMask,    "\033[1;2Q",     0,    0},  /* F14 */
+	{ XK_2,             ControlMask,    "\033[1;2R",     0,    0},  /* F15 */
+	{ XK_3,             ControlMask,    "\033[1;2S",     0,    0},  /* F16 */
+	{ XK_4,             ControlMask,    "\033[15;2~",    0,    0},  /* F17 */
+	{ XK_5,             ControlMask,    "\033[17;2~",    0,    0},  /* F18 */
+	{ XK_6,             ControlMask,    "\033[18;2~",    0,    0},  /* F19 */
+	{ XK_7,             ControlMask,    "\033[19;2~",    0,    0},  /* F20 */
+	{ XK_8,             ControlMask,    "\033[20;2~",    0,    0},  /* F21 */
+	{ XK_9,             ControlMask,    "\033[21;2~",    0,    0},  /* F22 */
+	{ XK_0,             ControlMask,    "\033[23;2~",    0,    0},  /* F23 */
+	{ XK_minus,         ControlMask,    "\033[24;2~",    0,    0},  /* F24 */
 	{ XK_KP_Home,       ShiftMask,      "\033[2J",       0,   -1},
 	{ XK_KP_Home,       ShiftMask,      "\033[1;2H",     0,   +1},
 	{ XK_KP_Home,       XK_ANY_MOD,     "\033[H",        0,   -1},
