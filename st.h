@@ -53,6 +53,24 @@ enum selection_snap {
 	SNAP_LINE = 2
 };
 
+enum vimnav_mode {
+	VIMNAV_INACTIVE = 0,
+	VIMNAV_NORMAL = 1,
+	VIMNAV_VISUAL = 2,
+	VIMNAV_VISUAL_LINE = 3,
+};
+
+typedef struct {
+	int mode;           /* vimnav_mode state */
+	int x, y;           /* vim cursor position (screen row) */
+	int ox, oy;         /* old position for cursor redraw */
+	int savedx;         /* saved x column for vertical movement */
+	int prompt_y;       /* y position of shell prompt (can't go below) */
+	int scr_at_entry;   /* scroll position when entering vim mode */
+	int anchor_x, anchor_y; /* visual mode anchor point */
+	int last_shell_x;   /* last known shell cursor x for sync detection */
+} VimNav;
+
 typedef unsigned char uchar;
 typedef unsigned int uint;
 typedef unsigned long ulong;
@@ -108,6 +126,11 @@ void selstart(int, int, int);
 void selextend(int, int, int, int);
 int selected(int, int);
 char *getsel(void);
+
+void vimnav_enter(void);
+void vimnav_exit(void);
+int tisvimnav(void);
+int vimnav_handle_key(ulong ksym, uint state);
 
 size_t utf8encode(Rune, char *);
 

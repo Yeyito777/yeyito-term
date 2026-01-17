@@ -1551,13 +1551,9 @@ xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 			g.fg = defaultcs;
 		}
 	} else {
-		if (selected(cx, cy)) {
-			g.fg = defaultfg;
-			g.bg = defaultrcs;
-		} else {
-			g.fg = defaultbg;
-			g.bg = defaultcs;
-		}
+		/* Always use defaultcs for cursor color, even when selected */
+		g.fg = defaultbg;
+		g.bg = defaultcs;
 		drawcol = dc.col[g.bg];
 	}
 
@@ -1870,6 +1866,15 @@ kpress(XEvent *ev)
 			return;
 		}
 	}
+
+	/* Vim navigation mode key handling */
+	if (tisvimnav()) {
+		if (vimnav_handle_key(ksym, e->state))
+			return;
+		/* Unknown key: pass through to shell but stay in vim nav mode.
+		 * Zsh will send vim-mode;exit when it leaves vicmd mode. */
+	}
+
 	/* 1. shortcuts */
 	for (bp = shortcuts; bp < shortcuts + LEN(shortcuts); bp++) {
 		if (ksym == bp->keysym && match(bp->mod, e->state)) {

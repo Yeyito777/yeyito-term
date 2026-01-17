@@ -20,6 +20,12 @@
 #include "st.h"
 #include "win.h"
 
+/* X11 modifier masks (from X11/X.h) */
+#define ShiftMask   (1<<0)
+#define ControlMask (1<<2)
+#define Mod1Mask    (1<<3)
+#define Mod4Mask    (1<<6)
+
 #if   defined(__linux)
  #include <pty.h>
 #elif defined(__OpenBSD__) || defined(__NetBSD__) || defined(__APPLE__)
@@ -229,6 +235,7 @@ static ssize_t xwrite(int, const char *, size_t);
 /* Globals */
 static Term term;
 static Selection sel;
+static VimNav vimnav = { .mode = VIMNAV_INACTIVE };
 static CSIEscape csiescseq;
 static STREscape strescseq;
 static int iofd = 1;
@@ -661,6 +668,524 @@ selclear(void)
 	sel.mode = SEL_IDLE;
 	sel.ob.x = -1;
 	tsetdirt(sel.nb.y, sel.ne.y);
+}
+
+/* Vim navigation mode functions */
+
+int
+tisvimnav(void)
+{
+	return vimnav.mode != VIMNAV_INACTIVE;
+}
+
+static int
+vimnav_screen_y(void)
+{
+	return vimnav.y;
+}
+
+static void
+vimnav_update_selection(void)
+{
+	int screen_y = vimnav_screen_y();
+
+	if (vimnav.mode == VIMNAV_VISUAL) {
+		selstart(vimnav.anchor_x, vimnav.anchor_y, 0);
+		selextend(vimnav.x, screen_y, SEL_REGULAR, 0);
+	} else if (vimnav.mode == VIMNAV_VISUAL_LINE) {
+		selstart(0, vimnav.anchor_y, 0);
+		sel.snap = SNAP_LINE;
+		selextend(term.col - 1, screen_y, SEL_REGULAR, 0);
+	}
+	tfulldirt();
+}
+
+static void
+vimnav_move_left(void)
+{
+	if (vimnav.x > 0) {
+		vimnav.x--;
+		vimnav.savedx = vimnav.x;
+	}
+	vimnav_update_selection();
+}
+
+static void
+vimnav_move_right(void)
+{
+	int linelen = tlinelen(vimnav_screen_y());
+	if (vimnav.x < linelen - 1 && vimnav.x < term.col - 1) {
+		vimnav.x++;
+		vimnav.savedx = vimnav.x;
+	}
+	vimnav_update_selection();
+}
+
+/* Check if a line has any non-space content */
+static int
+vimnav_line_has_content(int screen_y)
+{
+	int len = tlinelen(screen_y);
+	return len > 0;
+}
+
+/* Scroll helper that respects vim nav boundaries and moves cursor */
+static void
+vimnav_scroll_up(int n)
+{
+	int old_scr = term.scr;
+	int scrolled, remaining;
+	int i;
+
+	/* Scroll up incrementally, checking for content */
+	for (i = 0; i < n && term.scr < HISTSIZE - 1; i++) {
+		term.scr++;
+		if (tlinelen(0) == 0) {
+			term.scr--;
+			break;
+		}
+	}
+	scrolled = term.scr - old_scr;
+	if (scrolled > 0) {
+		selscroll(0, scrolled);
+		tfulldirt();
+	}
+
+	/* Move cursor up by the amount we couldn't scroll */
+	remaining = n - scrolled;
+	if (remaining > 0 && vimnav.y > 0) {
+		vimnav.y -= remaining;
+		if (vimnav.y < 0)
+			vimnav.y = 0;
+	}
+}
+
+static void
+vimnav_scroll_down(int n)
+{
+	int scrolled;
+	int max_scroll;
+	int requested = n;  /* Save original request before capping */
+
+	/* Don't scroll past where the prompt currently is */
+	max_scroll = term.scr;  /* Can scroll down at most term.scr lines */
+	if (n > max_scroll)
+		n = max_scroll;
+
+	scrolled = n;
+	if (scrolled > 0) {
+		kscrolldown(&(Arg){ .i = scrolled });
+	}
+
+	/* Move cursor down by the amount we couldn't scroll */
+	int remaining = requested - scrolled;
+	if (remaining > 0) {
+		/* Can move cursor down to shell cursor position */
+		int max_y = term.c.y;
+		if (vimnav.y < max_y) {
+			vimnav.y += remaining;
+			if (vimnav.y > max_y)
+				vimnav.y = max_y;
+		}
+	}
+}
+
+static void
+vimnav_move_up(void)
+{
+	int linelen;
+	int old_scr = term.scr;
+
+	if (vimnav.y > 0) {
+		/* Move cursor up within visible area */
+		vimnav.y--;
+	} else {
+		/* At top of screen, try to scroll up */
+		term.scr++;
+		if (term.scr > HISTSIZE - 1 || tlinelen(0) == 0) {
+			/* Can't scroll or no content, revert */
+			term.scr = old_scr;
+		} else {
+			selscroll(0, 1);
+			tfulldirt();
+		}
+		/* Cursor stays at row 0 */
+	}
+
+	linelen = tlinelen(vimnav.y);
+	vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
+	vimnav_update_selection();
+}
+
+static void
+vimnav_move_down(void)
+{
+	int linelen;
+
+	if (term.scr > 0 && vimnav.y >= term.row - 1) {
+		/* Scrolled back, at bottom of screen, scroll down */
+		kscrolldown(&(Arg){ .i = 1 });
+		/* Cursor stays at bottom row */
+	} else if (term.scr > 0 && vimnav.y < term.row - 1) {
+		/* Scrolled back, cursor not at bottom, just move down */
+		vimnav.y++;
+	} else if (term.scr == 0 && vimnav.y < term.c.y) {
+		/* At prompt level, can move down until shell cursor (dynamic) */
+		vimnav.y++;
+	}
+	/* If at shell cursor with scr == 0, don't move */
+
+	linelen = tlinelen(vimnav.y);
+	vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
+	vimnav_update_selection();
+}
+
+static void
+vimnav_move_bol(void)
+{
+	vimnav.x = 0;
+	vimnav.savedx = 0;
+	vimnav_update_selection();
+}
+
+static void
+vimnav_move_eol(void)
+{
+	int linelen = tlinelen(vimnav_screen_y());
+	vimnav.x = linelen > 0 ? linelen - 1 : 0;
+	vimnav.savedx = vimnav.x;
+	vimnav_update_selection();
+}
+
+static void
+vimnav_move_word_forward(void)
+{
+	int screen_y = vimnav_screen_y();
+	int x = vimnav.x;
+	int linelen = tlinelen(screen_y);
+	Glyph *gp;
+
+	if (linelen == 0)
+		return;
+
+	/* Skip current word (non-delimiters) */
+	while (x < linelen - 1) {
+		gp = &TLINE(screen_y)[x];
+		if (ISDELIM(gp->u))
+			break;
+		x++;
+	}
+
+	/* Skip delimiters */
+	while (x < linelen - 1) {
+		gp = &TLINE(screen_y)[x];
+		if (!ISDELIM(gp->u))
+			break;
+		x++;
+	}
+
+	vimnav.x = x;
+	vimnav.savedx = x;
+	vimnav_update_selection();
+}
+
+static void
+vimnav_move_word_backward(void)
+{
+	int screen_y = vimnav_screen_y();
+	int x = vimnav.x;
+	Glyph *gp;
+
+	if (x == 0)
+		return;
+
+	x--;
+
+	/* Skip delimiters */
+	while (x > 0) {
+		gp = &TLINE(screen_y)[x];
+		if (!ISDELIM(gp->u))
+			break;
+		x--;
+	}
+
+	/* Skip to start of word */
+	while (x > 0) {
+		gp = &TLINE(screen_y)[x - 1];
+		if (ISDELIM(gp->u))
+			break;
+		x--;
+	}
+
+	vimnav.x = x;
+	vimnav.savedx = x;
+	vimnav_update_selection();
+}
+
+static void
+vimnav_move_top(void)
+{
+	int linelen;
+
+	/* Scroll to top of history, stopping at blank lines */
+	vimnav_scroll_up(HISTSIZE);
+	vimnav.y = 0;
+
+	linelen = tlinelen(vimnav.y);
+	vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
+	if (vimnav.x < 0)
+		vimnav.x = 0;
+	vimnav_update_selection();
+}
+
+static void
+vimnav_move_bottom(void)
+{
+	int linelen;
+
+	/* Scroll back to show current prompt */
+	if (term.scr > 0) {
+		kscrolldown(&(Arg){ .i = term.scr });
+	}
+	vimnav.y = term.c.y;  /* Use current shell cursor position */
+
+	linelen = tlinelen(vimnav.y);
+	vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
+	if (vimnav.x < 0)
+		vimnav.x = 0;
+	vimnav_update_selection();
+}
+
+static void
+vimnav_toggle_visual_char(void)
+{
+	if (vimnav.mode == VIMNAV_VISUAL) {
+		vimnav.mode = VIMNAV_NORMAL;
+		selclear();
+	} else {
+		vimnav.mode = VIMNAV_VISUAL;
+		vimnav.anchor_x = vimnav.x;
+		vimnav.anchor_y = vimnav_screen_y();
+		selstart(vimnav.x, vimnav.anchor_y, 0);
+	}
+	tfulldirt();
+}
+
+static void
+vimnav_toggle_visual_line(void)
+{
+	if (vimnav.mode == VIMNAV_VISUAL_LINE) {
+		vimnav.mode = VIMNAV_NORMAL;
+		selclear();
+	} else {
+		vimnav.mode = VIMNAV_VISUAL_LINE;
+		vimnav.anchor_y = vimnav_screen_y();
+		selstart(0, vimnav.anchor_y, 0);
+		sel.snap = SNAP_LINE;
+		selextend(term.col - 1, vimnav.anchor_y, SEL_REGULAR, 0);
+	}
+	tfulldirt();
+}
+
+static void
+vimnav_yank_selection(void)
+{
+	char *text = getsel();
+	if (text) {
+		xsetsel(text);
+		xclipcopy();
+	}
+}
+
+static void
+vimnav_yank_line(void)
+{
+	int screen_y = vimnav_screen_y();
+
+	selstart(0, screen_y, 0);
+	sel.snap = SNAP_LINE;
+	selextend(term.col - 1, screen_y, SEL_REGULAR, 1);
+
+	char *text = getsel();
+	if (text) {
+		xsetsel(text);
+		xclipcopy();
+	}
+
+	selclear();
+	tfulldirt();
+}
+
+void
+vimnav_enter(void)
+{
+	if (vimnav.mode != VIMNAV_INACTIVE || IS_SET(MODE_ALTSCREEN))
+		return;
+
+	/* If scrolled away from prompt, scroll back first for clean state */
+	if (term.scr > 0) {
+		kscrolldown(&(Arg){ .i = term.scr });
+	}
+
+	vimnav.mode = VIMNAV_NORMAL;
+	vimnav.x = term.c.x;
+	vimnav.y = term.c.y;  /* Screen row */
+	vimnav.savedx = vimnav.x;
+	vimnav.prompt_y = term.c.y;  /* Can't go below this row when scr == 0 */
+	vimnav.scr_at_entry = term.scr;  /* Track scroll position at entry (should be 0) */
+	vimnav.ox = vimnav.x;
+	vimnav.oy = vimnav.y;
+	vimnav.last_shell_x = term.c.x;  /* Track shell cursor for sync detection */
+
+	selclear();
+	tfulldirt();
+}
+
+void
+vimnav_exit(void)
+{
+	if (vimnav.mode == VIMNAV_INACTIVE)
+		return;
+
+	vimnav.mode = VIMNAV_INACTIVE;
+	selclear();
+	tfulldirt();
+}
+
+int
+vimnav_handle_key(ulong ksym, uint state)
+{
+	int handled = 1;
+
+	/* Ignore modifier-only key presses (Shift, Ctrl, Alt, Super) */
+	if (ksym >= 0xffe1 && ksym <= 0xffee)  /* XK_Shift_L to XK_Hyper_R */
+		return 1;
+
+	/* Handle Ctrl+scroll commands */
+	if (state & ControlMask) {
+		switch (ksym) {
+		case 'e':
+			vimnav_scroll_up(1);
+			return 1;
+		case 'y':
+			vimnav_scroll_down(1);
+			return 1;
+		case 'u':
+			vimnav_scroll_up(term.row / 2);
+			return 1;
+		case 'd':
+			vimnav_scroll_down(term.row / 2);
+			return 1;
+		case 'b':
+			vimnav_scroll_up(term.row);
+			return 1;
+		case 'f':
+			vimnav_scroll_down(term.row);
+			return 1;
+		default:
+			return 0;  /* Unknown Ctrl key, exit vim mode */
+		}
+	}
+
+	/* Only handle unmodified keys or Shift */
+	if (state & ~ShiftMask)
+		return 0;
+
+	switch (ksym) {
+	/* Movement keys */
+	case 'h':
+		/* On prompt line, pass to zsh so its cursor stays in sync */
+		if (term.scr == 0 && vimnav.y == term.c.y) {
+			if (vimnav.x > 0) {
+				vimnav.x--;
+				vimnav.last_shell_x--;
+			}
+			return 0;  /* Pass through to zsh */
+		}
+		vimnav_move_left();
+		break;
+	case 'j':
+		vimnav_move_down();
+		break;
+	case 'k':
+		vimnav_move_up();
+		break;
+	case 'l':
+		/* On prompt line, pass to zsh so its cursor stays in sync */
+		if (term.scr == 0 && vimnav.y == term.c.y) {
+			vimnav.x++;
+			vimnav.last_shell_x++;
+			return 0;  /* Pass through to zsh */
+		}
+		vimnav_move_right();
+		break;
+	case '0':
+		/* On prompt line, pass to zsh so its cursor stays in sync */
+		if (term.scr == 0 && vimnav.y == term.c.y) {
+			vimnav.x = 0;
+			vimnav.last_shell_x = 0;
+			return 0;
+		}
+		vimnav_move_bol();
+		break;
+	case '$':
+	case 'w':
+	case 'b':
+		/* On prompt line, pass to zsh so its cursor stays in sync.
+		 * Can't predict position, so don't update last_shell_x - let sync handle it */
+		if (term.scr == 0 && vimnav.y == term.c.y) {
+			vimnav.last_shell_x = -1;  /* Force sync on next draw */
+			return 0;
+		}
+		if (ksym == '$')
+			vimnav_move_eol();
+		else if (ksym == 'w')
+			vimnav_move_word_forward();
+		else
+			vimnav_move_word_backward();
+		break;
+	case 'g':
+		vimnav_move_top();
+		break;
+	case 'G':
+		vimnav_move_bottom();
+		break;
+
+	/* Visual mode */
+	case 'v':
+		vimnav_toggle_visual_char();
+		break;
+	case 'V':
+		vimnav_toggle_visual_line();
+		break;
+
+	/* Yank */
+	case 'y':
+		if (vimnav.mode == VIMNAV_VISUAL || vimnav.mode == VIMNAV_VISUAL_LINE) {
+			vimnav_yank_selection();
+			vimnav.mode = VIMNAV_NORMAL;
+			selclear();
+			tfulldirt();
+		} else {
+			vimnav_yank_line();
+		}
+		break;
+
+	/* Escape: clear visual selection or stay in normal mode */
+	case 0xff1b: /* XK_Escape */
+		if (vimnav.mode == VIMNAV_VISUAL || vimnav.mode == VIMNAV_VISUAL_LINE) {
+			vimnav.mode = VIMNAV_NORMAL;
+			selclear();
+			tfulldirt();
+		}
+		break;
+
+	default:
+		handled = 0;
+		break;
+	}
+
+	return handled;
 }
 
 void
@@ -2058,6 +2583,14 @@ strhandle(void)
 				tfulldirt();
 			}
 			return;
+		case 777: /* st custom: vim-mode notifications */
+			if (narg >= 3 && !strcmp(strescseq.args[1], "vim-mode")) {
+				if (!strcmp(strescseq.args[2], "enter"))
+					vimnav_enter();
+				else if (!strcmp(strescseq.args[2], "exit"))
+					vimnav_exit();
+			}
+			return;
 		}
 		break;
 	case 'k': /* old title set compatibility */
@@ -2778,9 +3311,51 @@ draw(void)
 		cx--;
 
 	drawregion(0, 0, term.col, term.row);
-	if (term.scr == 0)
+
+	if (tisvimnav()) {
+		/* Draw vim navigation cursor */
+		int vy = vimnav.y;
+		int vx = vimnav.x;
+		int voy = vimnav.oy;
+		int vox = vimnav.ox;
+
+		/* When not scrolled, clamp cursor to prompt line.
+		 * Handles Ctrl+L (clear screen) moving the prompt up. */
+		if (term.scr == 0 && vy > term.c.y) {
+			vy = term.c.y;
+			vx = term.c.x;
+			vimnav.y = vy;
+			vimnav.x = vx;
+			vimnav.savedx = vx;
+			vimnav.last_shell_x = term.c.x;
+		}
+
+		/* Sync cursor with shell only when shell cursor actually moved.
+		 * This allows h/l movement while still tracking zsh cursor changes.
+		 * Note: Don't decrement here - zsh already handles vim cursor offset. */
+		if (term.scr == 0 && vy == term.c.y && term.c.x != vimnav.last_shell_x) {
+			vx = term.c.x;
+			vimnav.x = vx;
+			vimnav.savedx = vx;
+			vimnav.last_shell_x = term.c.x;  /* Update tracked position */
+		}
+
+		LIMIT(vx, 0, term.col - 1);
+		LIMIT(vy, 0, term.row - 1);
+		LIMIT(vox, 0, term.col - 1);
+		LIMIT(voy, 0, term.row - 1);
+
+		xdrawcursor(vx, vy, TLINE(vy)[vx],
+				vox, voy, TLINE(voy)[vox]);
+
+		vimnav.ox = vimnav.x;
+		vimnav.oy = vimnav.y;
+	} else if (term.scr == 0) {
+		/* Normal shell cursor */
 		xdrawcursor(cx, term.c.y, term.line[term.c.y][cx],
 				term.ocx, term.ocy, term.line[term.ocy][term.ocx]);
+	}
+
 	term.ocx = cx;
 	term.ocy = term.c.y;
 	xfinishdraw();
