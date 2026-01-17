@@ -69,6 +69,7 @@ typedef struct {
 	int scr_at_entry;   /* scroll position when entering vim mode */
 	int anchor_x, anchor_y; /* visual mode anchor point */
 	int last_shell_x;   /* last known shell cursor x for sync detection */
+	int pending_y;      /* waiting for second y in yy sequence */
 } VimNav;
 
 typedef unsigned char uchar;

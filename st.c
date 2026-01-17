@@ -1023,14 +1023,53 @@ vimnav_yank_selection(void)
 	}
 }
 
+static int
+vimnav_find_prompt_end(int screen_y)
+{
+	/* Find the end of the prompt on this line by looking for common prompt
+	 * delimiters: '% ', '$ ', '> ', '# ' (with trailing space).
+	 * Returns the x position after the delimiter, or 0 if not found. */
+	Line line = TLINE(screen_y);
+	int linelen = tlinelen(screen_y);
+	int last_delim = -1;
+
+	for (int i = 0; i < linelen - 1; i++) {
+		Rune c = line[i].u;
+		Rune next = line[i + 1].u;
+		if ((c == '%' || c == '$' || c == '>' || c == '#') && next == ' ') {
+			last_delim = i + 2;  /* Position after "% " */
+		}
+	}
+
+	return last_delim > 0 ? last_delim : 0;
+}
+
 static void
 vimnav_yank_line(void)
 {
 	int screen_y = vimnav_screen_y();
 
-	selstart(0, screen_y, 0);
-	sel.snap = SNAP_LINE;
-	selextend(term.col - 1, screen_y, SEL_REGULAR, 1);
+	/* On prompt line, only yank the command input (after prompt) */
+	if (term.scr == 0 && vimnav.y == term.c.y) {
+		int start_x = vimnav_find_prompt_end(screen_y);
+		int linelen = tlinelen(screen_y);
+
+		/* If nothing after prompt, nothing to yank */
+		if (start_x >= linelen) {
+			return;
+		}
+
+		/* Character-level selection from prompt end to line end */
+		selstart(start_x, screen_y, 0);
+		sel.mode = SEL_READY;  /* Required for selextend to work with done=1 */
+		selextend(linelen - 1, screen_y, SEL_REGULAR, 1);
+	} else {
+		/* For non-prompt lines, use SNAP_LINE to select whole line */
+		selstart(0, screen_y, 0);
+		sel.snap = SNAP_LINE;
+		sel.mode = SEL_READY;  /* Required for selextend to work with done=1 */
+		selextend(term.col - 1, screen_y, SEL_REGULAR, 1);
+	}
 
 	char *text = getsel();
 	if (text) {
@@ -1188,11 +1227,13 @@ vimnav_handle_key(ulong ksym, uint state)
 	/* Yank */
 	case 'y':
 		if (vimnav.mode == VIMNAV_VISUAL || vimnav.mode == VIMNAV_VISUAL_LINE) {
+			/* In visual mode, yank selection */
 			vimnav_yank_selection();
 			vimnav.mode = VIMNAV_NORMAL;
 			selclear();
 			tfulldirt();
 		} else {
+			/* No selection: yank line (or just command on prompt line) */
 			vimnav_yank_line();
 		}
 		break;
