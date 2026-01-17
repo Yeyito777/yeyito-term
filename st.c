@@ -780,12 +780,22 @@ vimnav_scroll_down(int n)
 	/* Move cursor down by the amount we couldn't scroll */
 	int remaining = requested - scrolled;
 	if (remaining > 0) {
-		/* Can move cursor down to shell cursor position */
-		int max_y = term.c.y;
-		if (vimnav.y < max_y) {
+		/* Can move cursor down to prompt position (term.scr + term.c.y) */
+		int max_valid_y = term.scr + term.c.y;
+		if (vimnav.y < max_valid_y) {
 			vimnav.y += remaining;
-			if (vimnav.y > max_y)
-				vimnav.y = max_y;
+			if (vimnav.y > max_valid_y)
+				vimnav.y = max_valid_y;
+		}
+	}
+
+	/* Clamp cursor to prompt if we ended up past it */
+	int max_valid_y = term.scr + term.c.y;
+	if (vimnav.y > max_valid_y) {
+		vimnav.y = max_valid_y;
+		if (term.scr == 0) {
+			vimnav.x = term.c.x;
+			vimnav.last_shell_x = term.c.x;
 		}
 	}
 }
@@ -821,19 +831,32 @@ static void
 vimnav_move_down(void)
 {
 	int linelen;
+	/* The prompt is at screen row (term.scr + term.c.y) in scrolled view.
+	 * Valid content is rows [0, term.scr + term.c.y]. Everything below is dead space. */
+	int max_valid_y = term.scr + term.c.y;
 
-	if (term.scr > 0 && vimnav.y >= term.row - 1) {
-		/* Scrolled back, at bottom of screen, scroll down */
+	if (vimnav.y >= max_valid_y) {
+		/* At or past prompt position, only allow scrolling down if scrolled */
+		if (term.scr > 0) {
+			kscrolldown(&(Arg){ .i = 1 });
+			/* Recalculate after scroll and clamp if needed */
+			max_valid_y = term.scr + term.c.y;
+			if (vimnav.y > max_valid_y) {
+				vimnav.y = max_valid_y;
+				if (term.scr == 0) {
+					vimnav.x = term.c.x;
+					vimnav.last_shell_x = term.c.x;
+				}
+			}
+		}
+		/* If term.scr == 0, can't move down at all */
+	} else if (vimnav.y >= term.row - 1) {
+		/* At bottom of screen but not at prompt yet, scroll down */
 		kscrolldown(&(Arg){ .i = 1 });
-		/* Cursor stays at bottom row */
-	} else if (term.scr > 0 && vimnav.y < term.row - 1) {
-		/* Scrolled back, cursor not at bottom, just move down */
-		vimnav.y++;
-	} else if (term.scr == 0 && vimnav.y < term.c.y) {
-		/* At prompt level, can move down until shell cursor (dynamic) */
+	} else {
+		/* Can move down freely within valid range */
 		vimnav.y++;
 	}
-	/* If at shell cursor with scr == 0, don't move */
 
 	linelen = tlinelen(vimnav.y);
 	vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
@@ -3319,15 +3342,18 @@ draw(void)
 		int voy = vimnav.oy;
 		int vox = vimnav.ox;
 
-		/* When not scrolled, clamp cursor to prompt line.
+		/* Clamp cursor to valid content (prompt is at term.scr + term.c.y).
 		 * Handles Ctrl+L (clear screen) moving the prompt up. */
-		if (term.scr == 0 && vy > term.c.y) {
-			vy = term.c.y;
-			vx = term.c.x;
+		int max_valid_y = term.scr + term.c.y;
+		if (vy > max_valid_y) {
+			vy = max_valid_y;
 			vimnav.y = vy;
-			vimnav.x = vx;
-			vimnav.savedx = vx;
-			vimnav.last_shell_x = term.c.x;
+			if (term.scr == 0) {
+				vx = term.c.x;
+				vimnav.x = vx;
+				vimnav.savedx = vx;
+				vimnav.last_shell_x = term.c.x;
+			}
 		}
 
 		/* Sync cursor with shell only when shell cursor actually moved.
