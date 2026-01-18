@@ -1,4 +1,3 @@
-- [ ] Selection with v/V cannot scroll back or forward in history.
 - [ ] Add selecting with v on the prompt line while typing a cmd (and viw, viW and other selection operations)
 - [ ] Add e/E/B/W/ when in navigation mode
 - [ ] Add gg/G

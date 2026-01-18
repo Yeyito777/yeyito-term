@@ -692,12 +692,13 @@ static void
 vimnav_update_selection(void)
 {
 	int screen_y = vimnav_screen_y();
+	int anchor_screen_y = vimnav.anchor_abs_y + term.scr;
 
 	if (vimnav.mode == VIMNAV_VISUAL) {
-		selstart(vimnav.anchor_x, vimnav.anchor_y, 0);
+		selstart(vimnav.anchor_x, anchor_screen_y, 0);
 		selextend(vimnav.x, screen_y, SEL_REGULAR, 0);
 	} else if (vimnav.mode == VIMNAV_VISUAL_LINE) {
-		selstart(0, vimnav.anchor_y, 0);
+		selstart(0, anchor_screen_y, 0);
 		sel.snap = SNAP_LINE;
 		selextend(term.col - 1, screen_y, SEL_REGULAR, 0);
 	}
@@ -740,6 +741,7 @@ vimnav_scroll_up(int n)
 	int old_scr = term.scr;
 	int scrolled, remaining;
 	int i;
+	int linelen;
 
 	/* Scroll up incrementally, checking for content */
 	for (i = 0; i < n && term.scr < HISTSIZE - 1; i++) {
@@ -751,7 +753,6 @@ vimnav_scroll_up(int n)
 	}
 	scrolled = term.scr - old_scr;
 	if (scrolled > 0) {
-		selscroll(0, scrolled);
 		tfulldirt();
 	}
 
@@ -762,6 +763,13 @@ vimnav_scroll_up(int n)
 		if (vimnav.y < 0)
 			vimnav.y = 0;
 	}
+
+	/* Clamp x to line length */
+	linelen = tlinelen(vimnav.y);
+	vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
+
+	/* Update selection if in visual mode */
+	vimnav_update_selection();
 }
 
 static void
@@ -770,6 +778,7 @@ vimnav_scroll_down(int n)
 	int scrolled;
 	int max_scroll;
 	int requested = n;  /* Save original request before capping */
+	int linelen;
 
 	/* Don't scroll past where the prompt currently is */
 	max_scroll = term.scr;  /* Can scroll down at most term.scr lines */
@@ -802,6 +811,13 @@ vimnav_scroll_down(int n)
 			vimnav.last_shell_x = term.c.x;
 		}
 	}
+
+	/* Clamp x to line length */
+	linelen = tlinelen(vimnav.y);
+	vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
+
+	/* Update selection if in visual mode */
+	vimnav_update_selection();
 }
 
 static void
@@ -820,7 +836,6 @@ vimnav_move_up(void)
 			/* Can't scroll or no content, revert */
 			term.scr = old_scr;
 		} else {
-			selscroll(0, 1);
 			tfulldirt();
 		}
 		/* Cursor stays at row 0 */
@@ -992,8 +1007,8 @@ vimnav_toggle_visual_char(void)
 	} else {
 		vimnav.mode = VIMNAV_VISUAL;
 		vimnav.anchor_x = vimnav.x;
-		vimnav.anchor_y = vimnav_screen_y();
-		selstart(vimnav.x, vimnav.anchor_y, 0);
+		vimnav.anchor_abs_y = vimnav_screen_y() - term.scr;
+		selstart(vimnav.x, vimnav_screen_y(), 0);
 	}
 	tfulldirt();
 }
@@ -1001,15 +1016,17 @@ vimnav_toggle_visual_char(void)
 static void
 vimnav_toggle_visual_line(void)
 {
+	int screen_y = vimnav_screen_y();
+
 	if (vimnav.mode == VIMNAV_VISUAL_LINE) {
 		vimnav.mode = VIMNAV_NORMAL;
 		selclear();
 	} else {
 		vimnav.mode = VIMNAV_VISUAL_LINE;
-		vimnav.anchor_y = vimnav_screen_y();
-		selstart(0, vimnav.anchor_y, 0);
+		vimnav.anchor_abs_y = screen_y - term.scr;
+		selstart(0, screen_y, 0);
 		sel.snap = SNAP_LINE;
-		selextend(term.col - 1, vimnav.anchor_y, SEL_REGULAR, 0);
+		selextend(term.col - 1, screen_y, SEL_REGULAR, 0);
 	}
 	tfulldirt();
 }

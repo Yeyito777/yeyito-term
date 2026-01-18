@@ -67,7 +67,8 @@ typedef struct {
 	int savedx;         /* saved x column for vertical movement */
 	int prompt_y;       /* y position of shell prompt (can't go below) */
 	int scr_at_entry;   /* scroll position when entering vim mode */
-	int anchor_x, anchor_y; /* visual mode anchor point */
+	int anchor_x;       /* visual mode anchor x (screen column) */
+	int anchor_abs_y;   /* visual mode anchor y (absolute: screen_y - term.scr) */
 	int last_shell_x;   /* last known shell cursor x for sync detection */
 	int pending_y;      /* waiting for second y in yy sequence */
 } VimNav;
