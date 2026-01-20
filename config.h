@@ -493,3 +493,15 @@ static char ascii_printable[] =
 	" !\"#$%&'()*+,-./0123456789:;<=>?"
 	"@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_"
 	"`abcdefghijklmnopqrstuvwxyz{|}~";
+
+/*
+ * SSH indicator overlay configuration.
+ * Shows a small window in the top-right corner when SSH'd into a remote host.
+ */
+static const char *sshind_border_color = "#b18dff";  /* light purple (pairs with #1d9bf0) */
+static const char *sshind_bg_color = "#0d0015";      /* very dark purple (pairs with #00050f) */
+static const char *sshind_fg_color = "#ffffff";      /* white text */
+static const int sshind_border_width = 2;            /* border thickness */
+static const int sshind_margin = 10;                 /* margin from parent window edge */
+static const int sshind_padding = 8;                 /* internal padding */
+static const float sshind_font_scale = 1.5;          /* font size multiplier */

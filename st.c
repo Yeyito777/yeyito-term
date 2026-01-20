@@ -1270,11 +1270,13 @@ vimnav_handle_key(ulong ksym, uint state)
 
 	/* Paste */
 	case 'p':
-		/* Only paste on prompt line, strip trailing newlines */
-		if (term.scr == 0 && vimnav.y == term.c.y) {
-			vimnav_paste_strip_newlines = 1;
-			clippaste(NULL);
+		/* Snap back to prompt line and paste */
+		if (term.scr > 0) {
+			kscrolldown(&(Arg){ .i = term.scr });
 		}
+		vimnav.y = term.c.y;
+		vimnav_paste_strip_newlines = 1;
+		clippaste(NULL);
 		break;
 
 	/* Escape: clear visual selection or stay in normal mode */
@@ -2695,6 +2697,14 @@ strhandle(void)
 					vimnav_enter();
 				else if (!strcmp(strescseq.args[2], "exit"))
 					vimnav_exit();
+			}
+			return;
+		case 778: /* st custom: SSH indicator */
+			if (narg >= 3 && !strcmp(strescseq.args[1], "ssh")) {
+				if (!strcmp(strescseq.args[2], "exit"))
+					sshind_hide();
+				else
+					sshind_show(strescseq.args[2]);
 			}
 			return;
 		}

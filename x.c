@@ -4,6 +4,7 @@
 #include <limits.h>
 #include <locale.h>
 #include <signal.h>
+#include <string.h>
 #include <sys/select.h>
 #include <time.h>
 #include <unistd.h>
@@ -189,6 +190,13 @@ static int match(uint, uint);
 static void run(void);
 static void usage(void);
 
+/* SSH indicator forward declarations */
+void sshind_show(const char *host);
+void sshind_hide(void);
+void sshind_draw(void);
+void sshind_resize(void);
+int sshind_active(void);
+
 static void (*handler[LASTEvent])(XEvent *) = {
 	[KeyPress] = kpress,
 	[ClientMessage] = cmessage,
@@ -253,6 +261,18 @@ static char *opt_name  = NULL;
 static char *opt_title = NULL;
 
 static uint buttons; /* bit field of pressed buttons */
+
+/* SSH indicator overlay state */
+static struct {
+	int active;              /* whether indicator is shown */
+	char host[256];          /* hostname being displayed */
+	Window win;              /* X window for the overlay */
+	Drawable buf;            /* off-screen buffer */
+	XftDraw *draw;           /* Xft drawing context */
+	XftFont *font;           /* larger font for indicator */
+	XftColor fg, bg, border; /* colors */
+	int width, height;       /* window dimensions */
+} sshind;
 
 void
 clipcopy(const Arg *dummy)
@@ -1722,6 +1742,7 @@ void
 expose(XEvent *ev)
 {
 	redraw();
+	sshind_draw();
 }
 
 void
@@ -1994,6 +2015,7 @@ resize(XEvent *e)
 		return;
 
 	cresize(e->xconfigure.width, e->xconfigure.height);
+	sshind_resize();
 }
 
 void
@@ -2110,6 +2132,176 @@ usage(void)
 	    " [-n name] [-o file]\n"
 	    "          [-T title] [-t title] [-w windowid] -l line"
 	    " [stty_args ...]\n", argv0, argv0);
+}
+
+/* SSH indicator functions */
+int
+sshind_active(void)
+{
+	return sshind.active;
+}
+
+void
+sshind_show(const char *host)
+{
+	FcPattern *pattern;
+	XSetWindowAttributes attrs;
+	XGlyphInfo extents;
+	double fontsize;
+	int x, y;
+
+	/* Store the hostname */
+	strncpy(sshind.host, host, sizeof(sshind.host) - 1);
+	sshind.host[sizeof(sshind.host) - 1] = '\0';
+
+	/* Load a larger font for the indicator */
+	fontsize = usedfontsize * sshind_font_scale;
+	pattern = FcNameParse((const FcChar8 *)usedfont);
+	if (!pattern) {
+		fprintf(stderr, "sshind: can't parse font pattern\n");
+		return;
+	}
+	FcPatternDel(pattern, FC_PIXEL_SIZE);
+	FcPatternDel(pattern, FC_SIZE);
+	FcPatternAddDouble(pattern, FC_PIXEL_SIZE, fontsize);
+	FcConfigSubstitute(NULL, pattern, FcMatchPattern);
+	XftDefaultSubstitute(xw.dpy, xw.scr, pattern);
+
+	FcResult result;
+	FcPattern *match = FcFontMatch(NULL, pattern, &result);
+	if (!match) {
+		FcPatternDestroy(pattern);
+		fprintf(stderr, "sshind: can't match font\n");
+		return;
+	}
+
+	sshind.font = XftFontOpenPattern(xw.dpy, match);
+	if (!sshind.font) {
+		FcPatternDestroy(pattern);
+		FcPatternDestroy(match);
+		fprintf(stderr, "sshind: can't open font\n");
+		return;
+	}
+	FcPatternDestroy(pattern);
+
+	/* Calculate text dimensions */
+	XftTextExtentsUtf8(xw.dpy, sshind.font, (const FcChar8 *)sshind.host,
+	                   strlen(sshind.host), &extents);
+
+	sshind.width = extents.xOff + 2 * sshind_padding + 2 * sshind_border_width;
+	sshind.height = sshind.font->ascent + sshind.font->descent +
+	                2 * sshind_padding + 2 * sshind_border_width;
+
+	/* Allocate colors */
+	XftColorAllocName(xw.dpy, xw.vis, xw.cmap, sshind_fg_color, &sshind.fg);
+	XftColorAllocName(xw.dpy, xw.vis, xw.cmap, sshind_bg_color, &sshind.bg);
+	XftColorAllocName(xw.dpy, xw.vis, xw.cmap, sshind_border_color, &sshind.border);
+
+	/* Calculate position (top-right with margin) */
+	x = win.w - sshind.width - sshind_margin;
+	y = sshind_margin;
+
+	/* Create the overlay window */
+	attrs.background_pixel = sshind.bg.pixel;
+	attrs.border_pixel = sshind.border.pixel;
+	attrs.override_redirect = True;  /* Don't let WM manage this window */
+	attrs.event_mask = ExposureMask;
+
+	sshind.win = XCreateWindow(xw.dpy, xw.win, x, y,
+	                           sshind.width, sshind.height,
+	                           sshind_border_width,
+	                           XDefaultDepth(xw.dpy, xw.scr),
+	                           InputOutput, xw.vis,
+	                           CWBackPixel | CWBorderPixel |
+	                           CWOverrideRedirect | CWEventMask,
+	                           &attrs);
+
+	/* Create off-screen buffer for double buffering */
+	sshind.buf = XCreatePixmap(xw.dpy, sshind.win, sshind.width, sshind.height,
+	                           DefaultDepth(xw.dpy, xw.scr));
+
+	/* Create Xft drawing context */
+	sshind.draw = XftDrawCreate(xw.dpy, sshind.buf, xw.vis, xw.cmap);
+
+	/* Map the window */
+	XMapRaised(xw.dpy, sshind.win);
+
+	sshind.active = 1;
+
+	/* Initial draw */
+	sshind_draw();
+}
+
+void
+sshind_hide(void)
+{
+	if (!sshind.active)
+		return;
+
+	/* Destroy resources */
+	if (sshind.draw) {
+		XftDrawDestroy(sshind.draw);
+		sshind.draw = NULL;
+	}
+	if (sshind.buf) {
+		XFreePixmap(xw.dpy, sshind.buf);
+		sshind.buf = 0;
+	}
+	if (sshind.win) {
+		XDestroyWindow(xw.dpy, sshind.win);
+		sshind.win = 0;
+	}
+	if (sshind.font) {
+		XftFontClose(xw.dpy, sshind.font);
+		sshind.font = NULL;
+	}
+
+	/* Free colors */
+	XftColorFree(xw.dpy, xw.vis, xw.cmap, &sshind.fg);
+	XftColorFree(xw.dpy, xw.vis, xw.cmap, &sshind.bg);
+	XftColorFree(xw.dpy, xw.vis, xw.cmap, &sshind.border);
+
+	sshind.active = 0;
+	sshind.host[0] = '\0';
+}
+
+void
+sshind_draw(void)
+{
+	int tx, ty;
+
+	if (!sshind.active || !sshind.draw)
+		return;
+
+	/* Clear background */
+	XftDrawRect(sshind.draw, &sshind.bg, 0, 0, sshind.width, sshind.height);
+
+	/* Draw text centered */
+	tx = sshind_padding + sshind_border_width;
+	ty = sshind_padding + sshind_border_width + sshind.font->ascent;
+
+	XftDrawStringUtf8(sshind.draw, &sshind.fg, sshind.font, tx, ty,
+	                  (const FcChar8 *)sshind.host, strlen(sshind.host));
+
+	/* Copy buffer to window */
+	XCopyArea(xw.dpy, sshind.buf, sshind.win, dc.gc,
+	          0, 0, sshind.width, sshind.height, 0, 0);
+}
+
+void
+sshind_resize(void)
+{
+	int x, y;
+
+	if (!sshind.active)
+		return;
+
+	/* Recalculate position (top-right with margin) */
+	x = win.w - sshind.width - sshind_margin;
+	y = sshind_margin;
+
+	/* Move the window */
+	XMoveWindow(xw.dpy, sshind.win, x, y);
 }
 
 int

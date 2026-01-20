@@ -136,6 +136,13 @@ int tisvimnav_paste(void);
 void vimnav_paste_done(void);
 int vimnav_handle_key(ulong ksym, uint state);
 
+/* SSH indicator */
+void sshind_show(const char *host);
+void sshind_hide(void);
+void sshind_draw(void);
+void sshind_resize(void);
+int sshind_active(void);
+
 size_t utf8encode(Rune, char *);
 
 void *xmalloc(size_t);
