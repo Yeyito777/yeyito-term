@@ -502,6 +502,161 @@ TEST(vimnav_visual_handoff_on_k)
 	mock_term_free();
 }
 
+/* Test: Escape clears zsh-handled visual mode on prompt line */
+TEST(vimnav_escape_clears_zsh_visual)
+{
+	mock_term_init(24, 80);
+	mock_set_line(10, "% echo hello");
+
+	/* On prompt line, zsh handling visual mode */
+	term.c.x = 10;
+	term.c.y = 10;
+	term.scr = 0;
+	vimnav.zsh_cursor = 5;
+	vimnav.zsh_visual = 0;  /* Reset from previous tests */
+
+	vimnav_enter();
+	ASSERT_EQ(1, vimnav.mode);  /* VIMNAV_NORMAL */
+
+	/* Simulate zsh entering visual mode (as if user pressed v, passed to zsh) */
+	vimnav.zsh_visual = 1;
+	vimnav.zsh_visual_anchor = 2;
+	vimnav.zsh_visual_line = 0;
+
+	/* Press Escape - should clear zsh visual state */
+	mock_reset();
+	int handled = vimnav_handle_key(XK_Escape, 0);
+	ASSERT_EQ(1, handled);  /* Consumed */
+	ASSERT_EQ(0, vimnav.zsh_visual);  /* zsh visual cleared */
+	ASSERT(mock_state.selclear_calls > 0);  /* Selection cleared */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: returning to prompt from history syncs cursor to zsh */
+TEST(vimnav_cursor_sync_on_return_to_prompt)
+{
+	mock_term_init(24, 80);
+	mock_set_line(9, "previous output");
+	mock_set_line(10, "% echo hello");
+
+	/* Start on prompt line */
+	term.c.x = 10;
+	term.c.y = 10;
+	term.scr = 0;
+	vimnav.zsh_cursor = 5;  /* zsh cursor at position 5 */
+	vimnav.zsh_visual = 0;
+
+	vimnav_enter();
+	/* x = prompt_end (2) + zsh_cursor (5) = 7 */
+	ASSERT_EQ(7, vimnav.x);
+	ASSERT_EQ(10, vimnav.y);
+
+	/* Move up to history (line 9) */
+	vimnav_handle_key('k', 0);
+	ASSERT_EQ(9, vimnav.y);
+
+	/* Move cursor in history with h (st handles this, not zsh) */
+	vimnav.x = 3;  /* Simulate moving cursor in history */
+	vimnav.savedx = 3;
+
+	/* Move back down to prompt - should sync to zsh cursor, not savedx */
+	vimnav_handle_key('j', 0);
+	ASSERT_EQ(10, vimnav.y);
+	/* Should be synced to zsh cursor: prompt_end (2) + zsh_cursor (5) = 7 */
+	ASSERT_EQ(7, vimnav.x);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: visual mode prevents cursor sync until selection done */
+TEST(vimnav_visual_mode_defers_cursor_sync)
+{
+	mock_term_init(24, 80);
+	mock_set_line(9, "previous output");
+	mock_set_line(10, "% echo hello");
+
+	term.c.x = 10;
+	term.c.y = 10;
+	term.scr = 0;
+	vimnav.zsh_cursor = 5;
+	vimnav.zsh_visual = 0;
+
+	vimnav_enter();
+	ASSERT_EQ(7, vimnav.x);  /* prompt_end (2) + 5 */
+
+	/* Move up and enter visual mode */
+	vimnav_handle_key('k', 0);
+	ASSERT_EQ(9, vimnav.y);
+
+	/* Enter visual mode in history */
+	vimnav_handle_key('v', 0);
+	ASSERT_EQ(2, vimnav.mode);  /* VIMNAV_VISUAL */
+
+	/* Move cursor in history */
+	vimnav.x = 3;
+	vimnav.savedx = 3;
+
+	/* Move back to prompt in visual mode - should NOT sync (preserves selection) */
+	vimnav_handle_key('j', 0);
+	ASSERT_EQ(10, vimnav.y);
+	ASSERT_EQ(3, vimnav.x);  /* savedx, not zsh cursor */
+
+	/* Exit visual mode with Escape - NOW should sync */
+	mock_reset();
+	vimnav_handle_key(XK_Escape, 0);
+	ASSERT_EQ(1, vimnav.mode);  /* VIMNAV_NORMAL */
+	ASSERT_EQ(7, vimnav.x);  /* Synced to zsh cursor */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: h/l keys work on history lines even when prompt ends with just "% " (trailing space stripped) */
+TEST(vimnav_hl_works_on_history_with_empty_prompt)
+{
+	mock_term_init(24, 80);
+
+	/* Previous prompt with command - has "% " followed by content */
+	mock_set_line(8, "[user@host]% wc -l *");
+	/* Command output */
+	mock_set_line(9, "    100 total");
+	/* Current prompt: ends with "% " - tlinelen strips trailing space, leaving just "%" */
+	mock_set_line(10, "[user@host]% ");
+
+	/* Cursor on current prompt line */
+	term.c.x = 13;
+	term.c.y = 10;
+	term.scr = 0;
+	vimnav.zsh_cursor = 0;
+
+	vimnav_enter();
+	ASSERT_EQ(10, vimnav.y);
+
+	/* Move up to output line (line 9) */
+	vimnav_handle_key('k', 0);
+	ASSERT_EQ(9, vimnav.y);
+
+	/* h/l should be handled by st (return 1), NOT passed to zsh (return 0) */
+	/* This was the bug: vimnav_is_prompt_space() incorrectly returned true */
+	/* because it found the OLD prompt on line 8 as prompt_start */
+	vimnav.x = 5;
+	vimnav.savedx = 5;
+
+	int handled = vimnav_handle_key('h', 0);
+	ASSERT_EQ(1, handled);  /* st handles it */
+	ASSERT_EQ(4, vimnav.x);  /* Cursor moved left */
+
+	handled = vimnav_handle_key('l', 0);
+	ASSERT_EQ(1, handled);  /* st handles it */
+	ASSERT_EQ(5, vimnav.x);  /* Cursor moved right */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
 /* Test suite */
 TEST_SUITE(vimnav)
 {
@@ -525,6 +680,10 @@ TEST_SUITE(vimnav)
 	RUN_TEST(vimnav_destructive_ops_prompt_passthrough);
 	RUN_TEST(vimnav_inherits_zsh_visual);
 	RUN_TEST(vimnav_visual_handoff_on_k);
+	RUN_TEST(vimnav_escape_clears_zsh_visual);
+	RUN_TEST(vimnav_cursor_sync_on_return_to_prompt);
+	RUN_TEST(vimnav_visual_mode_defers_cursor_sync);
+	RUN_TEST(vimnav_hl_works_on_history_with_empty_prompt);
 }
 
 int

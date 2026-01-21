@@ -12,3 +12,4 @@
 
 # Next major update
 - [ ] Add :, ?, / (Search with regex)
+- [ ] Find a way to sync zsh's cursor to st's not the other way around and replace instances in the code where st is synced to zsh with that. There are many such instances in vimnav.c

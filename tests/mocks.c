@@ -101,11 +101,17 @@ tlinelen(int y)
 		return 0;
 
 	line = term.line[y];
+	i = term.col;
 
-	for (i = term.col - 1; i >= 0 && line[i].u == 0; i--)
-		;
+	/* Strip trailing nulls (mock-specific: unwritten cells are 0) */
+	while (i > 0 && line[i - 1].u == 0)
+		--i;
 
-	return i + 1;
+	/* Strip trailing spaces (matches real st behavior) */
+	while (i > 0 && line[i - 1].u == ' ')
+		--i;
+
+	return i;
 }
 
 void

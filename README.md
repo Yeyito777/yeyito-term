@@ -47,6 +47,12 @@ for widget in visual-mode visual-line-mode; do
   zle -N $widget _st_visual_wrapper 2>/dev/null  # May not exist in all zsh versions
 done
 
+# Wrap text object widgets (for viw, viW, etc.)
+for widget in select-in-word select-a-word select-in-blank-word select-a-blank-word \
+              select-in-shell-word select-a-shell-word; do
+  zle -N $widget _st_cursor_wrapper
+done
+
 function zle-keymap-select {
   if [[ $KEYMAP == vicmd ]]; then
     echo -ne '\e[2 q'

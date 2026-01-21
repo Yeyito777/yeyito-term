@@ -99,8 +99,11 @@ static int vimnav_paste_strip_newlines = 0;
 
 /* Forward declarations */
 static int vimnav_find_prompt_end(int screen_y);
+static int vimnav_find_prompt_start_y(void);
+static int vimnav_is_prompt_space(int y);
 static void vimnav_update_selection(void);
 static void vimnav_notify_zsh_visual_end(void);
+static void vimnav_sync_to_zsh_cursor(void);
 
 /* Notify zsh that visual mode selection has ended (send Escape) */
 static void
@@ -110,6 +113,18 @@ vimnav_notify_zsh_visual_end(void)
 		/* Send Escape to zsh to exit visual mode */
 		ttywrite("\033", 1, 1);
 		vimnav.zsh_visual = 0;
+	}
+}
+
+/* Sync st cursor to zsh cursor position (call when returning to prompt space) */
+static void
+vimnav_sync_to_zsh_cursor(void)
+{
+	if (vimnav_is_prompt_space(vimnav.y)) {
+		int prompt_end = vimnav_find_prompt_end(vimnav.y);
+		vimnav.x = prompt_end + vimnav.zsh_cursor;
+		vimnav.savedx = vimnav.x;
+		vimnav.last_shell_x = vimnav.x;
 	}
 }
 
@@ -333,7 +348,7 @@ vimnav_move_up(void)
 {
 	int linelen;
 	int old_scr = term.scr;
-	int was_on_prompt = (term.scr == 0 && vimnav.y == term.c.y);
+	int was_in_prompt_space = vimnav_is_prompt_space(vimnav.y);
 
 	if (vimnav.y > 0) {
 		/* Move cursor up within visible area */
@@ -350,8 +365,9 @@ vimnav_move_up(void)
 		/* Cursor stays at row 0 */
 	}
 
-	/* Handoff: if we were on prompt line with zsh in visual mode, inherit selection */
-	if (was_on_prompt && vimnav.zsh_visual && vimnav.mode == VIMNAV_NORMAL) {
+	/* Handoff: if we left prompt space with zsh in visual mode, inherit selection */
+	if (was_in_prompt_space && !vimnav_is_prompt_space(vimnav.y) &&
+	    vimnav.zsh_visual && vimnav.mode == VIMNAV_NORMAL) {
 		int prompt_end = vimnav_find_prompt_end(term.c.y);
 		vimnav.anchor_x = prompt_end + vimnav.zsh_visual_anchor;
 		vimnav.anchor_abs_y = term.c.y - term.scr;  /* Anchor stays on prompt line */
@@ -371,6 +387,7 @@ static void
 vimnav_move_down(void)
 {
 	int linelen;
+	int was_in_prompt_space = vimnav_is_prompt_space(vimnav.y);
 	/* The prompt is at screen row (term.scr + term.c.y) in scrolled view.
 	 * Valid content is rows [0, term.scr + term.c.y]. Everything below is dead space. */
 	int max_valid_y = term.scr + term.c.y;
@@ -398,8 +415,18 @@ vimnav_move_down(void)
 		vimnav.y++;
 	}
 
-	linelen = tlinelen(vimnav.y);
-	vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
+	/* If entering prompt space from history in normal mode, sync to zsh cursor.
+	 * Don't sync during visual mode - wait until selection is done. */
+	if (!was_in_prompt_space && vimnav_is_prompt_space(vimnav.y) &&
+	    vimnav.mode == VIMNAV_NORMAL) {
+		int prompt_end = vimnav_find_prompt_end(vimnav.y);
+		vimnav.x = prompt_end + vimnav.zsh_cursor;
+		vimnav.savedx = vimnav.x;
+		vimnav.last_shell_x = vimnav.x;
+	} else {
+		linelen = tlinelen(vimnav.y);
+		vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
+	}
 	vimnav_update_selection();
 }
 
@@ -584,7 +611,7 @@ vimnav_find_prompt_end(int screen_y)
 	int linelen = tlinelen(screen_y);
 	int last_delim = -1;
 
-	for (int i = 0; i < linelen - 1; i++) {
+	for (int i = 0; i < linelen && i + 1 < term.col; i++) {
 		Rune c = line[i].u;
 		Rune next = line[i + 1].u;
 		if ((c == '%' || c == '$' || c == '>' || c == '#') && next == ' ') {
@@ -593,6 +620,58 @@ vimnav_find_prompt_end(int screen_y)
 	}
 
 	return last_delim > 0 ? last_delim : 0;
+}
+
+static int
+vimnav_has_main_prompt(int screen_y)
+{
+	/* Check if this line has a main prompt (not a continuation prompt).
+	 * Main prompts typically have '% ' or '$ ' or '# ' at the start or after path.
+	 * Continuation prompts are just '> ' at the start. */
+	Line line = TLINE(screen_y);
+	int linelen = tlinelen(screen_y);
+
+	for (int i = 0; i < linelen && i + 1 < term.col; i++) {
+		Rune c = line[i].u;
+		Rune next = line[i + 1].u;
+		/* Main prompt delimiters (not >) */
+		if ((c == '%' || c == '$' || c == '#') && next == ' ') {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+static int
+vimnav_find_prompt_start_y(void)
+{
+	/* Find the Y position where the prompt starts by searching upward
+	 * from term.c.y for a line with a main prompt delimiter.
+	 * For multi-line commands, this finds the first line of the command. */
+	int y;
+
+	for (y = term.c.y; y >= 0; y--) {
+		if (vimnav_has_main_prompt(y)) {
+			return y;
+		}
+	}
+	/* If no prompt found, assume current line */
+	return term.c.y;
+}
+
+static int
+vimnav_is_prompt_space(int y)
+{
+	/* Check if y is within the prompt space (multi-line command region).
+	 * Returns 1 if y is between prompt_start and term.c.y (inclusive). */
+	int prompt_start;
+
+	if (term.scr != 0) {
+		return 0;  /* Not at bottom of scrollback */
+	}
+
+	prompt_start = vimnav_find_prompt_start_y();
+	return (y >= prompt_start && y <= term.c.y);
 }
 
 static void
@@ -729,8 +808,8 @@ vimnav_handle_key(ulong ksym, uint state)
 	switch (ksym) {
 	/* Movement keys */
 	case 'h':
-		/* On prompt line: always pass to zsh (zsh has cursor authority) */
-		if (term.scr == 0 && vimnav.y == term.c.y) {
+		/* In prompt space: always pass to zsh (zsh has cursor authority) */
+		if (vimnav_is_prompt_space(vimnav.y)) {
 			return 0;  /* Pass through to zsh */
 		}
 		vimnav_move_left();
@@ -742,15 +821,15 @@ vimnav_handle_key(ulong ksym, uint state)
 		vimnav_move_up();
 		break;
 	case 'l':
-		/* On prompt line: always pass to zsh (zsh has cursor authority) */
-		if (term.scr == 0 && vimnav.y == term.c.y) {
+		/* In prompt space: always pass to zsh (zsh has cursor authority) */
+		if (vimnav_is_prompt_space(vimnav.y)) {
 			return 0;  /* Pass through to zsh */
 		}
 		vimnav_move_right();
 		break;
 	case '0':
-		/* On prompt line: always pass to zsh (zsh has cursor authority) */
-		if (term.scr == 0 && vimnav.y == term.c.y) {
+		/* In prompt space: always pass to zsh (zsh has cursor authority) */
+		if (vimnav_is_prompt_space(vimnav.y)) {
 			return 0;  /* Pass through to zsh */
 		}
 		vimnav_move_bol();
@@ -758,8 +837,8 @@ vimnav_handle_key(ulong ksym, uint state)
 	case '$':
 	case 'w':
 	case 'b':
-		/* On prompt line: always pass to zsh (zsh has cursor authority) */
-		if (term.scr == 0 && vimnav.y == term.c.y) {
+		/* In prompt space: always pass to zsh (zsh has cursor authority) */
+		if (vimnav_is_prompt_space(vimnav.y)) {
 			return 0;  /* Pass through to zsh */
 		}
 		if (ksym == '$')
@@ -778,8 +857,8 @@ vimnav_handle_key(ulong ksym, uint state)
 
 	/* Visual mode */
 	case 'v':
-		/* On prompt line: pass to zsh (zsh renders char selection) */
-		if (term.scr == 0 && vimnav.y == term.c.y) {
+		/* In prompt space: pass to zsh (zsh handles char selection) */
+		if (vimnav_is_prompt_space(vimnav.y)) {
 			return 0;  /* Pass through to zsh */
 		}
 		vimnav_toggle_visual_char();
@@ -793,8 +872,8 @@ vimnav_handle_key(ulong ksym, uint state)
 	case 'x':
 	case 'd':
 	case 'c':
-		/* On prompt line: pass to zsh (zsh handles editing) */
-		if (term.scr == 0 && vimnav.y == term.c.y) {
+		/* In prompt space: pass to zsh (zsh handles editing) */
+		if (vimnav_is_prompt_space(vimnav.y)) {
 			return 0;  /* Pass through to zsh */
 		}
 		/* In history: disabled - can't delete history */
@@ -808,6 +887,7 @@ vimnav_handle_key(ulong ksym, uint state)
 			vimnav.mode = VIMNAV_NORMAL;
 			vimnav_notify_zsh_visual_end();  /* Tell zsh to exit visual mode */
 			selclear();
+			vimnav_sync_to_zsh_cursor();  /* Sync cursor if in prompt space */
 			tfulldirt();
 		} else {
 			/* No selection: yank line (or just command on prompt line) */
@@ -831,6 +911,12 @@ vimnav_handle_key(ulong ksym, uint state)
 		if (vimnav.mode == VIMNAV_VISUAL || vimnav.mode == VIMNAV_VISUAL_LINE) {
 			vimnav.mode = VIMNAV_NORMAL;
 			vimnav_notify_zsh_visual_end();  /* Tell zsh to exit visual mode */
+			selclear();
+			vimnav_sync_to_zsh_cursor();  /* Sync cursor if in prompt space */
+			tfulldirt();
+		} else if (vimnav.zsh_visual) {
+			/* zsh is in visual mode on prompt line - clear st's rendering and notify zsh */
+			vimnav_notify_zsh_visual_end();  /* Sends Escape to zsh and clears flag */
 			selclear();
 			tfulldirt();
 		}
