@@ -1,6 +1,6 @@
-- [ ] Move the ssh indicator to another file, move the vim motions to another file
-- [ ] Add selection text objects viw, vi", viW, vi(, vi), vi[, vi], vi{, vi} // These should also work with va(object)
 - [ ] Add selecting with v on the prompt line while typing a cmd (and viw, viW and other selection operations)
+- [ ] Add f/F, ;, searching in nav mode 
+- [ ] Add selection text objects viw, vi", viW, vi(, vi), vi[, vi], vi{, vi} // These should also work with va(object)
 - [ ] Add e/E/B/W/ when in navigation mode
 - [ ] Add J/L/M cursor movement (bounded by the prompt line)
 - [ ] Add Ctrl+num keybindings for cursor jumping (bounded by the prompt line)

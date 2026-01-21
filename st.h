@@ -1,5 +1,8 @@
 /* See LICENSE for license details. */
 
+#ifndef ST_H
+#define ST_H
+
 #include <stdint.h>
 #include <sys/types.h>
 
@@ -53,26 +56,6 @@ enum selection_snap {
 	SNAP_LINE = 2
 };
 
-enum vimnav_mode {
-	VIMNAV_INACTIVE = 0,
-	VIMNAV_NORMAL = 1,
-	VIMNAV_VISUAL = 2,
-	VIMNAV_VISUAL_LINE = 3,
-};
-
-typedef struct {
-	int mode;           /* vimnav_mode state */
-	int x, y;           /* vim cursor position (screen row) */
-	int ox, oy;         /* old position for cursor redraw */
-	int savedx;         /* saved x column for vertical movement */
-	int prompt_y;       /* y position of shell prompt (can't go below) */
-	int scr_at_entry;   /* scroll position when entering vim mode */
-	int anchor_x;       /* visual mode anchor x (screen column) */
-	int anchor_abs_y;   /* visual mode anchor y (absolute: screen_y - term.scr) */
-	int last_shell_x;   /* last known shell cursor x for sync detection */
-	int pending_y;      /* waiting for second y in yy sequence */
-} VimNav;
-
 typedef unsigned char uchar;
 typedef unsigned int uint;
 typedef unsigned long ulong;
@@ -111,6 +94,8 @@ void toggleprinter(const Arg *);
 
 int tattrset(int);
 int tisaltscreen(void);
+int tlinelen(int);
+void tfulldirt(void);
 void tnew(int, int);
 void tresize(int, int);
 void tsetdirtattr(int);
@@ -162,3 +147,5 @@ extern unsigned int tabspaces;
 extern unsigned int defaultfg;
 extern unsigned int defaultbg;
 extern unsigned int defaultcs;
+
+#endif /* ST_H */
