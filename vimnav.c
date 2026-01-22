@@ -889,6 +889,12 @@ vimnav_handle_key(ulong ksym, uint state)
 			selclear();
 			vimnav_sync_to_zsh_cursor();  /* Sync cursor if in prompt space */
 			tfulldirt();
+		} else if (vimnav.zsh_visual) {
+			/* zsh is in visual mode on prompt line - yank and clear */
+			vimnav_yank_selection();
+			vimnav_notify_zsh_visual_end();  /* Tell zsh to exit visual mode */
+			selclear();
+			tfulldirt();
 		} else {
 			/* No selection: yank line (or just command on prompt line) */
 			vimnav_yank_line();

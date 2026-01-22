@@ -614,6 +614,50 @@ TEST(vimnav_visual_mode_defers_cursor_sync)
 	mock_term_free();
 }
 
+/* Test: y clears zsh visual mode on prompt line so k doesn't inherit stale selection */
+TEST(vimnav_yank_clears_zsh_visual)
+{
+	mock_term_init(24, 80);
+	mock_set_line(9, "previous output");
+	mock_set_line(10, "% echo hello");
+
+	/* On prompt line */
+	term.c.x = 10;
+	term.c.y = 10;
+	term.scr = 0;
+	vimnav.zsh_cursor = 5;
+	vimnav.zsh_visual = 0;
+
+	vimnav_enter();
+	ASSERT_EQ(1, vimnav.mode);  /* VIMNAV_NORMAL */
+
+	/* Simulate zsh entering visual mode (user pressed v, passed to zsh) */
+	vimnav.zsh_visual = 1;
+	vimnav.zsh_visual_anchor = 2;
+	vimnav.zsh_visual_line = 0;
+
+	/* Simulate zsh creating a selection that st renders */
+	selstart(4, 10, 0);  /* anchor_x = prompt_end (2) + anchor (2) = 4 */
+	selextend(7, 10, 1, 0);
+
+	/* Press y to yank - should clear zsh_visual */
+	mock_reset();
+	int handled = vimnav_handle_key('y', 0);
+	ASSERT_EQ(1, handled);  /* Consumed */
+	ASSERT_EQ(0, vimnav.zsh_visual);  /* zsh visual cleared by yank */
+	ASSERT(mock_state.selclear_calls > 0);  /* Selection cleared */
+
+	/* Now press k to move up - should NOT inherit stale selection */
+	mock_reset();
+	handled = vimnav_handle_key('k', 0);
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(9, vimnav.y);  /* Moved up */
+	ASSERT_EQ(1, vimnav.mode);  /* Still VIMNAV_NORMAL, not VIMNAV_VISUAL */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
 /* Test: h/l keys work on history lines even when prompt ends with just "% " (trailing space stripped) */
 TEST(vimnav_hl_works_on_history_with_empty_prompt)
 {
@@ -683,6 +727,7 @@ TEST_SUITE(vimnav)
 	RUN_TEST(vimnav_escape_clears_zsh_visual);
 	RUN_TEST(vimnav_cursor_sync_on_return_to_prompt);
 	RUN_TEST(vimnav_visual_mode_defers_cursor_sync);
+	RUN_TEST(vimnav_yank_clears_zsh_visual);
 	RUN_TEST(vimnav_hl_works_on_history_with_empty_prompt);
 }
 
