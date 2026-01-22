@@ -1,8 +1,6 @@
-- [ ] Use this terminal for a couple of days and fix any bugs you find with it
-- [ ] Add selection text objects viw, vi", viW, vi(, vi), vi[, vi], vi{, vi} // These should also work with va(object)
 - [ ] Add f/F, ;, searching in nav mode
-- [ ] Add e/E/B/W/ when in navigation mode
 - [ ] Add J/L/M cursor movement (bounded by the prompt line)
+- [ ] Add Ctrl+num cursor movement relative to the first line (nvim config-like)
 - [ ] Add Ctrl+num keybindings for cursor jumping (bounded by the prompt line)
 - [ ] Add gg/G
 - [ ] Add zz
