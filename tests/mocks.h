@@ -5,6 +5,7 @@
 #define MOCKS_H
 
 #include "../st.h"
+#include "../vimnav.h"
 
 /* Terminal mode flags from st.c */
 enum term_mode {

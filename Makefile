@@ -80,8 +80,8 @@ test_sshind: tests/test_sshind.o
 tests/test_scrollback.o: tests/test_scrollback.c tests/test.h tests/mocks.h st.h
 	$(CC) $(TESTFLAGS) -c tests/test_scrollback.c -o tests/test_scrollback.o
 
-test_scrollback: tests/mocks.o tests/test_scrollback.o
-	$(CC) -o tests/test_scrollback tests/mocks.o tests/test_scrollback.o
+test_scrollback: tests/mocks.o tests/test_scrollback.o tests/vimnav.o
+	$(CC) -o tests/test_scrollback tests/mocks.o tests/test_scrollback.o tests/vimnav.o
 
 test: test_vimnav test_sshind test_scrollback
 	@echo "Running tests..."

@@ -1783,6 +1783,273 @@ TEST(vimnav_scroll_reaches_oldest_history)
 	mock_term_free();
 }
 
+/* Test: f finds character forward on current line */
+TEST(vimnav_f_finds_char_forward)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "hello world test");
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.x = 0;  /* Start at 'h' */
+	vimnav.y = 5;
+	vimnav.savedx = 0;
+
+	/* Press 'f' then 'o' to find first 'o' */
+	int handled = vimnav_handle_key('f', 0);
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ('f', vimnav.pending_find);
+
+	handled = vimnav_handle_key('o', 0);
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(0, vimnav.pending_find);  /* Cleared */
+	ASSERT_EQ(4, vimnav.x);  /* 'o' in "hello" at index 4 */
+
+	/* State should be saved for repeat */
+	ASSERT_EQ('o', vimnav.last_find_char);
+	ASSERT_EQ(1, vimnav.last_find_forward);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: F finds character backward on current line */
+TEST(vimnav_F_finds_char_backward)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "hello world test");
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.x = 15;  /* Start at 't' of "test" */
+	vimnav.y = 5;
+	vimnav.savedx = 15;
+
+	/* Press 'F' then 'o' to find 'o' backward */
+	int handled = vimnav_handle_key('F', 0);
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ('F', vimnav.pending_find);
+
+	handled = vimnav_handle_key('o', 0);
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(0, vimnav.pending_find);  /* Cleared */
+	ASSERT_EQ(7, vimnav.x);  /* 'o' in "world" at index 7 */
+
+	/* State should be saved for repeat */
+	ASSERT_EQ('o', vimnav.last_find_char);
+	ASSERT_EQ(0, vimnav.last_find_forward);  /* Backward */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: f stays put when char not found */
+TEST(vimnav_f_no_match_stays_put)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "hello world");
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.x = 3;
+	vimnav.y = 5;
+	vimnav.savedx = 3;
+
+	/* Press 'f' then 'z' - not in line */
+	vimnav_handle_key('f', 0);
+	vimnav_handle_key('z', 0);
+
+	ASSERT_EQ(3, vimnav.x);  /* Didn't move */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: ; repeats f search forward */
+TEST(vimnav_semicolon_repeats_f_forward)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "hello world woot");
+	/* Indices:      01234567890123456
+	 * 'o' at: 4, 7, 13, 14 */
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.x = 0;
+	vimnav.y = 5;
+	vimnav.savedx = 0;
+
+	/* Find first 'o' with fo */
+	vimnav_handle_key('f', 0);
+	vimnav_handle_key('o', 0);
+	ASSERT_EQ(4, vimnav.x);  /* First 'o' at index 4 */
+
+	/* Press ; to find next 'o' */
+	int handled = vimnav_handle_key(';', 0);
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(7, vimnav.x);  /* Second 'o' in "world" at index 7 */
+
+	/* Press ; again */
+	handled = vimnav_handle_key(';', 0);
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(13, vimnav.x);  /* Third 'o' in "woot" at index 13 */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: , repeats f search in reverse (backward) */
+TEST(vimnav_comma_repeats_f_backward)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "hello world woot");
+	/* Indices:      01234567890123456
+	 * 'o' at: 4, 7, 13, 14 */
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.x = 0;
+	vimnav.y = 5;
+	vimnav.savedx = 0;
+
+	/* Find 'o' multiple times to get to third one */
+	vimnav_handle_key('f', 0);
+	vimnav_handle_key('o', 0);
+	vimnav_handle_key(';', 0);
+	vimnav_handle_key(';', 0);
+	ASSERT_EQ(13, vimnav.x);  /* At third 'o' */
+
+	/* Press , to go back (opposite direction) */
+	int handled = vimnav_handle_key(',', 0);
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(7, vimnav.x);  /* Back to second 'o' */
+
+	/* Press , again */
+	handled = vimnav_handle_key(',', 0);
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(4, vimnav.x);  /* Back to first 'o' */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: ; repeats F search backward */
+TEST(vimnav_semicolon_repeats_F_backward)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "hello world woot");
+	/* Indices:      01234567890123456
+	 * 'o' at: 4, 7, 13, 14 */
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.x = 15;  /* Start at 't' of "woot" */
+	vimnav.y = 5;
+	vimnav.savedx = 15;
+
+	/* Find 'o' backward with Fo */
+	vimnav_handle_key('F', 0);
+	vimnav_handle_key('o', 0);
+	ASSERT_EQ(14, vimnav.x);  /* Second 'o' in "woot" at index 14 */
+
+	/* Press ; to continue backward */
+	int handled = vimnav_handle_key(';', 0);
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(13, vimnav.x);  /* First 'o' in "woot" at index 13 */
+
+	/* Press ; again */
+	handled = vimnav_handle_key(';', 0);
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(7, vimnav.x);  /* 'o' in "world" */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: , reverses F search (goes forward) */
+TEST(vimnav_comma_repeats_F_forward)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "hello world woot");
+	/* Indices:      01234567890123456
+	 * 'o' at: 4, 7, 13, 14 */
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.x = 15;
+	vimnav.y = 5;
+	vimnav.savedx = 15;
+
+	/* Find 'o' backward with Fo, then ; twice */
+	vimnav_handle_key('F', 0);
+	vimnav_handle_key('o', 0);
+	vimnav_handle_key(';', 0);
+	vimnav_handle_key(';', 0);
+	ASSERT_EQ(7, vimnav.x);  /* At 'o' in "world" */
+
+	/* Press , to go forward (opposite of F's direction) */
+	int handled = vimnav_handle_key(',', 0);
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(13, vimnav.x);  /* Forward to first 'o' in "woot" */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: f/F/;/, pass through on prompt line */
+TEST(vimnav_fF_prompt_passthrough)
+{
+	mock_term_init(24, 80);
+	mock_set_line(10, "% echo hello");
+
+	term.c.x = 5;
+	term.c.y = 10;
+	term.scr = 0;
+	vimnav.zsh_cursor = 3;
+
+	vimnav_enter();
+
+	/* f on prompt line should pass to zsh */
+	int handled = vimnav_handle_key('f', 0);
+	ASSERT_EQ(0, handled);
+
+	/* F on prompt line should pass to zsh */
+	handled = vimnav_handle_key('F', 0);
+	ASSERT_EQ(0, handled);
+
+	/* ; on prompt line should pass to zsh */
+	handled = vimnav_handle_key(';', 0);
+	ASSERT_EQ(0, handled);
+
+	/* , on prompt line should pass to zsh */
+	handled = vimnav_handle_key(',', 0);
+	ASSERT_EQ(0, handled);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
 /* Test suite */
 TEST_SUITE(vimnav)
 {
@@ -1847,6 +2114,15 @@ TEST_SUITE(vimnav)
 	RUN_TEST(vimnav_ctrl_u_after_clear);
 	RUN_TEST(vimnav_scroll_stops_at_empty_history);
 	RUN_TEST(vimnav_scroll_reaches_oldest_history);
+	/* f/F find character tests */
+	RUN_TEST(vimnav_f_finds_char_forward);
+	RUN_TEST(vimnav_F_finds_char_backward);
+	RUN_TEST(vimnav_f_no_match_stays_put);
+	RUN_TEST(vimnav_semicolon_repeats_f_forward);
+	RUN_TEST(vimnav_comma_repeats_f_backward);
+	RUN_TEST(vimnav_semicolon_repeats_F_backward);
+	RUN_TEST(vimnav_comma_repeats_F_forward);
+	RUN_TEST(vimnav_fF_prompt_passthrough);
 }
 
 int

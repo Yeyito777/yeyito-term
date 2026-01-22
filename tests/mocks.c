@@ -8,6 +8,7 @@
 #include <wchar.h>
 
 #include "mocks.h"
+#include "../vimnav.h"
 
 /* Global mock state */
 Term term;
@@ -20,6 +21,7 @@ mock_reset(void)
 {
 	memset(&mock_state, 0, sizeof(mock_state));
 	memset(&sel, 0, sizeof(sel));
+	/* Note: don't reset vimnav here - only in mock_term_init */
 }
 
 void
@@ -28,6 +30,7 @@ mock_term_init(int rows, int cols)
 	int i;
 
 	memset(&term, 0, sizeof(term));
+	memset(&vimnav, 0, sizeof(vimnav));
 	term.row = rows;
 	term.col = cols;
 	term.maxcol = cols;

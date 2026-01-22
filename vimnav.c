@@ -678,6 +678,46 @@ vimnav_move_WORD_end(void)
 	vimnav_update_selection();
 }
 
+/* Find character on current line (f/F command)
+ * forward: 1 for f (search right), 0 for F (search left)
+ * Returns 1 if found and moved, 0 otherwise */
+static int
+vimnav_find_char(Rune c, int forward)
+{
+	int screen_y = vimnav_screen_y();
+	int x = vimnav.x;
+	int linelen = tlinelen(screen_y);
+	Line line = TLINE(screen_y);
+	int i;
+
+	if (linelen == 0)
+		return 0;
+
+	if (forward) {
+		/* Search forward from x+1 to end of line */
+		for (i = x + 1; i < linelen; i++) {
+			if (line[i].u == c) {
+				vimnav.x = i;
+				vimnav.savedx = i;
+				vimnav_update_selection();
+				return 1;
+			}
+		}
+	} else {
+		/* Search backward from x-1 to start of line */
+		for (i = x - 1; i >= 0; i--) {
+			if (line[i].u == c) {
+				vimnav.x = i;
+				vimnav.savedx = i;
+				vimnav_update_selection();
+				return 1;
+			}
+		}
+	}
+
+	return 0;  /* Character not found */
+}
+
 /* Text object selection helpers */
 
 /* Find word boundaries around cursor position (inner = exclude delimiters) */
@@ -1222,6 +1262,7 @@ vimnav_enter(void)
 	vimnav.prompt_y = term.c.y;  /* Can't go below this row when scr == 0 */
 	vimnav.scr_at_entry = term.scr;  /* Track scroll position at entry (should be 0) */
 	vimnav.pending_textobj = 0;  /* Clear any pending text object state */
+	vimnav.pending_find = 0;     /* Clear any pending find state */
 
 	/* Use zsh-reported cursor position for x coordinate */
 	prompt_end = vimnav_find_prompt_end(vimnav.y);
@@ -1258,6 +1299,7 @@ vimnav_exit(void)
 
 	vimnav.mode = VIMNAV_INACTIVE;
 	vimnav.pending_textobj = 0;
+	vimnav.pending_find = 0;
 	selclear();
 	tfulldirt();
 }
@@ -1278,6 +1320,17 @@ vimnav_handle_key(ulong ksym, uint state)
 		if (vimnav_handle_textobj(ksym, inner))
 			return 1;
 		/* If text object not found, fall through to normal handling */
+	}
+
+	/* Handle pending find (after 'f' or 'F' was pressed) */
+	if (vimnav.pending_find) {
+		int forward = (vimnav.pending_find == 'f');
+		vimnav.pending_find = 0;  /* Clear pending state */
+		/* Store the search for repeat with ;/, */
+		vimnav.last_find_char = ksym;
+		vimnav.last_find_forward = forward;
+		vimnav_find_char(ksym, forward);
+		return 1;
 	}
 
 	/* Handle Ctrl+scroll commands */
@@ -1372,6 +1425,36 @@ vimnav_handle_key(ulong ksym, uint state)
 		vimnav_move_bottom();
 		break;
 
+	/* Find character on line (f/F) */
+	case 'f':
+	case 'F':
+		/* In prompt space: pass to zsh */
+		if (vimnav_is_prompt_space(vimnav.y)) {
+			return 0;
+		}
+		vimnav.pending_find = ksym;
+		break;
+
+	/* Repeat find (;/,) */
+	case ';':
+		/* In prompt space: pass to zsh */
+		if (vimnav_is_prompt_space(vimnav.y)) {
+			return 0;
+		}
+		if (vimnav.last_find_char) {
+			vimnav_find_char(vimnav.last_find_char, vimnav.last_find_forward);
+		}
+		break;
+	case ',':
+		/* In prompt space: pass to zsh */
+		if (vimnav_is_prompt_space(vimnav.y)) {
+			return 0;
+		}
+		if (vimnav.last_find_char) {
+			vimnav_find_char(vimnav.last_find_char, !vimnav.last_find_forward);
+		}
+		break;
+
 	/* Visual mode */
 	case 'v':
 		/* In prompt space: pass to zsh (zsh handles char selection) */
@@ -1440,11 +1523,10 @@ vimnav_handle_key(ulong ksym, uint state)
 		}
 		break;
 
-	/* Paste */
+	/* Paste - snap to prompt and let zsh handle it */
 	case 'p':
 		vimnav_snap_to_prompt();
-		vimnav_paste_strip_newlines = 1;
-		clippaste(NULL);
+		ttywrite("p", 1, 1);
 		break;
 
 	/* Escape: clear visual selection or stay in normal mode */

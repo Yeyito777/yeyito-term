@@ -25,6 +25,10 @@ typedef struct {
 	int zsh_visual_line;   /* 1 if zsh visual mode is line-wise (V) */
 	/* Text object pending state */
 	int pending_textobj; /* 'i' for inner, 'a' for around, 0 for none */
+	/* f/F find character state */
+	int pending_find;    /* 'f' or 'F' when waiting for char, 0 otherwise */
+	Rune last_find_char; /* character from last f/F search */
+	int last_find_forward; /* 1 if last search was f (forward), 0 if F (backward) */
 } VimNav;
 
 /* Global vim navigation state (defined in vimnav.c) */

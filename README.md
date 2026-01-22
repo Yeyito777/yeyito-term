@@ -85,6 +85,18 @@ bindkey -M vicmd 'K' up-line-or-history
 # Make zsh's visual mode highlight invisible (st renders the selection instead)
 zle_highlight=(region:none)
 
+# Paste from X11 clipboard after cursor (vim-style 'p')
+function vi-put-after-clipboard {
+  CUTBUFFER=$(xclip -o -selection clipboard 2>/dev/null)
+  # Strip trailing newlines
+  CUTBUFFER="${CUTBUFFER%%$'\n'}"
+  CUTBUFFER="${CUTBUFFER%%$'\r'}"
+  zle vi-put-after
+  _st_report_cursor
+}
+zle -N vi-put-after-clipboard
+bindkey -M vicmd 'p' vi-put-after-clipboard
+
 ssh() {
   local host="${@: -1}"
   printf '\033]778;ssh;%s\007' "$host"
