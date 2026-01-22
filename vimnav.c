@@ -1,5 +1,6 @@
 /* See LICENSE for license details. */
 #include <wchar.h>
+#include <wctype.h>
 
 #include "st.h"
 #include "vimnav.h"
@@ -524,6 +525,141 @@ vimnav_move_word_backward(void)
 }
 
 static void
+vimnav_move_word_end(void)
+{
+	int screen_y = vimnav_screen_y();
+	int x = vimnav.x;
+	int linelen = tlinelen(screen_y);
+	Glyph *gp;
+
+	if (linelen == 0 || x >= linelen - 1)
+		return;
+
+	/* Move forward at least one character */
+	x++;
+
+	/* Skip delimiters */
+	while (x < linelen - 1) {
+		gp = &TLINE(screen_y)[x];
+		if (!ISDELIM(gp->u))
+			break;
+		x++;
+	}
+
+	/* Move to end of word */
+	while (x < linelen - 1) {
+		gp = &TLINE(screen_y)[x + 1];
+		if (ISDELIM(gp->u))
+			break;
+		x++;
+	}
+
+	vimnav.x = x;
+	vimnav.savedx = x;
+	vimnav_update_selection();
+}
+
+static void
+vimnav_move_WORD_forward(void)
+{
+	int screen_y = vimnav_screen_y();
+	int x = vimnav.x;
+	int linelen = tlinelen(screen_y);
+	Glyph *gp;
+
+	if (linelen == 0)
+		return;
+
+	/* Skip current WORD (non-whitespace) */
+	while (x < linelen - 1) {
+		gp = &TLINE(screen_y)[x];
+		if (iswspace(gp->u))
+			break;
+		x++;
+	}
+
+	/* Skip whitespace */
+	while (x < linelen - 1) {
+		gp = &TLINE(screen_y)[x];
+		if (!iswspace(gp->u))
+			break;
+		x++;
+	}
+
+	vimnav.x = x;
+	vimnav.savedx = x;
+	vimnav_update_selection();
+}
+
+static void
+vimnav_move_WORD_backward(void)
+{
+	int screen_y = vimnav_screen_y();
+	int x = vimnav.x;
+	Glyph *gp;
+
+	if (x == 0)
+		return;
+
+	x--;
+
+	/* Skip whitespace */
+	while (x > 0) {
+		gp = &TLINE(screen_y)[x];
+		if (!iswspace(gp->u))
+			break;
+		x--;
+	}
+
+	/* Skip to start of WORD */
+	while (x > 0) {
+		gp = &TLINE(screen_y)[x - 1];
+		if (iswspace(gp->u))
+			break;
+		x--;
+	}
+
+	vimnav.x = x;
+	vimnav.savedx = x;
+	vimnav_update_selection();
+}
+
+static void
+vimnav_move_WORD_end(void)
+{
+	int screen_y = vimnav_screen_y();
+	int x = vimnav.x;
+	int linelen = tlinelen(screen_y);
+	Glyph *gp;
+
+	if (linelen == 0 || x >= linelen - 1)
+		return;
+
+	/* Move forward at least one character */
+	x++;
+
+	/* Skip whitespace */
+	while (x < linelen - 1) {
+		gp = &TLINE(screen_y)[x];
+		if (!iswspace(gp->u))
+			break;
+		x++;
+	}
+
+	/* Move to end of WORD */
+	while (x < linelen - 1) {
+		gp = &TLINE(screen_y)[x + 1];
+		if (iswspace(gp->u))
+			break;
+		x++;
+	}
+
+	vimnav.x = x;
+	vimnav.savedx = x;
+	vimnav_update_selection();
+}
+
+static void
 vimnav_move_top(void)
 {
 	int linelen;
@@ -852,6 +988,10 @@ vimnav_handle_key(ulong ksym, uint state)
 	case '$':
 	case 'w':
 	case 'b':
+	case 'e':
+	case 'W':
+	case 'B':
+	case 'E':
 		/* In prompt space: always pass to zsh (zsh has cursor authority) */
 		if (vimnav_is_prompt_space(vimnav.y)) {
 			return 0;  /* Pass through to zsh */
@@ -860,8 +1000,16 @@ vimnav_handle_key(ulong ksym, uint state)
 			vimnav_move_eol();
 		else if (ksym == 'w')
 			vimnav_move_word_forward();
-		else
+		else if (ksym == 'b')
 			vimnav_move_word_backward();
+		else if (ksym == 'e')
+			vimnav_move_word_end();
+		else if (ksym == 'W')
+			vimnav_move_WORD_forward();
+		else if (ksym == 'B')
+			vimnav_move_WORD_backward();
+		else if (ksym == 'E')
+			vimnav_move_WORD_end();
 		break;
 	case 'g':
 		vimnav_move_top();

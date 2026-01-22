@@ -773,6 +773,155 @@ TEST(vimnav_V_toggle_off_notifies_zsh)
 	mock_term_free();
 }
 
+/* Test: e key moves to end of word */
+TEST(vimnav_e_moves_to_word_end)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "hello world test");
+
+	/* Prompt at row 23, not scrolled, so row 5 is in history */
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.x = 0;  /* Start at 'h' of "hello" */
+	vimnav.y = 5;
+	vimnav.savedx = 0;
+
+	int handled = vimnav_handle_key('e', 0);
+
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(4, vimnav.x);  /* End of "hello" (index 4) */
+
+	/* Press e again to go to end of "world" */
+	handled = vimnav_handle_key('e', 0);
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(10, vimnav.x);  /* End of "world" (index 10) */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: W key moves to start of next WORD (whitespace-delimited) */
+TEST(vimnav_W_moves_to_next_WORD)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "foo.bar baz-qux end");
+
+	/* Prompt at row 23, not scrolled, so row 5 is in history */
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.x = 0;  /* Start at 'f' of "foo.bar" */
+	vimnav.y = 5;
+	vimnav.savedx = 0;
+
+	int handled = vimnav_handle_key('W', 0);
+
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(8, vimnav.x);  /* Start of "baz-qux" (index 8) */
+
+	/* Press W again to go to "end" */
+	handled = vimnav_handle_key('W', 0);
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(16, vimnav.x);  /* Start of "end" (index 16) */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: B key moves to start of previous WORD (whitespace-delimited) */
+TEST(vimnav_B_moves_to_prev_WORD)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "foo.bar baz-qux end");
+
+	/* Prompt at row 23, not scrolled, so row 5 is in history */
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.x = 18;  /* At 'd' of "end" */
+	vimnav.y = 5;
+	vimnav.savedx = 18;
+
+	int handled = vimnav_handle_key('B', 0);
+
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(16, vimnav.x);  /* Start of "end" (index 16) - B from within word goes to word start */
+
+	/* Press B again to go to "baz-qux" */
+	handled = vimnav_handle_key('B', 0);
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(8, vimnav.x);  /* Start of "baz-qux" (index 8) */
+
+	/* Press B again to go to "foo.bar" */
+	handled = vimnav_handle_key('B', 0);
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(0, vimnav.x);  /* Start of "foo.bar" (index 0) */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: E key moves to end of WORD (whitespace-delimited) */
+TEST(vimnav_E_moves_to_WORD_end)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "foo.bar baz-qux end");
+
+	/* Prompt at row 23, not scrolled, so row 5 is in history */
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.x = 0;  /* Start at 'f' of "foo.bar" */
+	vimnav.y = 5;
+	vimnav.savedx = 0;
+
+	int handled = vimnav_handle_key('E', 0);
+
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(6, vimnav.x);  /* End of "foo.bar" (index 6) */
+
+	/* Press E again to go to end of "baz-qux" */
+	handled = vimnav_handle_key('E', 0);
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(14, vimnav.x);  /* End of "baz-qux" (index 14) */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: e, E, W, B pass through to zsh on prompt line */
+TEST(vimnav_eEWB_prompt_passthrough)
+{
+	mock_term_init(24, 80);
+	mock_set_line(10, "% echo hello world");
+
+	/* On prompt line - should pass through to zsh */
+	term.c.x = 5;
+	term.c.y = 10;
+	term.scr = 0;
+	vimnav.zsh_cursor = 3;
+
+	vimnav_enter();
+
+	/* All these should pass through on prompt line */
+	ASSERT_EQ(0, vimnav_handle_key('e', 0));
+	ASSERT_EQ(0, vimnav_handle_key('E', 0));
+	ASSERT_EQ(0, vimnav_handle_key('W', 0));
+	ASSERT_EQ(0, vimnav_handle_key('B', 0));
+
+	vimnav_exit();
+	mock_term_free();
+}
+
 /* Test: h/l keys work on history lines even when prompt ends with just "% " (trailing space stripped) */
 TEST(vimnav_hl_works_on_history_with_empty_prompt)
 {
@@ -847,6 +996,11 @@ TEST_SUITE(vimnav)
 	RUN_TEST(vimnav_v_toggle_off_notifies_zsh);
 	RUN_TEST(vimnav_V_toggle_off_notifies_zsh);
 	RUN_TEST(vimnav_hl_works_on_history_with_empty_prompt);
+	RUN_TEST(vimnav_e_moves_to_word_end);
+	RUN_TEST(vimnav_W_moves_to_next_WORD);
+	RUN_TEST(vimnav_B_moves_to_prev_WORD);
+	RUN_TEST(vimnav_E_moves_to_WORD_end);
+	RUN_TEST(vimnav_eEWB_prompt_passthrough);
 }
 
 int

@@ -45,6 +45,37 @@ Make sure to modify the required zsh config in README.md if you make a change th
 - `IS_SET(MODE_ALTSCREEN)`: Check if alt screen is active
 - History/scrollback is disabled in alt screen mode
 
+## CUSTOM OSC ESCAPE SEQUENCES
+
+This st fork uses custom OSC (Operating System Command) escape sequences for zsh coordination.
+These are handled in `strhandle()` in st.c. **Do not reuse these numbers for new features.**
+
+### OSC 777 - Vim mode and cursor sync (st.c:2088)
+Used for nav mode coordination between zsh and st.
+
+| Sequence | Direction | Description |
+|----------|-----------|-------------|
+| `\033]777;vim-mode;enter\a` | zsh → st | Enter nav mode (zsh entered vi command mode) |
+| `\033]777;vim-mode;exit\a` | zsh → st | Exit nav mode (zsh exited vi command mode) |
+| `\033]777;cursor;POS\a` | zsh → st | Report cursor position (POS = integer offset in command line) |
+| `\033]777;visual;start;ANCHOR;TYPE\a` | zsh → st | Start visual selection (ANCHOR = integer, TYPE = "char" or "line") |
+| `\033]777;visual;end\a` | zsh → st | End visual selection |
+
+### OSC 778 - SSH indicator (st.c:2110)
+Used to show/hide the SSH connection indicator overlay.
+
+| Sequence | Direction | Description |
+|----------|-----------|-------------|
+| `\033]778;ssh;HOSTNAME\a` | shell → st | Show SSH indicator with hostname |
+| `\033]778;ssh;exit\a` | shell → st | Hide SSH indicator |
+
+### Reserved OSC numbers
+- **777**: Nav mode / vim coordination (TAKEN)
+- **778**: SSH indicator (TAKEN)
+- **0-112**: Standard OSC sequences (title, colors, etc.)
+
+When adding new features requiring OSC sequences, use **779+** to avoid conflicts.
+
 ## QA
 Whenever you finish an addition to the codebase, run all the tests with `make test`
 
