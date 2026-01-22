@@ -1813,10 +1813,11 @@ csihandle(void)
 						break;
 					}
 				}
-				/* Scroll only content lines into history */
-				for (i = 0; i <= last_content; i++)
+				/* Scroll content lines into history, excluding the last
+				 * content line (assumed to be prompt, will be redrawn) */
+				for (i = 0; i < last_content; i++)
 					tscrollup(0, 1, 1);
-				/* Clear any remaining lines */
+				/* Clear the screen */
 				tclearregion(0, 0, term.col-1, term.row-1);
 			} else {
 				tclearregion(0, 0, term.col-1, term.row-1);

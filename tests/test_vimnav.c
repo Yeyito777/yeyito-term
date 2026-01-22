@@ -379,30 +379,42 @@ TEST(vimnav_destructive_ops_disabled)
 {
 	mock_term_init(24, 80);
 	mock_set_line(5, "hello world");
+	mock_set_line(10, "prompt line");
 
-	/* Test in history (not on prompt line) - should be disabled */
-	term.c.x = 0;
+	/* Test in history (scrolled up) - should snap back to prompt and pass to zsh */
+	term.c.x = 5;
 	term.c.y = 10;
-	term.scr = 5;  /* Scrolled, so vimnav.y != term.c.y */
+	term.scr = 5;  /* Scrolled up */
 
 	vimnav_enter();
 	vimnav.x = 5;
+	vimnav.y = 5;  /* Viewing history */
+
+	/* 'x' should snap back to prompt and pass to zsh */
+	int handled = vimnav_handle_key('x', 0);
+	ASSERT_EQ(0, handled);  /* Passed to zsh */
+	ASSERT_EQ(0, term.scr);  /* Scrolled back to bottom */
+	ASSERT_EQ(10, vimnav.y);  /* At prompt line */
+
+	/* Reset for next test */
+	term.scr = 5;
 	vimnav.y = 5;
 
-	/* 'x' should be consumed but do nothing in history */
-	int handled = vimnav_handle_key('x', 0);
-	ASSERT_EQ(1, handled);  /* Consumed */
-	ASSERT_EQ(5, vimnav.x);  /* Position unchanged */
-
-	/* 'd' should be consumed but do nothing in history */
+	/* 'd' should snap back to prompt and pass to zsh */
 	handled = vimnav_handle_key('d', 0);
-	ASSERT_EQ(1, handled);
-	ASSERT_EQ(5, vimnav.x);
+	ASSERT_EQ(0, handled);
+	ASSERT_EQ(0, term.scr);
+	ASSERT_EQ(10, vimnav.y);
 
-	/* 'c' should be consumed but do nothing in history */
+	/* Reset for next test */
+	term.scr = 5;
+	vimnav.y = 5;
+
+	/* 'c' should snap back to prompt and pass to zsh */
 	handled = vimnav_handle_key('c', 0);
-	ASSERT_EQ(1, handled);
-	ASSERT_EQ(5, vimnav.x);
+	ASSERT_EQ(0, handled);
+	ASSERT_EQ(0, term.scr);
+	ASSERT_EQ(10, vimnav.y);
 
 	vimnav_exit();
 	mock_term_free();
@@ -435,6 +447,37 @@ TEST(vimnav_destructive_ops_prompt_passthrough)
 	ASSERT_EQ(0, handled);  /* Pass through */
 
 	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: all editing keys snap back to prompt from history */
+TEST(vimnav_editing_keys_snap_to_prompt)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "history line");
+	mock_set_line(10, "% prompt");
+
+	term.c.x = 5;
+	term.c.y = 10;
+
+	/* Test various editing keys that should snap back */
+	char editing_keys[] = {'D', 'C', 's', 'S', 'r', 'R', 'a', 'A', 'i', 'I', 'o', 'O', 'u', '.'};
+	int num_keys = sizeof(editing_keys) / sizeof(editing_keys[0]);
+	int i;
+
+	for (i = 0; i < num_keys; i++) {
+		term.scr = 5;  /* Scrolled up */
+		vimnav_enter();
+		vimnav.y = 5;  /* In history */
+
+		int handled = vimnav_handle_key(editing_keys[i], 0);
+		ASSERT_EQ(0, handled);  /* Passed to zsh */
+		ASSERT_EQ(0, term.scr);  /* Scrolled back */
+		ASSERT_EQ(10, vimnav.y);  /* At prompt */
+
+		vimnav_exit();
+	}
+
 	mock_term_free();
 }
 
@@ -722,6 +765,7 @@ TEST_SUITE(vimnav)
 	RUN_TEST(vimnav_zsh_cursor_sync);
 	RUN_TEST(vimnav_destructive_ops_disabled);
 	RUN_TEST(vimnav_destructive_ops_prompt_passthrough);
+	RUN_TEST(vimnav_editing_keys_snap_to_prompt);
 	RUN_TEST(vimnav_inherits_zsh_visual);
 	RUN_TEST(vimnav_visual_handoff_on_k);
 	RUN_TEST(vimnav_escape_clears_zsh_visual);

@@ -128,6 +128,17 @@ vimnav_sync_to_zsh_cursor(void)
 	}
 }
 
+/* Snap back to prompt line (scroll down if needed, update cursor position) */
+static void
+vimnav_snap_to_prompt(void)
+{
+	if (term.scr > 0) {
+		kscrolldown(&(Arg){ .i = term.scr });
+	}
+	vimnav.y = term.c.y;
+	vimnav_sync_to_zsh_cursor();
+}
+
 /* zsh cursor/visual sync functions */
 void
 vimnav_set_zsh_cursor(int pos)
@@ -868,16 +879,28 @@ vimnav_handle_key(ulong ksym, uint state)
 		vimnav_toggle_visual_line();
 		break;
 
-	/* Destructive operations */
-	case 'x':
-	case 'd':
-	case 'c':
-		/* In prompt space: pass to zsh (zsh handles editing) */
-		if (vimnav_is_prompt_space(vimnav.y)) {
-			return 0;  /* Pass through to zsh */
-		}
-		/* In history: disabled - can't delete history */
-		return 1;  /* Consume but do nothing */
+	/* Editing operations - snap to prompt and pass to zsh */
+	case 'x':  /* delete char */
+	case 'X':  /* delete char before */
+	case 'd':  /* delete with motion */
+	case 'D':  /* delete to end of line */
+	case 'c':  /* change with motion */
+	case 'C':  /* change to end of line */
+	case 's':  /* substitute char */
+	case 'S':  /* substitute line */
+	case 'r':  /* replace char */
+	case 'R':  /* replace mode */
+	case 'a':  /* append after cursor */
+	case 'A':  /* append at end of line */
+	case 'i':  /* insert before cursor */
+	case 'I':  /* insert at beginning of line */
+	case 'o':  /* open line below */
+	case 'O':  /* open line above */
+	case 'u':  /* undo */
+	case '.':  /* repeat last command */
+	case '~':  /* toggle case */
+		vimnav_snap_to_prompt();
+		return 0;  /* Pass through to zsh */
 
 	/* Yank */
 	case 'y':
@@ -903,11 +926,7 @@ vimnav_handle_key(ulong ksym, uint state)
 
 	/* Paste */
 	case 'p':
-		/* Snap back to prompt line and paste */
-		if (term.scr > 0) {
-			kscrolldown(&(Arg){ .i = term.scr });
-		}
-		vimnav.y = term.c.y;
+		vimnav_snap_to_prompt();
 		vimnav_paste_strip_newlines = 1;
 		clippaste(NULL);
 		break;

@@ -55,7 +55,7 @@ get_hist_first_char(int idx)
 
 /*
  * Simulate ED case 2 (clear all) with the FIX:
- * Scroll only content lines into history before clearing (when not in altscreen)
+ * Scroll content lines into history, excluding last line (prompt)
  */
 static void
 ed_clear_all_fixed(void)
@@ -69,10 +69,11 @@ ed_clear_all_fixed(void)
 				break;
 			}
 		}
-		/* Scroll only content lines into history */
-		for (i = 0; i <= last_content; i++)
+		/* Scroll content lines into history, excluding the last
+		 * content line (assumed to be prompt, will be redrawn) */
+		for (i = 0; i < last_content; i++)
 			tscrollup(0, 1, 1);
-		/* Clear any remaining lines */
+		/* Clear the screen */
 		tclearregion(0, 0, term.col - 1, term.row - 1);
 	} else {
 		tclearregion(0, 0, term.col - 1, term.row - 1);
@@ -118,35 +119,32 @@ TEST(old_clear_loses_content)
 	mock_term_free();
 }
 
-/* Test: Fixed behavior preserves screen content in history */
+/* Test: Fixed behavior preserves screen content in history, skips prompt */
 TEST(fixed_clear_preserves_content)
 {
 	mock_term_init(5, 10);
 
-	/* Set up screen with content */
+	/* Set up screen with content: 4 lines of output + 1 prompt line */
 	set_line_content(0, "Line 0");
 	set_line_content(1, "Line 1");
 	set_line_content(2, "Line 2");
 	set_line_content(3, "Line 3");
-	set_line_content(4, "Line 4");
+	set_line_content(4, "% prompt");  /* This is the prompt, should be skipped */
 
 	/* Verify content is there */
 	ASSERT_EQ('L', get_line_first_char(0));
-	ASSERT_EQ('L', get_line_first_char(4));
+	ASSERT_EQ('%', get_line_first_char(4));
 
 	/* Clear with fixed behavior */
 	ed_clear_all_fixed();
 
-	/* Screen should be cleared (lines are now blank after swap) */
-	/* Note: tscrollup swaps and clears, so lines are blank */
+	/* Screen should be cleared */
 
-	/* History should have the content - histi advanced by 5 (term.row) */
-	ASSERT_EQ(5, term.histi);
+	/* History should have lines 0-3 (4 lines), prompt skipped */
+	ASSERT_EQ(4, term.histi);
 
-	/* Check that content was saved to history */
-	/* Most recent (histi=5) has what was Line 4 */
-	/* histi=4 has what was Line 3, etc. */
-	ASSERT_EQ('L', get_hist_first_char(5));  /* Line 4 */
+	/* Check that output was saved to history (prompt was NOT saved) */
+	/* Most recent (histi=4) has what was Line 3 */
 	ASSERT_EQ('L', get_hist_first_char(4));  /* Line 3 */
 	ASSERT_EQ('L', get_hist_first_char(3));  /* Line 2 */
 	ASSERT_EQ('L', get_hist_first_char(2));  /* Line 1 */
@@ -185,54 +183,53 @@ TEST(multiple_clears_accumulate)
 {
 	mock_term_init(3, 10);
 
-	/* First set of content */
+	/* First set: 2 output lines + 1 prompt */
 	set_line_content(0, "AAA");
 	set_line_content(1, "BBB");
-	set_line_content(2, "CCC");
+	set_line_content(2, "% prompt1");  /* skipped */
 
-	/* First clear */
+	/* First clear - saves lines 0-1, skips line 2 */
 	ed_clear_all_fixed();
-	ASSERT_EQ(3, term.histi);
+	ASSERT_EQ(2, term.histi);
 
-	/* Second set of content */
+	/* Second set: 2 output lines + 1 prompt */
 	set_line_content(0, "DDD");
 	set_line_content(1, "EEE");
-	set_line_content(2, "FFF");
+	set_line_content(2, "% prompt2");  /* skipped */
 
-	/* Second clear */
+	/* Second clear - saves lines 0-1, skips line 2 */
 	ed_clear_all_fixed();
-	ASSERT_EQ(6, term.histi);
+	ASSERT_EQ(4, term.histi);
 
-	/* History should have both sets */
-	/* Most recent: F, E, D (indices 6, 5, 4) */
-	/* Older: C, B, A (indices 3, 2, 1) */
-	ASSERT_EQ('F', get_hist_first_char(6));
-	ASSERT_EQ('E', get_hist_first_char(5));
-	ASSERT_EQ('D', get_hist_first_char(4));
-	ASSERT_EQ('C', get_hist_first_char(3));
+	/* History should have both output sets (not prompts) */
+	/* Most recent: E, D (indices 4, 3) */
+	/* Older: B, A (indices 2, 1) */
+	ASSERT_EQ('E', get_hist_first_char(4));
+	ASSERT_EQ('D', get_hist_first_char(3));
 	ASSERT_EQ('B', get_hist_first_char(2));
 	ASSERT_EQ('A', get_hist_first_char(1));
 
 	mock_term_free();
 }
 
-/* Test: Small output only saves content lines, not empty lines */
+/* Test: Small output saves content, skips prompt, ignores empty lines */
 TEST(small_output_only_saves_content)
 {
 	mock_term_init(10, 20);  /* 10 row terminal */
 
-	/* Small output: only 2 lines of content (like seq 2) */
+	/* Small output like "seq 2": 2 lines of output + prompt */
 	set_line_content(0, "1");
 	set_line_content(1, "2");
-	/* Lines 2-9 are empty */
+	set_line_content(2, "% ");  /* prompt - should be skipped */
+	/* Lines 3-9 are empty */
 
 	/* Clear with fixed behavior */
 	ed_clear_all_fixed();
 
-	/* Only 2 lines should be saved (not 10) */
+	/* Only output lines should be saved (not empty lines, not prompt) */
 	ASSERT_EQ(2, term.histi);
 
-	/* Check content was saved */
+	/* Check output content was saved (prompt was NOT saved) */
 	ASSERT_EQ('2', get_hist_first_char(2));  /* Line 1 content */
 	ASSERT_EQ('1', get_hist_first_char(1));  /* Line 0 content */
 
@@ -253,6 +250,30 @@ TEST(empty_screen_no_history)
 	mock_term_free();
 }
 
+/* Test: Spamming Ctrl+L doesn't fill history with prompts */
+TEST(spam_clear_no_prompt_accumulation)
+{
+	mock_term_init(5, 10);
+
+	/* Just a prompt on screen (fresh terminal or after previous clear) */
+	set_line_content(0, "% ");
+
+	/* Clear multiple times - should NOT save the prompt each time */
+	ed_clear_all_fixed();
+	ASSERT_EQ(0, term.histi);  /* Nothing saved - only prompt, no output */
+
+	/* Simulate prompt being redrawn */
+	set_line_content(0, "% ");
+
+	ed_clear_all_fixed();
+	ASSERT_EQ(0, term.histi);  /* Still nothing - just prompts */
+
+	ed_clear_all_fixed();
+	ASSERT_EQ(0, term.histi);  /* Still nothing */
+
+	mock_term_free();
+}
+
 /* Test suite */
 TEST_SUITE(scrollback)
 {
@@ -262,6 +283,7 @@ TEST_SUITE(scrollback)
 	RUN_TEST(multiple_clears_accumulate);
 	RUN_TEST(small_output_only_saves_content);
 	RUN_TEST(empty_screen_no_history);
+	RUN_TEST(spam_clear_no_prompt_accumulation);
 }
 
 int
