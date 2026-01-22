@@ -23,6 +23,8 @@ typedef struct {
 	int zsh_visual;     /* 1 if zsh is in visual mode */
 	int zsh_visual_anchor; /* anchor position for zsh visual mode */
 	int zsh_visual_line;   /* 1 if zsh visual mode is line-wise (V) */
+	/* Text object pending state */
+	int pending_textobj; /* 'i' for inner, 'a' for around, 0 for none */
 } VimNav;
 
 /* Global vim navigation state (defined in vimnav.c) */

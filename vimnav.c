@@ -659,6 +659,330 @@ vimnav_move_WORD_end(void)
 	vimnav_update_selection();
 }
 
+/* Text object selection helpers */
+
+/* Find word boundaries around cursor position (inner = exclude delimiters) */
+static int
+vimnav_find_word_bounds(int x, int y, int inner, int *start_x, int *end_x)
+{
+	Line line = TLINE(y);
+	int linelen = tlinelen(y);
+	int sx, ex;
+	Glyph *gp;
+
+	if (linelen == 0 || x >= linelen)
+		return 0;
+
+	gp = &line[x];
+
+	/* If on a delimiter, select the delimiter run (or whitespace for 'around') */
+	if (ISDELIM(gp->u)) {
+		sx = x;
+		ex = x;
+		/* Expand left */
+		while (sx > 0 && ISDELIM(line[sx - 1].u))
+			sx--;
+		/* Expand right */
+		while (ex < linelen - 1 && ISDELIM(line[ex + 1].u))
+			ex++;
+		*start_x = sx;
+		*end_x = ex;
+		return 1;
+	}
+
+	/* Find word start */
+	sx = x;
+	while (sx > 0 && !ISDELIM(line[sx - 1].u))
+		sx--;
+
+	/* Find word end */
+	ex = x;
+	while (ex < linelen - 1 && !ISDELIM(line[ex + 1].u))
+		ex++;
+
+	if (!inner) {
+		/* 'around' - include trailing whitespace, or leading if at end */
+		if (ex < linelen - 1 && ISDELIM(line[ex + 1].u)) {
+			while (ex < linelen - 1 && ISDELIM(line[ex + 1].u))
+				ex++;
+		} else if (sx > 0 && ISDELIM(line[sx - 1].u)) {
+			while (sx > 0 && ISDELIM(line[sx - 1].u))
+				sx--;
+		}
+	}
+
+	*start_x = sx;
+	*end_x = ex;
+	return 1;
+}
+
+/* Find WORD boundaries (whitespace-delimited) */
+static int
+vimnav_find_WORD_bounds(int x, int y, int inner, int *start_x, int *end_x)
+{
+	Line line = TLINE(y);
+	int linelen = tlinelen(y);
+	int sx, ex;
+	Glyph *gp;
+
+	if (linelen == 0 || x >= linelen)
+		return 0;
+
+	gp = &line[x];
+
+	/* If on whitespace, select whitespace run */
+	if (iswspace(gp->u)) {
+		sx = x;
+		ex = x;
+		while (sx > 0 && iswspace(line[sx - 1].u))
+			sx--;
+		while (ex < linelen - 1 && iswspace(line[ex + 1].u))
+			ex++;
+		*start_x = sx;
+		*end_x = ex;
+		return 1;
+	}
+
+	/* Find WORD start */
+	sx = x;
+	while (sx > 0 && !iswspace(line[sx - 1].u))
+		sx--;
+
+	/* Find WORD end */
+	ex = x;
+	while (ex < linelen - 1 && !iswspace(line[ex + 1].u))
+		ex++;
+
+	if (!inner) {
+		/* 'around' - include trailing whitespace, or leading if at end */
+		if (ex < linelen - 1 && iswspace(line[ex + 1].u)) {
+			while (ex < linelen - 1 && iswspace(line[ex + 1].u))
+				ex++;
+		} else if (sx > 0 && iswspace(line[sx - 1].u)) {
+			while (sx > 0 && iswspace(line[sx - 1].u))
+				sx--;
+		}
+	}
+
+	*start_x = sx;
+	*end_x = ex;
+	return 1;
+}
+
+/* Find matching pair boundaries (quotes, brackets, etc.)
+ * If cursor is not inside an enclosing pair, search to the right for one. */
+static int
+vimnav_find_pair_bounds(int x, int y, Rune open, Rune close, int inner, int *start_x, int *end_x)
+{
+	Line line = TLINE(y);
+	int linelen = tlinelen(y);
+	int sx = -1, ex = -1;
+	int depth = 0;
+	int i;
+
+	if (linelen == 0)
+		return 0;
+
+	/* For quotes (open == close), logic is different from brackets */
+	if (open == close) {
+		/* First, try to find if cursor is inside a quote pair.
+		 * Count quotes to the left of cursor to determine if we're inside. */
+		int quotes_left = 0;
+		for (i = 0; i < x; i++) {
+			if (line[i].u == open)
+				quotes_left++;
+		}
+
+		/* If odd number of quotes to the left, we're inside a quoted region */
+		if (quotes_left % 2 == 1) {
+			/* Find opening quote (last quote before cursor) */
+			for (i = x - 1; i >= 0; i--) {
+				if (line[i].u == open) {
+					sx = i;
+					break;
+				}
+			}
+			/* Find closing quote (first quote at or after cursor) */
+			for (i = x; i < linelen; i++) {
+				if (line[i].u == close) {
+					ex = i;
+					break;
+				}
+			}
+			if (sx >= 0 && ex >= 0)
+				goto found;
+		}
+
+		/* If cursor is on a quote, check if it starts a pair */
+		if (line[x].u == open) {
+			sx = x;
+			for (i = x + 1; i < linelen; i++) {
+				if (line[i].u == close) {
+					ex = i;
+					goto found;
+				}
+			}
+		}
+
+		/* Not inside quotes - search right for a quote pair */
+		for (i = x + 1; i < linelen; i++) {
+			if (line[i].u == open) {
+				sx = i;
+				/* Find closing quote */
+				for (int j = i + 1; j < linelen; j++) {
+					if (line[j].u == close) {
+						ex = j;
+						goto found;
+					}
+				}
+				/* Opening quote found but no closing - continue searching */
+				sx = -1;
+			}
+		}
+		return 0;  /* No valid quote pair found */
+	} else {
+		/* For brackets: handle nesting */
+		/* First, try to find opening bracket to the left (cursor inside pair) */
+		depth = 0;
+		for (i = x; i >= 0; i--) {
+			if (line[i].u == close)
+				depth++;
+			else if (line[i].u == open) {
+				if (depth == 0) {
+					sx = i;
+					break;
+				}
+				depth--;
+			}
+		}
+
+		if (sx >= 0) {
+			/* Found opening bracket to the left, find matching closer */
+			depth = 0;
+			for (i = sx; i < linelen; i++) {
+				if (line[i].u == open)
+					depth++;
+				else if (line[i].u == close) {
+					depth--;
+					if (depth == 0) {
+						ex = i;
+						goto found;
+					}
+				}
+			}
+			/* Opening found but no valid closing - fall through to search right */
+		}
+
+		/* Not inside a pair - search right for an opening bracket */
+		for (i = x + 1; i < linelen; i++) {
+			if (line[i].u == open) {
+				sx = i;
+				/* Find matching closing bracket */
+				depth = 1;
+				for (int j = i + 1; j < linelen; j++) {
+					if (line[j].u == open)
+						depth++;
+					else if (line[j].u == close) {
+						depth--;
+						if (depth == 0) {
+							ex = j;
+							goto found;
+						}
+					}
+				}
+				/* Opening found but no closing - continue searching */
+				sx = -1;
+			}
+		}
+		return 0;  /* No valid pair found */
+	}
+
+found:
+	if (inner) {
+		/* Exclude the delimiters */
+		sx++;
+		ex--;
+		if (sx > ex)
+			return 0;  /* Empty inside */
+	}
+
+	*start_x = sx;
+	*end_x = ex;
+	return 1;
+}
+
+/* Select text object and enter visual mode */
+static void
+vimnav_select_textobj(int start_x, int end_x)
+{
+	int screen_y = vimnav_screen_y();
+
+	/* Enter visual mode with selection */
+	vimnav.mode = VIMNAV_VISUAL;
+	vimnav.anchor_x = start_x;
+	vimnav.anchor_abs_y = screen_y - term.scr;
+	vimnav.x = end_x;
+	vimnav.savedx = end_x;
+
+	selstart(start_x, screen_y, 0);
+	selextend(end_x, screen_y, SEL_REGULAR, 0);
+	tfulldirt();
+}
+
+/* Handle text object key (w, W, ", (, ), [, ], {, }) after i/a prefix */
+static int
+vimnav_handle_textobj(ulong ksym, int inner)
+{
+	int start_x, end_x;
+	int y = vimnav_screen_y();
+	int found = 0;
+
+	switch (ksym) {
+	case 'w':
+		found = vimnav_find_word_bounds(vimnav.x, y, inner, &start_x, &end_x);
+		break;
+	case 'W':
+		found = vimnav_find_WORD_bounds(vimnav.x, y, inner, &start_x, &end_x);
+		break;
+	case '"':
+		found = vimnav_find_pair_bounds(vimnav.x, y, '"', '"', inner, &start_x, &end_x);
+		break;
+	case '\'':
+		found = vimnav_find_pair_bounds(vimnav.x, y, '\'', '\'', inner, &start_x, &end_x);
+		break;
+	case '`':
+		found = vimnav_find_pair_bounds(vimnav.x, y, '`', '`', inner, &start_x, &end_x);
+		break;
+	case '(':
+	case ')':
+	case 'b':
+		found = vimnav_find_pair_bounds(vimnav.x, y, '(', ')', inner, &start_x, &end_x);
+		break;
+	case '[':
+	case ']':
+		found = vimnav_find_pair_bounds(vimnav.x, y, '[', ']', inner, &start_x, &end_x);
+		break;
+	case '{':
+	case '}':
+	case 'B':
+		found = vimnav_find_pair_bounds(vimnav.x, y, '{', '}', inner, &start_x, &end_x);
+		break;
+	case '<':
+	case '>':
+		found = vimnav_find_pair_bounds(vimnav.x, y, '<', '>', inner, &start_x, &end_x);
+		break;
+	default:
+		return 0;  /* Unknown text object */
+	}
+
+	if (found) {
+		vimnav_select_textobj(start_x, end_x);
+		return 1;
+	}
+
+	return 0;
+}
+
 static void
 vimnav_move_top(void)
 {
@@ -878,6 +1202,7 @@ vimnav_enter(void)
 	vimnav.y = term.c.y;  /* Screen row */
 	vimnav.prompt_y = term.c.y;  /* Can't go below this row when scr == 0 */
 	vimnav.scr_at_entry = term.scr;  /* Track scroll position at entry (should be 0) */
+	vimnav.pending_textobj = 0;  /* Clear any pending text object state */
 
 	/* Use zsh-reported cursor position for x coordinate */
 	prompt_end = vimnav_find_prompt_end(vimnav.y);
@@ -913,6 +1238,7 @@ vimnav_exit(void)
 		return;
 
 	vimnav.mode = VIMNAV_INACTIVE;
+	vimnav.pending_textobj = 0;
 	selclear();
 	tfulldirt();
 }
@@ -925,6 +1251,15 @@ vimnav_handle_key(ulong ksym, uint state)
 	/* Ignore modifier-only key presses (Shift, Ctrl, Alt, Super) */
 	if (ksym >= 0xffe1 && ksym <= 0xffee)  /* XK_Shift_L to XK_Hyper_R */
 		return 1;
+
+	/* Handle pending text object (after 'i' or 'a' was pressed) */
+	if (vimnav.pending_textobj) {
+		int inner = (vimnav.pending_textobj == 'i');
+		vimnav.pending_textobj = 0;  /* Clear pending state */
+		if (vimnav_handle_textobj(ksym, inner))
+			return 1;
+		/* If text object not found, fall through to normal handling */
+	}
 
 	/* Handle Ctrl+scroll commands */
 	if (state & ControlMask) {
@@ -1031,6 +1366,18 @@ vimnav_handle_key(ulong ksym, uint state)
 		vimnav_toggle_visual_line();
 		break;
 
+	/* Text object prefix: 'i' for inner, 'a' for around (only in visual mode) */
+	case 'i':
+	case 'a':
+		/* In visual mode: start text object sequence */
+		if (vimnav.mode == VIMNAV_VISUAL || vimnav.mode == VIMNAV_VISUAL_LINE) {
+			vimnav.pending_textobj = ksym;
+			break;
+		}
+		/* In normal mode: snap to prompt and pass to zsh (insert/append) */
+		vimnav_snap_to_prompt();
+		return 0;
+
 	/* Editing operations - snap to prompt and pass to zsh */
 	case 'x':  /* delete char */
 	case 'X':  /* delete char before */
@@ -1042,9 +1389,7 @@ vimnav_handle_key(ulong ksym, uint state)
 	case 'S':  /* substitute line */
 	case 'r':  /* replace char */
 	case 'R':  /* replace mode */
-	case 'a':  /* append after cursor */
 	case 'A':  /* append at end of line */
-	case 'i':  /* insert before cursor */
 	case 'I':  /* insert at beginning of line */
 	case 'o':  /* open line below */
 	case 'O':  /* open line above */

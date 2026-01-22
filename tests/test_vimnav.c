@@ -460,8 +460,10 @@ TEST(vimnav_editing_keys_snap_to_prompt)
 	term.c.x = 5;
 	term.c.y = 10;
 
-	/* Test various editing keys that should snap back */
-	char editing_keys[] = {'D', 'C', 's', 'S', 'r', 'R', 'a', 'A', 'i', 'I', 'o', 'O', 'u', '.'};
+	/* Test various editing keys that should snap back
+	 * Note: 'a' and 'i' are not included because they start text object
+	 * sequences when in history (e.g., 'iw' for inner word) */
+	char editing_keys[] = {'D', 'C', 's', 'S', 'r', 'R', 'A', 'I', 'o', 'O', 'u', '.'};
 	int num_keys = sizeof(editing_keys) / sizeof(editing_keys[0]);
 	int i;
 
@@ -965,6 +967,675 @@ TEST(vimnav_hl_works_on_history_with_empty_prompt)
 	mock_term_free();
 }
 
+/* Test: viw selects inner word */
+TEST(vimnav_viw_selects_inner_word)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "hello world test");
+
+	/* Prompt at row 23, not scrolled, so row 5 is in history */
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.x = 7;  /* Cursor on 'o' of "world" */
+	vimnav.y = 5;
+	vimnav.savedx = 7;
+
+	/* Press 'v' to enter visual mode first */
+	vimnav_handle_key('v', 0);
+	ASSERT_EQ(2, vimnav.mode);  /* VIMNAV_VISUAL */
+
+	/* Press 'i' then 'w' for inner word */
+	int handled = vimnav_handle_key('i', 0);
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ('i', vimnav.pending_textobj);
+
+	handled = vimnav_handle_key('w', 0);
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(0, vimnav.pending_textobj);  /* Cleared */
+
+	/* Should be in visual mode with word "world" selected (6-10) */
+	ASSERT_EQ(2, vimnav.mode);  /* VIMNAV_VISUAL */
+	ASSERT_EQ(6, vimnav.anchor_x);  /* Start of "world" */
+	ASSERT_EQ(10, vimnav.x);  /* End of "world" */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: vaw selects around word (includes trailing space) */
+TEST(vimnav_vaw_selects_around_word)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "hello world test");
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.x = 7;  /* Cursor on 'o' of "world" */
+	vimnav.y = 5;
+	vimnav.savedx = 7;
+
+	/* Press 'v' to enter visual mode first */
+	vimnav_handle_key('v', 0);
+
+	/* Press 'a' then 'w' for around word */
+	vimnav_handle_key('a', 0);
+	int handled = vimnav_handle_key('w', 0);
+	ASSERT_EQ(1, handled);
+
+	/* Should include trailing space: "world " (6-11) */
+	ASSERT_EQ(2, vimnav.mode);  /* VIMNAV_VISUAL */
+	ASSERT_EQ(6, vimnav.anchor_x);  /* Start of "world" */
+	ASSERT_EQ(11, vimnav.x);  /* Includes trailing space */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: viW selects inner WORD (whitespace-delimited) */
+TEST(vimnav_viW_selects_inner_WORD)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "foo.bar baz-qux end");
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.x = 2;  /* Cursor on 'o' of "foo.bar" */
+	vimnav.y = 5;
+	vimnav.savedx = 2;
+
+	/* Press 'v' to enter visual mode first */
+	vimnav_handle_key('v', 0);
+
+	/* Press 'i' then 'W' for inner WORD */
+	vimnav_handle_key('i', 0);
+	int handled = vimnav_handle_key('W', 0);
+	ASSERT_EQ(1, handled);
+
+	/* Should select "foo.bar" (0-6) */
+	ASSERT_EQ(2, vimnav.mode);  /* VIMNAV_VISUAL */
+	ASSERT_EQ(0, vimnav.anchor_x);
+	ASSERT_EQ(6, vimnav.x);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: vi" selects inner quotes */
+TEST(vimnav_vi_quote_selects_inner_quotes)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "echo \"hello world\" done");
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.x = 10;  /* Cursor on 'l' of "hello" inside quotes */
+	vimnav.y = 5;
+	vimnav.savedx = 10;
+
+	/* Press 'v' to enter visual mode first */
+	vimnav_handle_key('v', 0);
+
+	/* Press 'i' then '"' for inner quotes */
+	vimnav_handle_key('i', 0);
+	int handled = vimnav_handle_key('"', 0);
+	ASSERT_EQ(1, handled);
+
+	/* Should select "hello world" (6-16), not including quotes */
+	ASSERT_EQ(2, vimnav.mode);  /* VIMNAV_VISUAL */
+	ASSERT_EQ(6, vimnav.anchor_x);  /* After opening quote */
+	ASSERT_EQ(16, vimnav.x);  /* Before closing quote */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: va" selects around quotes (includes quotes) */
+TEST(vimnav_va_quote_selects_around_quotes)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "echo \"hello world\" done");
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.x = 10;  /* Cursor inside quotes */
+	vimnav.y = 5;
+	vimnav.savedx = 10;
+
+	/* Press 'v' to enter visual mode first */
+	vimnav_handle_key('v', 0);
+
+	/* Press 'a' then '"' for around quotes */
+	vimnav_handle_key('a', 0);
+	int handled = vimnav_handle_key('"', 0);
+	ASSERT_EQ(1, handled);
+
+	/* Should select "\"hello world\"" (5-17), including quotes */
+	ASSERT_EQ(2, vimnav.mode);  /* VIMNAV_VISUAL */
+	ASSERT_EQ(5, vimnav.anchor_x);  /* Opening quote */
+	ASSERT_EQ(17, vimnav.x);  /* Closing quote */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: vi( selects inner parentheses */
+TEST(vimnav_vi_paren_selects_inner_parens)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "func(arg1, arg2) done");
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.x = 8;  /* Cursor on '1' inside parens */
+	vimnav.y = 5;
+	vimnav.savedx = 8;
+
+	/* Press 'v' to enter visual mode first */
+	vimnav_handle_key('v', 0);
+
+	/* Press 'i' then '(' for inner parens */
+	vimnav_handle_key('i', 0);
+	int handled = vimnav_handle_key('(', 0);
+	ASSERT_EQ(1, handled);
+
+	/* Should select "arg1, arg2" (5-14), not including parens */
+	ASSERT_EQ(2, vimnav.mode);  /* VIMNAV_VISUAL */
+	ASSERT_EQ(5, vimnav.anchor_x);  /* After ( */
+	ASSERT_EQ(14, vimnav.x);  /* Before ) */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: vi) also selects inner parentheses (alias) */
+TEST(vimnav_vi_close_paren_selects_inner_parens)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "func(arg1, arg2) done");
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.x = 8;
+	vimnav.y = 5;
+	vimnav.savedx = 8;
+
+	/* Press 'v' to enter visual mode first */
+	vimnav_handle_key('v', 0);
+
+	/* Press 'i' then ')' for inner parens */
+	vimnav_handle_key('i', 0);
+	int handled = vimnav_handle_key(')', 0);
+	ASSERT_EQ(1, handled);
+
+	ASSERT_EQ(2, vimnav.mode);  /* VIMNAV_VISUAL */
+	ASSERT_EQ(5, vimnav.anchor_x);
+	ASSERT_EQ(14, vimnav.x);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: vi{ selects inner braces */
+TEST(vimnav_vi_brace_selects_inner_braces)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "if {x == 1} then");
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.x = 5;  /* Cursor on 'x' inside braces */
+	vimnav.y = 5;
+	vimnav.savedx = 5;
+
+	/* Press 'v' to enter visual mode first */
+	vimnav_handle_key('v', 0);
+
+	/* Press 'i' then '{' for inner braces */
+	vimnav_handle_key('i', 0);
+	int handled = vimnav_handle_key('{', 0);
+	ASSERT_EQ(1, handled);
+
+	/* Should select "x == 1" (4-9), not including braces */
+	ASSERT_EQ(2, vimnav.mode);  /* VIMNAV_VISUAL */
+	ASSERT_EQ(4, vimnav.anchor_x);
+	ASSERT_EQ(9, vimnav.x);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: vi[ selects inner brackets */
+TEST(vimnav_vi_bracket_selects_inner_brackets)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "arr[0, 1, 2] end");
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.x = 6;  /* Cursor on '1' inside brackets */
+	vimnav.y = 5;
+	vimnav.savedx = 6;
+
+	/* Press 'v' to enter visual mode first */
+	vimnav_handle_key('v', 0);
+
+	/* Press 'i' then '[' for inner brackets */
+	vimnav_handle_key('i', 0);
+	int handled = vimnav_handle_key('[', 0);
+	ASSERT_EQ(1, handled);
+
+	/* Should select "0, 1, 2" (4-10), not including brackets */
+	ASSERT_EQ(2, vimnav.mode);  /* VIMNAV_VISUAL */
+	ASSERT_EQ(4, vimnav.anchor_x);
+	ASSERT_EQ(10, vimnav.x);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: i/a on prompt line passes through to zsh */
+TEST(vimnav_text_objects_prompt_passthrough)
+{
+	mock_term_init(24, 80);
+	mock_set_line(10, "% echo hello");
+
+	term.c.x = 5;
+	term.c.y = 10;
+	term.scr = 0;
+	vimnav.zsh_cursor = 3;
+
+	vimnav_enter();
+
+	/* 'i' on prompt line should pass to zsh (insert mode) */
+	int handled = vimnav_handle_key('i', 0);
+	ASSERT_EQ(0, handled);  /* Pass through */
+
+	/* 'a' on prompt line should pass to zsh (append mode) */
+	handled = vimnav_handle_key('a', 0);
+	ASSERT_EQ(0, handled);  /* Pass through */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: nested parentheses handled correctly */
+TEST(vimnav_vi_paren_nested)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "f(g(x), h(y))");
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.x = 4;  /* Cursor on 'x' inside inner parens */
+	vimnav.y = 5;
+	vimnav.savedx = 4;
+
+	/* Press 'v' to enter visual mode first */
+	vimnav_handle_key('v', 0);
+
+	/* Press 'i' then '(' for inner parens */
+	vimnav_handle_key('i', 0);
+	int handled = vimnav_handle_key('(', 0);
+	ASSERT_EQ(1, handled);
+
+	/* Should select just "x" (4-4) from innermost parens g(x) */
+	ASSERT_EQ(2, vimnav.mode);  /* VIMNAV_VISUAL */
+	ASSERT_EQ(4, vimnav.anchor_x);
+	ASSERT_EQ(4, vimnav.x);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: vib is alias for vi( */
+TEST(vimnav_vib_selects_inner_parens)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "func(arg) end");
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.x = 6;  /* Cursor on 'r' inside parens */
+	vimnav.y = 5;
+	vimnav.savedx = 6;
+
+	/* Press 'v' to enter visual mode first */
+	vimnav_handle_key('v', 0);
+
+	/* Press 'i' then 'b' for inner block (parens) */
+	vimnav_handle_key('i', 0);
+	int handled = vimnav_handle_key('b', 0);
+	ASSERT_EQ(1, handled);
+
+	ASSERT_EQ(2, vimnav.mode);  /* VIMNAV_VISUAL */
+	ASSERT_EQ(5, vimnav.anchor_x);  /* After ( */
+	ASSERT_EQ(7, vimnav.x);  /* Before ) */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: viB is alias for vi{ */
+TEST(vimnav_viB_selects_inner_braces)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "if {test} end");
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.x = 5;  /* Cursor on 'e' inside braces */
+	vimnav.y = 5;
+	vimnav.savedx = 5;
+
+	/* Press 'v' to enter visual mode first */
+	vimnav_handle_key('v', 0);
+
+	/* Press 'i' then 'B' for inner Block (braces) */
+	vimnav_handle_key('i', 0);
+	int handled = vimnav_handle_key('B', 0);
+	ASSERT_EQ(1, handled);
+
+	ASSERT_EQ(2, vimnav.mode);  /* VIMNAV_VISUAL */
+	ASSERT_EQ(4, vimnav.anchor_x);  /* After { */
+	ASSERT_EQ(7, vimnav.x);  /* Before } */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: vi( searches right when cursor not inside parens */
+TEST(vimnav_vi_paren_searches_right)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "This line is a test (test)");
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.x = 0;  /* Cursor at "T" of "This" - not inside parens */
+	vimnav.y = 5;
+	vimnav.savedx = 0;
+
+	/* Press 'v' to enter visual mode first */
+	vimnav_handle_key('v', 0);
+
+	/* Press 'i' then '(' */
+	vimnav_handle_key('i', 0);
+	int handled = vimnav_handle_key('(', 0);
+	ASSERT_EQ(1, handled);
+
+	/* Should select "test" inside the parens (21-24) */
+	ASSERT_EQ(2, vimnav.mode);  /* VIMNAV_VISUAL */
+	ASSERT_EQ(21, vimnav.anchor_x);  /* After ( */
+	ASSERT_EQ(24, vimnav.x);  /* Before ) */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: vi( does nothing when no enclosing space exists */
+TEST(vimnav_vi_paren_no_closing)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "This line is also ( a test");
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.x = 5;  /* Cursor somewhere on the line */
+	vimnav.y = 5;
+	vimnav.savedx = 5;
+
+	/* Press 'v' to enter visual mode first */
+	vimnav_handle_key('v', 0);
+
+	/* Press 'i' then '(' */
+	vimnav_handle_key('i', 0);
+	int handled = vimnav_handle_key('(', 0);
+
+	/* Should not find anything - no valid pair */
+	ASSERT_EQ(0, handled);  /* Not handled because no pair found */
+	ASSERT_EQ(2, vimnav.mode);  /* Still in VIMNAV_VISUAL (unchanged) */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: vi( does nothing when parens are to the left of cursor */
+TEST(vimnav_vi_paren_pair_to_left)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "This line (is a) super test");
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.x = 23;  /* Cursor on "test" - parens are to the left */
+	vimnav.y = 5;
+	vimnav.savedx = 23;
+
+	/* Press 'v' to enter visual mode first */
+	vimnav_handle_key('v', 0);
+
+	/* Press 'i' then '(' */
+	vimnav_handle_key('i', 0);
+	int handled = vimnav_handle_key('(', 0);
+
+	/* Should not find anything - pair is to the left */
+	ASSERT_EQ(0, handled);
+	ASSERT_EQ(2, vimnav.mode);  /* Still in VIMNAV_VISUAL (unchanged) */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: vi" searches right when cursor not inside quotes */
+TEST(vimnav_vi_quote_searches_right)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "echo hello \"world\" done");
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.x = 0;  /* Cursor at start - not inside quotes */
+	vimnav.y = 5;
+	vimnav.savedx = 0;
+
+	/* Press 'v' to enter visual mode first */
+	vimnav_handle_key('v', 0);
+
+	/* Press 'i' then '"' */
+	vimnav_handle_key('i', 0);
+	int handled = vimnav_handle_key('"', 0);
+	ASSERT_EQ(1, handled);
+
+	/* Should select "world" inside the quotes (12-16) */
+	ASSERT_EQ(2, vimnav.mode);  /* VIMNAV_VISUAL */
+	ASSERT_EQ(12, vimnav.anchor_x);  /* After opening " */
+	ASSERT_EQ(16, vimnav.x);  /* Before closing " */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: vi[ searches right when cursor not inside brackets */
+TEST(vimnav_vi_bracket_searches_right)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "array access [0] here");
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.x = 0;  /* Cursor at start */
+	vimnav.y = 5;
+	vimnav.savedx = 0;
+
+	/* Press 'v' to enter visual mode first */
+	vimnav_handle_key('v', 0);
+
+	/* Press 'i' then '[' */
+	vimnav_handle_key('i', 0);
+	int handled = vimnav_handle_key('[', 0);
+	ASSERT_EQ(1, handled);
+
+	/* Should select "0" inside the brackets */
+	ASSERT_EQ(2, vimnav.mode);  /* VIMNAV_VISUAL */
+	ASSERT_EQ(14, vimnav.anchor_x);  /* After [ */
+	ASSERT_EQ(14, vimnav.x);  /* Before ] */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: va( searches right and includes parens */
+TEST(vimnav_va_paren_searches_right)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "call func(arg) here");
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.x = 0;  /* Cursor at start */
+	vimnav.y = 5;
+	vimnav.savedx = 0;
+
+	/* Press 'v' to enter visual mode first */
+	vimnav_handle_key('v', 0);
+
+	/* Press 'a' then '(' */
+	vimnav_handle_key('a', 0);
+	int handled = vimnav_handle_key('(', 0);
+	ASSERT_EQ(1, handled);
+
+	/* Should select "(arg)" including parens */
+	ASSERT_EQ(2, vimnav.mode);  /* VIMNAV_VISUAL */
+	ASSERT_EQ(9, vimnav.anchor_x);  /* Opening ( */
+	ASSERT_EQ(13, vimnav.x);  /* Closing ) */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: i/a in normal mode from history snap to prompt and pass to zsh */
+TEST(vimnav_ia_normal_mode_snaps_to_prompt)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "history line");
+	mock_set_line(10, "% prompt");
+
+	/* Setup in history (scrolled up) */
+	term.c.x = 5;
+	term.c.y = 10;
+	term.scr = 5;  /* Scrolled up into history */
+	vimnav.zsh_cursor = 0;
+
+	vimnav_enter();
+	vimnav.y = 5;  /* Viewing history line */
+	vimnav.x = 3;
+
+	/* 'i' in normal mode should snap to prompt and pass to zsh */
+	int handled = vimnav_handle_key('i', 0);
+	ASSERT_EQ(0, handled);  /* Passed to zsh */
+	ASSERT_EQ(0, term.scr);  /* Scrolled back to bottom */
+	ASSERT_EQ(10, vimnav.y);  /* At prompt line */
+
+	/* Reset state */
+	term.scr = 5;
+	vimnav.y = 5;
+	vimnav.x = 3;
+
+	/* 'a' in normal mode should also snap to prompt and pass to zsh */
+	handled = vimnav_handle_key('a', 0);
+	ASSERT_EQ(0, handled);  /* Passed to zsh */
+	ASSERT_EQ(0, term.scr);  /* Scrolled back to bottom */
+	ASSERT_EQ(10, vimnav.y);  /* At prompt line */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: pending text object cleared on unknown key */
+TEST(vimnav_textobj_unknown_key_clears_pending)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "hello world");
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.x = 3;
+	vimnav.y = 5;
+	vimnav.savedx = 3;
+
+	/* Press 'v' to enter visual mode first */
+	vimnav_handle_key('v', 0);
+
+	/* Press 'i' then an invalid key 'z' */
+	vimnav_handle_key('i', 0);
+	ASSERT_EQ('i', vimnav.pending_textobj);
+
+	int handled = vimnav_handle_key('z', 0);
+	/* Should clear pending and fall through to default (not handled) */
+	ASSERT_EQ(0, vimnav.pending_textobj);
+	ASSERT_EQ(0, handled);  /* 'z' is not a known command */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
 /* Test suite */
 TEST_SUITE(vimnav)
 {
@@ -1001,6 +1672,29 @@ TEST_SUITE(vimnav)
 	RUN_TEST(vimnav_B_moves_to_prev_WORD);
 	RUN_TEST(vimnav_E_moves_to_WORD_end);
 	RUN_TEST(vimnav_eEWB_prompt_passthrough);
+	/* Text object tests */
+	RUN_TEST(vimnav_viw_selects_inner_word);
+	RUN_TEST(vimnav_vaw_selects_around_word);
+	RUN_TEST(vimnav_viW_selects_inner_WORD);
+	RUN_TEST(vimnav_vi_quote_selects_inner_quotes);
+	RUN_TEST(vimnav_va_quote_selects_around_quotes);
+	RUN_TEST(vimnav_vi_paren_selects_inner_parens);
+	RUN_TEST(vimnav_vi_close_paren_selects_inner_parens);
+	RUN_TEST(vimnav_vi_brace_selects_inner_braces);
+	RUN_TEST(vimnav_vi_bracket_selects_inner_brackets);
+	RUN_TEST(vimnav_text_objects_prompt_passthrough);
+	RUN_TEST(vimnav_vi_paren_nested);
+	RUN_TEST(vimnav_vib_selects_inner_parens);
+	RUN_TEST(vimnav_viB_selects_inner_braces);
+	RUN_TEST(vimnav_textobj_unknown_key_clears_pending);
+	/* Search-right text object tests */
+	RUN_TEST(vimnav_vi_paren_searches_right);
+	RUN_TEST(vimnav_vi_paren_no_closing);
+	RUN_TEST(vimnav_vi_paren_pair_to_left);
+	RUN_TEST(vimnav_vi_quote_searches_right);
+	RUN_TEST(vimnav_vi_bracket_searches_right);
+	RUN_TEST(vimnav_va_paren_searches_right);
+	RUN_TEST(vimnav_ia_normal_mode_snaps_to_prompt);
 }
 
 int
