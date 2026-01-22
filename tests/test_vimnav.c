@@ -701,6 +701,78 @@ TEST(vimnav_yank_clears_zsh_visual)
 	mock_term_free();
 }
 
+/* Test: v toggle off notifies zsh to exit visual mode (sends Escape) */
+TEST(vimnav_v_toggle_off_notifies_zsh)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "hello world");
+
+	term.c.x = 0;
+	term.c.y = 10;
+	vimnav.zsh_visual = 0;  /* Start without zsh visual */
+
+	vimnav_enter();
+
+	/* Simulate scrolling up into history after entering nav mode */
+	term.scr = 5;
+	vimnav.x = 3;
+	vimnav.y = 5;
+
+	/* Enter visual mode in history with v */
+	mock_reset();
+	vimnav_handle_key('v', 0);
+	ASSERT(mock_state.selstart_calls > 0);
+
+	/* Now toggle off visual mode with v - should notify zsh */
+	mock_reset();
+	vimnav.zsh_visual = 1;  /* Simulate zsh still thinking it's in visual mode */
+	vimnav_handle_key('v', 0);
+	ASSERT(mock_state.selclear_calls > 0);
+	/* Should have sent Escape to zsh */
+	ASSERT(mock_state.ttywrite_calls > 0);
+	ASSERT_EQ('\033', mock_state.ttywrite_buf[0]);
+	ASSERT_EQ(0, vimnav.zsh_visual);  /* zsh_visual flag cleared */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: V toggle off notifies zsh to exit visual mode (sends Escape) */
+TEST(vimnav_V_toggle_off_notifies_zsh)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "hello world");
+
+	term.c.x = 0;
+	term.c.y = 10;
+	vimnav.zsh_visual = 0;  /* Start without zsh visual */
+
+	vimnav_enter();
+
+	/* Simulate scrolling up into history after entering nav mode */
+	term.scr = 5;
+	vimnav.x = 3;
+	vimnav.y = 5;
+
+	/* Enter visual line mode with V */
+	mock_reset();
+	vimnav_handle_key('V', 0);
+	ASSERT(mock_state.selstart_calls > 0);
+
+	/* Now toggle off visual line mode with V - should notify zsh */
+	mock_reset();
+	vimnav.zsh_visual = 1;  /* Simulate zsh still thinking it's in visual mode */
+	vimnav_handle_key('V', 0);
+	ASSERT(mock_state.selclear_calls > 0);
+	/* Should have sent Escape to zsh */
+	ASSERT(mock_state.ttywrite_calls > 0);
+	ASSERT_EQ('\033', mock_state.ttywrite_buf[0]);
+	ASSERT_EQ(0, vimnav.zsh_visual);  /* zsh_visual flag cleared */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
 /* Test: h/l keys work on history lines even when prompt ends with just "% " (trailing space stripped) */
 TEST(vimnav_hl_works_on_history_with_empty_prompt)
 {
@@ -772,6 +844,8 @@ TEST_SUITE(vimnav)
 	RUN_TEST(vimnav_cursor_sync_on_return_to_prompt);
 	RUN_TEST(vimnav_visual_mode_defers_cursor_sync);
 	RUN_TEST(vimnav_yank_clears_zsh_visual);
+	RUN_TEST(vimnav_v_toggle_off_notifies_zsh);
+	RUN_TEST(vimnav_V_toggle_off_notifies_zsh);
 	RUN_TEST(vimnav_hl_works_on_history_with_empty_prompt);
 }
 

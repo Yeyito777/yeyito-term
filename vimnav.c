@@ -562,7 +562,9 @@ vimnav_toggle_visual_char(void)
 {
 	if (vimnav.mode == VIMNAV_VISUAL) {
 		vimnav.mode = VIMNAV_NORMAL;
+		vimnav_notify_zsh_visual_end();
 		selclear();
+		vimnav_sync_to_zsh_cursor();
 	} else {
 		vimnav.mode = VIMNAV_VISUAL;
 		vimnav.anchor_x = vimnav.x;
@@ -579,7 +581,9 @@ vimnav_toggle_visual_line(void)
 
 	if (vimnav.mode == VIMNAV_VISUAL_LINE) {
 		vimnav.mode = VIMNAV_NORMAL;
+		vimnav_notify_zsh_visual_end();
 		selclear();
+		vimnav_sync_to_zsh_cursor();
 	} else {
 		vimnav.mode = VIMNAV_VISUAL_LINE;
 		vimnav.anchor_abs_y = screen_y - term.scr;

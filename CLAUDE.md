@@ -3,11 +3,47 @@ This fork coordinates with zsh through .zshrc to be able to do a lot of its oper
 You can check the zsh config required for many of the features in this terminal to work in: README.md.
 Make sure to modify the required zsh config in README.md if you make a change that needs a change in it.
 
-## CODE ORGANIZATION 
+## CODE ORGANIZATION
 - st.c/st.h - Core terminal functionality
 - x.c - X11 windowing
 - vimnav.c/vimnav.h - Vim-style navigation mode
 - sshind.c/sshind.h - SSH indicator overlay
+
+## TERMINOLOGY & IDIOMS
+
+### Nav mode (vim navigation mode)
+- Activated by pressing Escape in the terminal (when zsh is in vi command mode)
+- Allows vim-like navigation through terminal history using h/j/k/l, Ctrl+u/d, etc.
+- Controlled by `vimnav.mode`: `VIMNAV_INACTIVE`, `VIMNAV_NORMAL`, `VIMNAV_VISUAL`, `VIMNAV_VISUAL_LINE`
+- Check with `tisvimnav()` - returns true if nav mode is active
+
+### Prompt space vs history
+- **Prompt space**: The current command line area where zsh has cursor control (the prompt + any text being typed)
+- **History**: Lines above the prompt containing previous command output - nav mode can scroll through this
+- `vimnav_is_prompt_space(y)`: Returns true if screen row y is within the prompt/command area
+- `term.scr`: Scroll offset - 0 means viewing bottom (prompt visible), >0 means scrolled up into history
+
+### Snap to prompt
+- When pressing editing keys (x, d, c, D, etc.) while scrolled up viewing history, the terminal "snaps back" to the prompt line and passes the key to zsh
+- Implemented via `vimnav_snap_to_prompt()` which scrolls down and syncs cursor position
+
+### zsh coordination
+- This terminal works closely with zsh's vi mode
+- zsh reports cursor position and visual selection state to st via OSC escape sequences
+- `vimnav.zsh_cursor`: Cursor position within the command line (reported by zsh)
+- `vimnav.zsh_visual`: Whether zsh is in visual selection mode
+- Keys in prompt space are passed through to zsh; keys in history are handled by st's nav mode
+
+### Scrollback history buffer
+- `term.hist[HISTSIZE]`: Circular buffer storing lines that scrolled off screen
+- `term.histi`: Current index in the circular history buffer
+- `term.scr`: How many lines we're scrolled back (0 = at bottom)
+- `TLINE(y)` macro: Returns the correct line (from history or screen) based on scroll position
+
+### Alt screen
+- Alternate screen buffer used by programs like vim, less, htop
+- `IS_SET(MODE_ALTSCREEN)`: Check if alt screen is active
+- History/scrollback is disabled in alt screen mode
 
 ## QA
 Whenever you finish an addition to the codebase, run all the tests with `make test`
