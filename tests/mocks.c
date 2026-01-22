@@ -31,6 +31,8 @@ mock_term_init(int rows, int cols)
 	term.row = rows;
 	term.col = cols;
 	term.maxcol = cols;
+	term.top = 0;
+	term.bot = rows - 1;
 
 	/* Allocate lines */
 	term.line = malloc(rows * sizeof(Line));
@@ -40,6 +42,13 @@ mock_term_init(int rows, int cols)
 		term.line[i] = calloc(cols, sizeof(Glyph));
 		term.dirty[i] = 1;
 	}
+
+	/* Allocate history buffer */
+	for (i = 0; i < HISTSIZE; i++) {
+		term.hist[i] = calloc(cols, sizeof(Glyph));
+	}
+	term.histi = 0;
+	term.scr = 0;
 
 	/* Initialize cursor at origin */
 	term.c.x = 0;
@@ -64,6 +73,14 @@ mock_term_free(void)
 	if (term.dirty) {
 		free(term.dirty);
 		term.dirty = NULL;
+	}
+
+	/* Free history buffer */
+	for (i = 0; i < HISTSIZE; i++) {
+		if (term.hist[i]) {
+			free(term.hist[i]);
+			term.hist[i] = NULL;
+		}
 	}
 }
 
@@ -326,4 +343,63 @@ ttywrite(const char *s, size_t n, int may_echo)
 		mock_state.ttywrite_buf[mock_state.ttywrite_buf_len++] = s[i];
 	}
 	mock_state.ttywrite_buf[mock_state.ttywrite_buf_len] = '\0';
+}
+
+void
+tscrollup(int orig, int n, int copyhist)
+{
+	int i;
+	Line temp;
+
+	mock_state.tscrollup_calls++;
+
+	if (n > term.bot - orig + 1)
+		n = term.bot - orig + 1;
+	if (n < 0)
+		n = 0;
+
+	if (copyhist && term.hist[0]) {
+		term.histi = (term.histi + 1) % HISTSIZE;
+		temp = term.hist[term.histi];
+		term.hist[term.histi] = term.line[orig];
+		term.line[orig] = temp;
+	}
+
+	/* Clear the region */
+	for (i = 0; i < term.col && term.line[orig]; i++) {
+		term.line[orig][i].u = ' ';
+		term.line[orig][i].mode = 0;
+	}
+
+	/* Scroll lines up */
+	for (i = orig; i <= term.bot - n && term.line[i]; i++) {
+		temp = term.line[i];
+		term.line[i] = term.line[i + n];
+		term.line[i + n] = temp;
+	}
+}
+
+void
+tclearregion(int x1, int y1, int x2, int y2)
+{
+	int x, y;
+
+	mock_state.tclearregion_calls++;
+
+	for (y = y1; y <= y2 && y < term.row; y++) {
+		for (x = x1; x <= x2 && x < term.col; x++) {
+			if (term.line[y]) {
+				term.line[y][x].u = ' ';
+				term.line[y][x].mode = 0;
+			}
+		}
+	}
+}
+
+void
+selscroll(int orig, int n)
+{
+	(void)orig;
+	(void)n;
+	/* Stub for selection scroll */
 }

@@ -79,6 +79,8 @@ typedef struct {
 	int xclipcopy_calls;
 	int clippaste_calls;
 	int ttywrite_calls;
+	int tscrollup_calls;
+	int tclearregion_calls;
 
 	/* Last arguments */
 	struct { int x, y, snap; } last_selstart;
@@ -101,6 +103,11 @@ void mock_term_free(void);
 
 /* Set line content for testing */
 void mock_set_line(int y, const char *content);
+
+/* Terminal scroll/clear functions (implemented in mocks for testing) */
+void tscrollup(int orig, int n, int copyhist);
+void tclearregion(int x1, int y1, int x2, int y2);
+void selscroll(int orig, int n);
 
 /*
  * X11/Xft mock types and functions for sshind testing

@@ -76,12 +76,20 @@ tests/test_sshind.o: tests/test_sshind.c tests/test.h sshind.h sshind.c
 test_sshind: tests/test_sshind.o
 	$(CC) -o tests/test_sshind tests/test_sshind.o
 
-test: test_vimnav test_sshind
+# scrollback tests
+tests/test_scrollback.o: tests/test_scrollback.c tests/test.h tests/mocks.h st.h
+	$(CC) $(TESTFLAGS) -c tests/test_scrollback.c -o tests/test_scrollback.o
+
+test_scrollback: tests/mocks.o tests/test_scrollback.o
+	$(CC) -o tests/test_scrollback tests/mocks.o tests/test_scrollback.o
+
+test: test_vimnav test_sshind test_scrollback
 	@echo "Running tests..."
 	@./tests/test_vimnav
 	@./tests/test_sshind
+	@./tests/test_scrollback
 
 clean-tests:
-	rm -f tests/*.o tests/test_vimnav tests/test_sshind
+	rm -f tests/*.o tests/test_vimnav tests/test_sshind tests/test_scrollback
 
 .PHONY: all clean dist install uninstall test clean-tests

@@ -1804,7 +1804,23 @@ csihandle(void)
 			tclearregion(0, term.c.y, term.c.x, term.c.y);
 			break;
 		case 2: /* all */
-			tclearregion(0, 0, term.col-1, term.row-1);
+			if (!IS_SET(MODE_ALTSCREEN)) {
+				int i, last_content = -1;
+				/* Find last line with content */
+				for (i = term.row - 1; i >= 0; i--) {
+					if (tlinelen(i) > 0) {
+						last_content = i;
+						break;
+					}
+				}
+				/* Scroll only content lines into history */
+				for (i = 0; i <= last_content; i++)
+					tscrollup(0, 1, 1);
+				/* Clear any remaining lines */
+				tclearregion(0, 0, term.col-1, term.row-1);
+			} else {
+				tclearregion(0, 0, term.col-1, term.row-1);
+			}
 			break;
 		default:
 			goto unknown;
