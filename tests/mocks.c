@@ -106,6 +106,29 @@ mock_set_line(int y, const char *content)
 	}
 }
 
+void
+mock_set_hist(int idx, const char *content)
+{
+	int i;
+	int len;
+
+	idx = (idx + HISTSIZE) % HISTSIZE;
+	if (!term.hist[idx])
+		return;
+
+	len = strlen(content);
+	if (len > term.col)
+		len = term.col;
+
+	/* Clear line first */
+	memset(term.hist[idx], 0, term.col * sizeof(Glyph));
+
+	/* Set content */
+	for (i = 0; i < len; i++) {
+		term.hist[idx][i].u = content[i];
+	}
+}
+
 /* Stub implementations of st.c functions */
 
 int

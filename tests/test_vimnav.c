@@ -1636,6 +1636,153 @@ TEST(vimnav_textobj_unknown_key_clears_pending)
 	mock_term_free();
 }
 
+/* Test: scrolling up works after Ctrl+L clears screen (but history has content)
+ * This is a regression test for the bug where scrolling was blocked after clear
+ * because the check only looked at the immediate top line (which was empty). */
+TEST(vimnav_scroll_up_after_clear)
+{
+	mock_term_init(24, 80);
+
+	/* Simulate post-Ctrl+L state:
+	 * - Screen is cleared (all lines empty)
+	 * - History has content from before the clear
+	 * - term.scr = 0 (not scrolled)
+	 */
+
+	/* All screen lines are empty (default from mock_term_init) */
+
+	/* Set up history with content - simulate what Ctrl+L would have saved */
+	term.histi = 3;  /* History has 3 lines */
+	mock_set_hist(1, "output line 1");
+	mock_set_hist(2, "output line 2");
+	mock_set_hist(3, "output line 3");
+
+	/* Cursor at bottom of screen (prompt position after clear) */
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.y = 0;  /* At top of visible screen */
+	vimnav.x = 0;
+	vimnav.savedx = 0;
+
+	/* Try to scroll up with 'k' - should work because history has content */
+	int handled = vimnav_handle_key('k', 0);
+	ASSERT_EQ(1, handled);
+
+	/* term.scr should have increased (scrolled into history) */
+	ASSERT(term.scr > 0);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: Ctrl+u scrolls up after screen clear */
+TEST(vimnav_ctrl_u_after_clear)
+{
+	mock_term_init(24, 80);
+
+	/* All screen lines empty, history has content */
+	term.histi = 5;
+	mock_set_hist(1, "history 1");
+	mock_set_hist(2, "history 2");
+	mock_set_hist(3, "history 3");
+	mock_set_hist(4, "history 4");
+	mock_set_hist(5, "history 5");
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.y = 0;
+	vimnav.x = 0;
+	vimnav.savedx = 0;
+
+	/* Ctrl+u should scroll up */
+	int handled = vimnav_handle_key('u', 4);  /* 4 = ControlMask */
+	ASSERT_EQ(1, handled);
+
+	/* Should have scrolled */
+	ASSERT(term.scr > 0);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: scrolling stops when history is truly empty */
+TEST(vimnav_scroll_stops_at_empty_history)
+{
+	mock_term_init(24, 80);
+
+	/* Screen empty, history also empty (no content ever saved) */
+	term.histi = 0;
+	/* All history lines are blank (default from init) */
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.y = 0;
+	vimnav.x = 0;
+
+	/* Try to scroll up - should NOT work because history is empty */
+	vimnav_handle_key('k', 0);
+
+	/* term.scr should still be 0 (no scrolling happened) */
+	ASSERT_EQ(0, term.scr);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: can scroll to see ALL history lines including the oldest
+ * Regression test: history index calculation must match TLINE macro (+1) */
+TEST(vimnav_scroll_reaches_oldest_history)
+{
+	mock_term_init(24, 80);
+
+	/* Simulate: user ran "ls" which output 2 lines, then Ctrl+L
+	 * History should have (in order of saving):
+	 * hist[1] = "% ls" (original command)
+	 * hist[2] = "file1"
+	 * hist[3] = "file2"
+	 */
+	term.histi = 3;
+	mock_set_hist(1, "% ls");
+	mock_set_hist(2, "file1");
+	mock_set_hist(3, "file2");
+
+	/* Screen is cleared (empty) */
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.y = 0;
+	vimnav.x = 0;
+	vimnav.savedx = 0;
+
+	/* Scroll up 3 times - should be able to reach all 3 history lines */
+	vimnav_handle_key('k', 0);  /* scr = 1, see file2 */
+	ASSERT_EQ(1, term.scr);
+
+	vimnav_handle_key('k', 0);  /* scr = 2, see file1 */
+	ASSERT_EQ(2, term.scr);
+
+	vimnav_handle_key('k', 0);  /* scr = 3, see "% ls" - THIS WAS THE BUG */
+	ASSERT_EQ(3, term.scr);
+
+	/* Fourth scroll should NOT work - no more history */
+	vimnav_handle_key('k', 0);
+	ASSERT_EQ(3, term.scr);  /* Still 3, didn't scroll further */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
 /* Test suite */
 TEST_SUITE(vimnav)
 {
@@ -1695,6 +1842,11 @@ TEST_SUITE(vimnav)
 	RUN_TEST(vimnav_vi_bracket_searches_right);
 	RUN_TEST(vimnav_va_paren_searches_right);
 	RUN_TEST(vimnav_ia_normal_mode_snaps_to_prompt);
+	/* Scrollback after clear tests */
+	RUN_TEST(vimnav_scroll_up_after_clear);
+	RUN_TEST(vimnav_ctrl_u_after_clear);
+	RUN_TEST(vimnav_scroll_stops_at_empty_history);
+	RUN_TEST(vimnav_scroll_reaches_oldest_history);
 }
 
 int

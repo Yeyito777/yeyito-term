@@ -261,12 +261,30 @@ vimnav_move_right(void)
 	vimnav_update_selection();
 }
 
-/* Check if a line has any non-space content */
+/* Check if there's any content in history above current scroll position.
+ * This looks ahead to see if scrolling up would eventually show content,
+ * even if the immediate next lines are empty. */
 static int
-vimnav_line_has_content(int screen_y)
+vimnav_has_history_content(int scroll_offset)
 {
-	int len = tlinelen(screen_y);
-	return len > 0;
+	int i, idx;
+	/* Check up to 10 lines ahead in history for any content */
+	for (i = 0; i < 10 && scroll_offset + i < HISTSIZE; i++) {
+		/* Calculate the history index for this scroll position.
+		 * Must match TLINE macro: hist[(y + histi - scr + HISTSIZE + 1) % HISTSIZE]
+		 * For y=0 (top line) at scroll_offset, looking i lines further back: */
+		idx = (term.histi - scroll_offset - i + HISTSIZE + 1) % HISTSIZE;
+		if (term.hist[idx]) {
+			/* Check if this history line has content */
+			int j;
+			for (j = term.col - 1; j >= 0; j--) {
+				if (term.hist[idx][j].u != ' ' && term.hist[idx][j].u != 0) {
+					return 1;  /* Found content */
+				}
+			}
+		}
+	}
+	return 0;  /* No content found in lookahead */
 }
 
 /* Scroll helper that respects vim nav boundaries and moves cursor */
@@ -278,10 +296,11 @@ vimnav_scroll_up(int n)
 	int i;
 	int linelen;
 
-	/* Scroll up incrementally, checking for content */
+	/* Scroll up incrementally, checking for content in history */
 	for (i = 0; i < n && term.scr < HISTSIZE - 1; i++) {
 		term.scr++;
-		if (tlinelen(0) == 0) {
+		/* Stop if there's no content anywhere in the history we'd scroll into */
+		if (!vimnav_has_history_content(term.scr)) {
 			term.scr--;
 			break;
 		}
@@ -368,8 +387,8 @@ vimnav_move_up(void)
 	} else {
 		/* At top of screen, try to scroll up */
 		term.scr++;
-		if (term.scr > HISTSIZE - 1 || tlinelen(0) == 0) {
-			/* Can't scroll or no content, revert */
+		if (term.scr > HISTSIZE - 1 || !vimnav_has_history_content(term.scr)) {
+			/* Can't scroll or no content in history, revert */
 			term.scr = old_scr;
 		} else {
 			tfulldirt();
