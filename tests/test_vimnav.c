@@ -2050,6 +2050,141 @@ TEST(vimnav_fF_prompt_passthrough)
 	mock_term_free();
 }
 
+/* Test: H moves cursor to top of visible screen */
+TEST(vimnav_H_moves_to_screen_top)
+{
+	mock_term_init(24, 80);
+	mock_set_line(0, "top line");
+	mock_set_line(10, "middle line");
+	mock_set_line(20, "% prompt");
+
+	term.c.x = 5;
+	term.c.y = 20;
+	term.scr = 0;
+	vimnav.zsh_cursor = 0;
+
+	vimnav_enter();
+	vimnav.y = 10;  /* Start in middle of screen */
+	vimnav.x = 5;
+	vimnav.savedx = 5;
+
+	int handled = vimnav_handle_key('H', 0);
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(0, vimnav.y);  /* Moved to top (row 0) */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: L moves cursor to prompt line and syncs to zsh cursor */
+TEST(vimnav_L_moves_to_prompt_and_syncs)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "history line");
+	mock_set_line(20, "% prompt text");
+
+	term.c.x = 5;
+	term.c.y = 20;
+	term.scr = 0;
+	vimnav.zsh_cursor = 3;  /* zsh cursor at position 3 after prompt */
+
+	vimnav_enter();
+	vimnav.y = 5;  /* Start in history */
+	vimnav.x = 3;
+	vimnav.savedx = 3;
+
+	int handled = vimnav_handle_key('L', 0);
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(20, vimnav.y);  /* Moved to prompt line */
+	ASSERT(tisvimnav());  /* Still in nav mode */
+	/* x should be synced to zsh cursor: prompt_end (2) + zsh_cursor (3) = 5 */
+	ASSERT_EQ(5, vimnav.x);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: L scrolls down if scrolled up, stays in nav mode */
+TEST(vimnav_L_scrolls_down_if_needed)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "history line");
+	mock_set_line(20, "% prompt");
+
+	term.c.x = 5;
+	term.c.y = 20;
+	term.scr = 5;  /* Scrolled up */
+	vimnav.zsh_cursor = 0;
+
+	vimnav_enter();
+	vimnav.y = 5;
+	vimnav.x = 3;
+	vimnav.savedx = 3;
+
+	int handled = vimnav_handle_key('L', 0);
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(0, term.scr);  /* Scrolled back to bottom */
+	ASSERT_EQ(20, vimnav.y);  /* At prompt line */
+	ASSERT(tisvimnav());  /* Still in nav mode */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: M moves cursor to middle between top and prompt */
+TEST(vimnav_M_moves_to_middle)
+{
+	mock_term_init(24, 80);
+	mock_set_line(0, "top line");
+	mock_set_line(10, "middle line");
+	mock_set_line(20, "% prompt");
+
+	term.c.x = 5;
+	term.c.y = 20;  /* Prompt at row 20 */
+	term.scr = 0;
+	vimnav.zsh_cursor = 0;
+
+	vimnav_enter();
+	vimnav.y = 0;  /* Start at top */
+	vimnav.x = 0;
+	vimnav.savedx = 0;
+
+	int handled = vimnav_handle_key('M', 0);
+	ASSERT_EQ(1, handled);
+	/* Middle = 20 / 2 = 10 */
+	ASSERT_EQ(10, vimnav.y);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: M uses screen bottom when scrolled */
+TEST(vimnav_M_middle_when_scrolled)
+{
+	mock_term_init(24, 80);
+	for (int i = 0; i < 24; i++) {
+		mock_set_line(i, "line content");
+	}
+
+	term.c.x = 5;
+	term.c.y = 23;  /* Prompt at bottom */
+	term.scr = 10;  /* Scrolled up - prompt not visible */
+	vimnav.zsh_cursor = 0;
+
+	vimnav_enter();
+	vimnav.y = 0;
+	vimnav.x = 0;
+	vimnav.savedx = 0;
+
+	int handled = vimnav_handle_key('M', 0);
+	ASSERT_EQ(1, handled);
+	/* When scrolled, bottom = term.row - 1 = 23, middle = 23 / 2 = 11 */
+	ASSERT_EQ(11, vimnav.y);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
 /* Test suite */
 TEST_SUITE(vimnav)
 {
@@ -2123,6 +2258,12 @@ TEST_SUITE(vimnav)
 	RUN_TEST(vimnav_semicolon_repeats_F_backward);
 	RUN_TEST(vimnav_comma_repeats_F_forward);
 	RUN_TEST(vimnav_fF_prompt_passthrough);
+	/* H/M/L screen navigation tests */
+	RUN_TEST(vimnav_H_moves_to_screen_top);
+	RUN_TEST(vimnav_L_moves_to_prompt_and_syncs);
+	RUN_TEST(vimnav_L_scrolls_down_if_needed);
+	RUN_TEST(vimnav_M_moves_to_middle);
+	RUN_TEST(vimnav_M_middle_when_scrolled);
 }
 
 int
