@@ -1,6 +1,4 @@
-- [ ] Add H/L/M cursor movement (bounded by the prompt line)
 - [ ] Add Ctrl+num cursor movement relative to the first line (nvim config-like)
-- [ ] Add Ctrl+num keybindings for cursor jumping (bounded by the prompt line)
 - [ ] Add gg/G
 - [ ] Add zz
 - [ ] Add a keybind or way to go to previous command?

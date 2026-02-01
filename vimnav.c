@@ -1047,10 +1047,24 @@ static void
 vimnav_move_top(void)
 {
 	int linelen;
+	int was_in_prompt_space = vimnav_is_prompt_space(vimnav.y);
 
 	/* Scroll to top of history, stopping at blank lines */
 	vimnav_scroll_up(HISTSIZE);
 	vimnav.y = 0;
+
+	/* Handoff: if we left prompt space with zsh in visual mode, inherit selection */
+	if (was_in_prompt_space && !vimnav_is_prompt_space(vimnav.y) &&
+	    vimnav.zsh_visual && vimnav.mode == VIMNAV_NORMAL) {
+		int prompt_end = vimnav_find_prompt_end(term.c.y);
+		vimnav.anchor_x = prompt_end + vimnav.zsh_visual_anchor;
+		vimnav.anchor_abs_y = term.c.y - term.scr;  /* Anchor stays on prompt line */
+		if (vimnav.zsh_visual_line) {
+			vimnav.mode = VIMNAV_VISUAL_LINE;
+		} else {
+			vimnav.mode = VIMNAV_VISUAL;
+		}
+	}
 
 	linelen = tlinelen(vimnav.y);
 	vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
@@ -1074,6 +1088,9 @@ vimnav_move_bottom(void)
 	vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
 	if (vimnav.x < 0)
 		vimnav.x = 0;
+
+	/* Sync cursor to zsh position when entering prompt space */
+	vimnav_sync_to_zsh_cursor();
 	vimnav_update_selection();
 }
 
@@ -1324,6 +1341,7 @@ vimnav_enter(void)
 	vimnav.scr_at_entry = term.scr;  /* Track scroll position at entry (should be 0) */
 	vimnav.pending_textobj = 0;  /* Clear any pending text object state */
 	vimnav.pending_find = 0;     /* Clear any pending find state */
+	vimnav.pending_g = 0;        /* Clear any pending g state */
 
 	/* Use zsh-reported cursor position for x coordinate */
 	prompt_end = vimnav_find_prompt_end(vimnav.y);
@@ -1361,6 +1379,7 @@ vimnav_exit(void)
 	vimnav.mode = VIMNAV_INACTIVE;
 	vimnav.pending_textobj = 0;
 	vimnav.pending_find = 0;
+	vimnav.pending_g = 0;
 	selclear();
 	tfulldirt();
 }
@@ -1392,6 +1411,16 @@ vimnav_handle_key(ulong ksym, uint state)
 		vimnav.last_find_forward = forward;
 		vimnav_find_char(ksym, forward);
 		return 1;
+	}
+
+	/* Handle pending g (for gg command) */
+	if (vimnav.pending_g) {
+		vimnav.pending_g = 0;  /* Clear pending state */
+		if (ksym == 'g') {
+			vimnav_move_top();
+			return 1;
+		}
+		/* Any other key after g - ignore the g and process the key normally */
 	}
 
 	/* Handle Ctrl+scroll commands */
@@ -1480,7 +1509,7 @@ vimnav_handle_key(ulong ksym, uint state)
 			vimnav_move_WORD_end();
 		break;
 	case 'g':
-		vimnav_move_top();
+		vimnav.pending_g = 1;  /* Wait for second g (gg command) */
 		break;
 	case 'G':
 		vimnav_move_bottom();

@@ -29,6 +29,8 @@ typedef struct {
 	int pending_find;    /* 'f' or 'F' when waiting for char, 0 otherwise */
 	Rune last_find_char; /* character from last f/F search */
 	int last_find_forward; /* 1 if last search was f (forward), 0 if F (backward) */
+	/* g command state (for gg) */
+	int pending_g;       /* 1 when waiting for second g, 0 otherwise */
 } VimNav;
 
 /* Global vim navigation state (defined in vimnav.c) */

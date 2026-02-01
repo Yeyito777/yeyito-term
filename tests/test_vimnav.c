@@ -2185,6 +2185,131 @@ TEST(vimnav_M_middle_when_scrolled)
 	mock_term_free();
 }
 
+/* Test: gg (double g) moves to top of history */
+TEST(vimnav_gg_moves_to_top)
+{
+	mock_term_init(24, 80);
+	mock_set_line(0, "oldest line");
+	mock_set_line(5, "middle line");
+	mock_set_line(20, "% prompt");
+
+	term.c.x = 5;
+	term.c.y = 20;
+	term.scr = 0;
+	vimnav.zsh_cursor = 0;
+
+	vimnav_enter();
+	vimnav.y = 10;  /* Start somewhere in the middle */
+	vimnav.x = 3;
+	vimnav.savedx = 3;
+
+	/* First g sets pending, doesn't move */
+	int handled = vimnav_handle_key('g', 0);
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(1, vimnav.pending_g);
+	ASSERT_EQ(10, vimnav.y);  /* Didn't move yet */
+
+	/* Second g moves to top */
+	handled = vimnav_handle_key('g', 0);
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(0, vimnav.pending_g);  /* Cleared */
+	ASSERT_EQ(0, vimnav.y);  /* Moved to top */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: single g followed by non-g key doesn't move */
+TEST(vimnav_g_nonmatch_clears_pending)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "hello world");
+	mock_set_line(20, "% prompt");
+
+	term.c.x = 5;
+	term.c.y = 20;
+	term.scr = 5;  /* Scrolled */
+	vimnav.zsh_cursor = 0;
+
+	vimnav_enter();
+	vimnav.y = 5;
+	vimnav.x = 3;
+	vimnav.savedx = 3;
+
+	/* First g sets pending */
+	vimnav_handle_key('g', 0);
+	ASSERT_EQ(1, vimnav.pending_g);
+
+	/* Non-g key clears pending and processes normally (j moves down) */
+	int handled = vimnav_handle_key('j', 0);
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(0, vimnav.pending_g);  /* Cleared */
+	ASSERT_EQ(6, vimnav.y);  /* Moved down, not to top */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: G moves to bottom (prompt) and syncs cursor */
+TEST(vimnav_G_moves_to_prompt)
+{
+	mock_term_init(24, 80);
+	mock_set_line(0, "top line");
+	mock_set_line(20, "% prompt text");
+
+	term.c.x = 5;
+	term.c.y = 20;
+	term.scr = 10;  /* Scrolled up */
+	vimnav.zsh_cursor = 3;  /* zsh cursor at offset 3 */
+
+	vimnav_enter();
+	vimnav.y = 0;  /* Start at top */
+	vimnav.x = 0;
+	vimnav.savedx = 0;
+
+	int handled = vimnav_handle_key('G', 0);
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(0, term.scr);  /* Scrolled back to bottom */
+	ASSERT_EQ(20, vimnav.y);  /* At prompt line */
+	/* Cursor synced: prompt_end (2) + zsh_cursor (3) = 5 */
+	ASSERT_EQ(5, vimnav.x);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: gg inherits visual mode from zsh when leaving prompt */
+TEST(vimnav_gg_inherits_zsh_visual)
+{
+	mock_term_init(24, 80);
+	mock_set_line(0, "history line");
+	mock_set_line(20, "% command text");
+
+	term.c.x = 5;
+	term.c.y = 20;
+	term.scr = 0;  /* At prompt */
+	vimnav.zsh_cursor = 5;
+	vimnav.zsh_visual = 0;  /* Not in visual mode at entry */
+
+	vimnav_enter();
+	ASSERT_EQ(1, vimnav.mode);  /* VIMNAV_NORMAL */
+
+	/* Now simulate zsh entering visual mode while we're in nav mode at prompt */
+	vimnav.zsh_visual = 1;
+	vimnav.zsh_visual_anchor = 2;
+	vimnav.zsh_visual_line = 0;
+
+	/* gg should inherit selection when leaving prompt space */
+	vimnav_handle_key('g', 0);
+	vimnav_handle_key('g', 0);
+
+	ASSERT_EQ(0, vimnav.y);  /* At top */
+	ASSERT_EQ(2, vimnav.mode);  /* VIMNAV_VISUAL - inherited zsh visual mode */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
 /* Test suite */
 TEST_SUITE(vimnav)
 {
@@ -2264,6 +2389,11 @@ TEST_SUITE(vimnav)
 	RUN_TEST(vimnav_L_scrolls_down_if_needed);
 	RUN_TEST(vimnav_M_moves_to_middle);
 	RUN_TEST(vimnav_M_middle_when_scrolled);
+	/* gg/G navigation tests */
+	RUN_TEST(vimnav_gg_moves_to_top);
+	RUN_TEST(vimnav_g_nonmatch_clears_pending);
+	RUN_TEST(vimnav_G_moves_to_prompt);
+	RUN_TEST(vimnav_gg_inherits_zsh_visual);
 }
 
 int
