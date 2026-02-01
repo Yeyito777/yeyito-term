@@ -97,6 +97,7 @@ extern void clippaste(const Arg *);
 /* Globals - exported via vimnav.h */
 VimNav vimnav = { .mode = VIMNAV_INACTIVE };
 static int vimnav_paste_strip_newlines = 0;
+static int vimnav_paste_after_cursor = 0;  /* Send Escape after paste completes */
 
 /* Forward declarations */
 static int vimnav_find_prompt_end(int screen_y);
@@ -1123,6 +1124,11 @@ void
 vimnav_paste_done(void)
 {
 	vimnav_paste_strip_newlines = 0;
+	if (vimnav_paste_after_cursor) {
+		/* Return to vicmd mode after paste */
+		ttywrite("\033", 1, 1);
+		vimnav_paste_after_cursor = 0;
+	}
 }
 
 static void
@@ -1523,10 +1529,13 @@ vimnav_handle_key(ulong ksym, uint state)
 		}
 		break;
 
-	/* Paste - snap to prompt and let zsh handle it */
+	/* Paste after cursor (vim-style 'p') */
 	case 'p':
 		vimnav_snap_to_prompt();
-		ttywrite("p", 1, 1);
+		vimnav_paste_strip_newlines = 1;
+		vimnav_paste_after_cursor = 1;
+		ttywrite("a", 1, 1);  /* Enter insert mode after cursor */
+		clippaste(NULL);
 		break;
 
 	/* Escape: clear visual selection or stay in normal mode */
