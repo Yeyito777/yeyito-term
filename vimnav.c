@@ -231,6 +231,9 @@ vimnav_curline_y(void)
 		return -1;
 	if (vimnav_is_prompt_space(vimnav.y))
 		return -1;
+	/* When not scrolled, don't highlight rows below cursor (empty space) */
+	if (term.scr == 0 && vimnav.y > term.c.y)
+		return -1;
 	return vimnav.y;
 }
 

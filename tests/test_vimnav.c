@@ -2408,6 +2408,35 @@ TEST(vimnav_curline_y_visual_mode)
 	mock_term_free();
 }
 
+/* Test vimnav_curline_y returns -1 when vimnav.y is below cursor (empty space after clear) */
+TEST(vimnav_curline_y_below_cursor)
+{
+	mock_term_init(24, 80);
+	mock_set_line(0, "% prompt");
+
+	/* Simulate state after Ctrl+L clears screen:
+	 * - term.scr is 0 (not scrolled)
+	 * - term.c.y is 0 (cursor at top after clear)
+	 * - vimnav.y is still at old position (e.g., 10) */
+	term.c.y = 0;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.y = 10;  /* Stale position pointing to empty space */
+	vimnav.mode = 1;  /* VIMNAV_NORMAL */
+	vimnav.zsh_visual = 0;
+
+	/* Should return -1 since vimnav.y > term.c.y when not scrolled */
+	ASSERT_EQ(-1, vimnav_curline_y());
+
+	/* When scrolled into history, highlight should work even if vimnav.y > term.c.y */
+	term.scr = 5;  /* Now scrolled into history */
+	ASSERT_EQ(10, vimnav_curline_y());
+
+	vimnav_exit();
+	mock_term_free();
+}
+
 /* Test: empty lines are selectable in visual mode (column 0 acts as virtual newline) */
 TEST(vimnav_visual_empty_line_selectable)
 {
@@ -2529,6 +2558,7 @@ TEST_SUITE(vimnav)
 	RUN_TEST(vimnav_curline_y_prompt_space);
 	RUN_TEST(vimnav_curline_y_history);
 	RUN_TEST(vimnav_curline_y_visual_mode);
+	RUN_TEST(vimnav_curline_y_below_cursor);
 	/* Empty line selection test */
 	RUN_TEST(vimnav_visual_empty_line_selectable);
 }
