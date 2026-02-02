@@ -218,6 +218,22 @@ tisvimnav(void)
 	return vimnav.mode != VIMNAV_INACTIVE;
 }
 
+int
+vimnav_curline_y(void)
+{
+	/* Returns the y coordinate of the current line to highlight,
+	 * or -1 if no line should be highlighted.
+	 * Only highlight when in normal nav mode (not visual), NOT in prompt space,
+	 * and zsh is not in visual mode. */
+	if (vimnav.mode != VIMNAV_NORMAL)
+		return -1;
+	if (vimnav.zsh_visual)
+		return -1;
+	if (vimnav_is_prompt_space(vimnav.y))
+		return -1;
+	return vimnav.y;
+}
+
 static int
 vimnav_screen_y(void)
 {

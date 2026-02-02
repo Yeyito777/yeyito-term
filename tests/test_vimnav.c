@@ -2310,6 +2310,104 @@ TEST(vimnav_gg_inherits_zsh_visual)
 	mock_term_free();
 }
 
+/* Test vimnav_curline_y returns -1 when not in nav mode */
+TEST(vimnav_curline_y_inactive)
+{
+	mock_term_init(80, 24);
+	term.c.y = 23;
+
+	/* Not in nav mode */
+	vimnav.mode = 0;
+	ASSERT_EQ(-1, vimnav_curline_y());
+
+	mock_term_free();
+}
+
+/* Test vimnav_curline_y returns -1 when in prompt space */
+TEST(vimnav_curline_y_prompt_space)
+{
+	mock_term_init(80, 24);
+	term.c.y = 23;
+	term.scr = 0;
+	mock_set_line(23, "% cmd");
+
+	vimnav_enter();
+	/* Cursor is at prompt line (term.c.y), which is prompt space */
+	ASSERT_EQ(23, vimnav.y);
+	ASSERT_EQ(-1, vimnav_curline_y());  /* Should not highlight in prompt space */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test vimnav_curline_y returns y when scrolled into history */
+TEST(vimnav_curline_y_history)
+{
+	int i;
+	mock_term_init(80, 24);
+
+	/* Add some history */
+	for (i = 0; i < 30; i++) {
+		mock_set_hist(i, "history line");
+	}
+	term.c.y = 23;
+	term.scr = 0;
+	mock_set_line(23, "% cmd");
+
+	vimnav_enter();
+
+	/* Scroll up into history */
+	vimnav_handle_key('k', 0);  /* Move up to row 22 */
+	ASSERT_EQ(22, vimnav.y);
+	/* Row 22 is still "prompt space" since scr==0 and prompt_start would be <=22
+	 * Let's scroll up more to get into real history */
+
+	term.scr = 5;  /* Simulate scrolled into history */
+	vimnav.y = 10;  /* Cursor at row 10 on screen */
+
+	ASSERT_EQ(10, vimnav_curline_y());  /* Should return y when in history */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test vimnav_curline_y returns -1 when in visual mode */
+TEST(vimnav_curline_y_visual_mode)
+{
+	int i;
+	mock_term_init(80, 24);
+
+	/* Add some history */
+	for (i = 0; i < 30; i++) {
+		mock_set_hist(i, "history line");
+	}
+	term.c.y = 23;
+	term.scr = 5;  /* Scrolled into history */
+	mock_set_line(23, "% cmd");
+
+	vimnav_enter();
+	vimnav.y = 10;  /* Cursor in history area */
+
+	/* In normal mode, should highlight */
+	ASSERT_EQ(1, vimnav.mode);  /* VIMNAV_NORMAL */
+	ASSERT_EQ(10, vimnav_curline_y());
+
+	/* Enter visual mode with 'v' - should stop highlighting */
+	vimnav.mode = 2;  /* VIMNAV_VISUAL */
+	ASSERT_EQ(-1, vimnav_curline_y());
+
+	/* Visual line mode - should also stop highlighting */
+	vimnav.mode = 3;  /* VIMNAV_VISUAL_LINE */
+	ASSERT_EQ(-1, vimnav_curline_y());
+
+	/* Back to normal mode - should highlight again */
+	vimnav.mode = 1;  /* VIMNAV_NORMAL */
+	ASSERT_EQ(10, vimnav_curline_y());
+
+	vimnav_exit();
+	mock_term_free();
+}
+
 /* Test suite */
 TEST_SUITE(vimnav)
 {
@@ -2394,6 +2492,11 @@ TEST_SUITE(vimnav)
 	RUN_TEST(vimnav_g_nonmatch_clears_pending);
 	RUN_TEST(vimnav_G_moves_to_prompt);
 	RUN_TEST(vimnav_gg_inherits_zsh_visual);
+	/* vimnav_curline_y tests */
+	RUN_TEST(vimnav_curline_y_inactive);
+	RUN_TEST(vimnav_curline_y_prompt_space);
+	RUN_TEST(vimnav_curline_y_history);
+	RUN_TEST(vimnav_curline_y_visual_mode);
 }
 
 int

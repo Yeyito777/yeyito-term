@@ -64,6 +64,7 @@ static void ttysend(const Arg *);
 /* config.h for applying patches and the configuration. */
 #include "config.h"
 #include "sshind.h"
+#include "vimnav.h"
 
 /* XEMBED messages */
 #define XEMBED_FOCUS_IN  4
@@ -1458,6 +1459,12 @@ xdrawglyphfontspecs(const XftGlyphFontSpec *specs, Glyph base, int len, int x, i
 			bg = &revbg;
 		}
 	}
+
+	/* Highlight current line in vim nav mode (outside prompt space).
+	 * Only apply to glyphs with the default background - preserves custom
+	 * backgrounds set by programs (fastfetch, etc.) and cursor colors. */
+	if (y == vimnav_curline_y() && base.bg == defaultbg)
+		bg = &dc.col[vimnav_curline_bg];
 
 	if (base.mode & ATTR_SELECTED)
 		bg = &dc.col[selectionbg];

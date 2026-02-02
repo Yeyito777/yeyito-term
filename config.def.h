@@ -122,6 +122,7 @@ static const char *colorname[] = {
 	"#48cae4", /* 258 → cursor (tropical aqua) */
 	"#f1faee", /* 259 → reverse cursor (foam white) */
 	"#4f5258", /* 260 → selection background */
+	"#090d35", /* 261 → vimnav current line background */
 };
 
 
@@ -134,6 +135,7 @@ unsigned int defaultbg = 257;
 unsigned int defaultcs = 258;
 static unsigned int defaultrcs = 259;
 unsigned int selectionbg = 260;
+unsigned int vimnav_curline_bg = 261;
 
 /*
  * Default shape of cursor
