@@ -1,4 +1,3 @@
-- [ ] Add zoom in with =/-
 - [ ] Add Ctrl+num cursor movement relative to the first line (nvim config-like)
 - [ ] Add zz
 - [ ] Add a keybind or way to go to previous command
