@@ -2408,6 +2408,38 @@ TEST(vimnav_curline_y_visual_mode)
 	mock_term_free();
 }
 
+/* Test: empty lines are selectable in visual mode (column 0 acts as virtual newline) */
+TEST(vimnav_visual_empty_line_selectable)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "content line");
+	/* Line 6 is empty (not set, so tlinelen returns 0) */
+	mock_set_line(7, "another line");
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 3;  /* Scrolled into history */
+
+	vimnav_enter();
+	vimnav.x = 0;
+	vimnav.y = 5;  /* Start on content line */
+	vimnav.savedx = 0;
+
+	/* Enter visual line mode */
+	vimnav_handle_key('V', 0);
+	ASSERT_EQ(3, vimnav.mode);  /* VIMNAV_VISUAL_LINE */
+
+	/* Move down to empty line */
+	vimnav_handle_key('j', 0);
+	ASSERT_EQ(6, vimnav.y);  /* Now on empty line */
+
+	/* Column 0 of the empty line should be selected (for visual feedback) */
+	ASSERT_EQ(1, selected(0, 6));
+
+	vimnav_exit();
+	mock_term_free();
+}
+
 /* Test suite */
 TEST_SUITE(vimnav)
 {
@@ -2497,6 +2529,8 @@ TEST_SUITE(vimnav)
 	RUN_TEST(vimnav_curline_y_prompt_space);
 	RUN_TEST(vimnav_curline_y_history);
 	RUN_TEST(vimnav_curline_y_visual_mode);
+	/* Empty line selection test */
+	RUN_TEST(vimnav_visual_empty_line_selectable);
 }
 
 int

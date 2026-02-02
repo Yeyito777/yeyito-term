@@ -525,9 +525,10 @@ selected(int x, int y)
 		return 0;
 
 	/* Don't let selection highlight extend into the virtual padding.
-	 * For vim nav mode, don't include the virtual newline character. */
+	 * For vim nav mode, allow at least column 0 for empty lines (like nvim
+	 * highlighting the virtual newline), but don't extend beyond content. */
 	linelen = tlinelen(y);
-	maxcol = tisvimnav() ? linelen : MIN(linelen + 1, term.col);
+	maxcol = tisvimnav() ? MAX(linelen, 1) : MIN(linelen + 1, term.col);
 	if (x >= maxcol)
 		return 0;
 

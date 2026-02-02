@@ -220,8 +220,17 @@ selextend(int x, int y, int type, int done)
 int
 selected(int x, int y)
 {
+	int linelen, maxcol;
+
 	/* Simplified selection check */
 	if (sel.mode == SEL_IDLE)
+		return 0;
+
+	/* Match the real selected() logic for empty lines in vimnav mode:
+	 * Allow at least column 0 to be selected (like nvim's virtual newline) */
+	linelen = tlinelen(y);
+	maxcol = tisvimnav() ? (linelen > 0 ? linelen : 1) : linelen + 1;
+	if (x >= maxcol)
 		return 0;
 
 	return (y >= sel.ob.y && y <= sel.oe.y &&
