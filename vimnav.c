@@ -1469,16 +1469,16 @@ vimnav_handle_key(ulong ksym, uint state)
 			}
 			return 1;
 		case 'u':
-			vimnav_scroll_up(term.row / 2);
+			vimnav_scroll_up(term.row / 2 - 1);
 			return 1;
 		case 'd':
-			vimnav_scroll_down(term.row / 2);
+			vimnav_scroll_down(term.row / 2 - 1);
 			return 1;
 		case 'b':
-			vimnav_scroll_up(term.row);
+			vimnav_scroll_up(term.row - 4);
 			return 1;
 		case 'f':
-			vimnav_scroll_down(term.row);
+			vimnav_scroll_down(term.row - 4);
 			return 1;
 		default:
 			return 0;  /* Unknown Ctrl key, exit vim mode */
