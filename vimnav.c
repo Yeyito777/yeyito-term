@@ -1476,9 +1476,20 @@ vimnav_handle_key(ulong ksym, uint state)
 			return 1;
 		case 'b':
 			vimnav_scroll_up(term.row - 4);
+			/* Move cursor to bottom of screen */
+			max_valid_y = term.scr + term.c.y;
+			vimnav.y = MIN(term.row - 1, max_valid_y);
+			linelen = tlinelen(vimnav.y);
+			vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
+			vimnav_update_selection();
 			return 1;
 		case 'f':
 			vimnav_scroll_down(term.row - 4);
+			/* Move cursor to top of screen */
+			vimnav.y = 0;
+			linelen = tlinelen(vimnav.y);
+			vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
+			vimnav_update_selection();
 			return 1;
 		default:
 			return 0;  /* Unknown Ctrl key, exit vim mode */
