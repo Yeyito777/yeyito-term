@@ -102,7 +102,7 @@ static const char *colorname[] = {
 	"#ff6b6b", /* red   → coral reef */
 	"#2ec4b6", /* green → seafoam teal */
 	"#ffd166", /* yellow→ sunlight sand */
-	"#090d35", /* blue  → deep navy */
+	"#005f87", /* blue  → teal-blue */
 	"#9d4edd", /* magenta → purple kelp */
 	"#00b4d8", /* cyan  → aqua splash */
 	"#a8dadc", /* white → pale aqua mist */
