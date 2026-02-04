@@ -1944,12 +1944,12 @@ kpress(XEvent *ev)
 		/* printf("Key: %s\n",fullkey); */
 
 		if (strcmp(fullkey, "Ctrl+e") == 0) {
-			kscrollup(&(Arg){ .i = 1 });
+			kscrolldown(&(Arg){ .i = 1 });
 			return;
 		}
 
 		if (strcmp(fullkey, "Ctrl+y") == 0) {
-			kscrolldown(&(Arg){ .i = 1 });
+			kscrollup(&(Arg){ .i = 1 });
 			return;
 		}
 
