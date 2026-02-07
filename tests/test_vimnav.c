@@ -1433,8 +1433,8 @@ TEST(vimnav_vi_paren_no_closing)
 	vimnav_handle_key('i', 0);
 	int handled = vimnav_handle_key('(', 0);
 
-	/* Should not find anything - no valid pair */
-	ASSERT_EQ(0, handled);  /* Not handled because no pair found */
+	/* Should not find anything - no valid pair, but key consumed in visual mode */
+	ASSERT_EQ(1, handled);  /* Consumed to prevent leaking to zsh */
 	ASSERT_EQ(2, vimnav.mode);  /* Still in VIMNAV_VISUAL (unchanged) */
 
 	vimnav_exit();
@@ -1463,8 +1463,8 @@ TEST(vimnav_vi_paren_pair_to_left)
 	vimnav_handle_key('i', 0);
 	int handled = vimnav_handle_key('(', 0);
 
-	/* Should not find anything - pair is to the left */
-	ASSERT_EQ(0, handled);
+	/* Should not find anything - pair is to the left, but key consumed in visual mode */
+	ASSERT_EQ(1, handled);  /* Consumed to prevent leaking to zsh */
 	ASSERT_EQ(2, vimnav.mode);  /* Still in VIMNAV_VISUAL (unchanged) */
 
 	vimnav_exit();
@@ -1628,9 +1628,9 @@ TEST(vimnav_textobj_unknown_key_clears_pending)
 	ASSERT_EQ('i', vimnav.pending_textobj);
 
 	int handled = vimnav_handle_key('z', 0);
-	/* Should clear pending and fall through to default (not handled) */
+	/* Should clear pending; key consumed in visual mode to prevent leaking to zsh */
 	ASSERT_EQ(0, vimnav.pending_textobj);
-	ASSERT_EQ(0, handled);  /* 'z' is not a known command */
+	ASSERT_EQ(1, handled);  /* Consumed in visual mode */
 
 	vimnav_exit();
 	mock_term_free();
@@ -2469,6 +2469,74 @@ TEST(vimnav_visual_empty_line_selectable)
 	mock_term_free();
 }
 
+/* Test: editing keys (d, x, c, etc.) clear visual mode before snapping to prompt.
+ * Regression: pressing 'd' in visual line mode left ghost selection and didn't sync with zsh. */
+TEST(vimnav_editing_keys_clear_visual_on_snap)
+{
+	char editing_keys[] = { 'x', 'X', 'd', 'D', 'c', 'C', 's', 'S', 'r', 'R',
+	                        'A', 'I', 'o', 'O', 'u', '.', '~', 0 };
+
+	for (int i = 0; editing_keys[i]; i++) {
+		mock_term_init(24, 80);
+		mock_set_line(5, "some history line");
+
+		term.c.x = 0;
+		term.c.y = 23;
+		term.scr = 0;
+
+		vimnav_enter();
+		vimnav.y = 5;
+		vimnav.x = 3;
+		vimnav.savedx = 3;
+
+		/* Enter visual line mode */
+		vimnav_handle_key('V', 0);
+		ASSERT_EQ(3, vimnav.mode);  /* VIMNAV_VISUAL_LINE */
+
+		/* Press editing key - should clear visual and snap to prompt */
+		vimnav_handle_key(editing_keys[i], 0);
+		ASSERT_EQ(1, vimnav.mode);  /* VIMNAV_NORMAL (visual cleared) */
+		ASSERT_EQ(23, vimnav.y);    /* Snapped to prompt */
+
+		vimnav_exit();
+		mock_term_free();
+	}
+}
+
+/* Test: unrecognized keys are consumed in visual mode (not leaked to zsh) */
+TEST(vimnav_visual_mode_consumes_unknown_keys)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "hello world");
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.y = 5;
+	vimnav.x = 3;
+	vimnav.savedx = 3;
+
+	/* Enter visual mode */
+	vimnav_handle_key('v', 0);
+	ASSERT_EQ(2, vimnav.mode);  /* VIMNAV_VISUAL */
+
+	/* Press unrecognized keys - should be consumed, not passed to zsh */
+	ASSERT_EQ(1, vimnav_handle_key('z', 0));
+	ASSERT_EQ(1, vimnav_handle_key('q', 0));
+	ASSERT_EQ(1, vimnav_handle_key('n', 0));
+	ASSERT_EQ(2, vimnav.mode);  /* Still in VIMNAV_VISUAL */
+
+	/* In normal mode, unrecognized keys should NOT be consumed */
+	vimnav_handle_key('v', 0);  /* Exit visual */
+	ASSERT_EQ(1, vimnav.mode);  /* VIMNAV_NORMAL */
+	ASSERT_EQ(0, vimnav_handle_key('z', 0));  /* Not consumed */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
 /* Test suite */
 TEST_SUITE(vimnav)
 {
@@ -2561,6 +2629,9 @@ TEST_SUITE(vimnav)
 	RUN_TEST(vimnav_curline_y_below_cursor);
 	/* Empty line selection test */
 	RUN_TEST(vimnav_visual_empty_line_selectable);
+	/* Visual mode snap-to-prompt cleanup tests */
+	RUN_TEST(vimnav_editing_keys_clear_visual_on_snap);
+	RUN_TEST(vimnav_visual_mode_consumes_unknown_keys);
 }
 
 int

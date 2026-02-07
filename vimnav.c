@@ -134,11 +134,18 @@ vimnav_sync_to_zsh_cursor(void)
 static void
 vimnav_snap_to_prompt(void)
 {
+	/* Clear visual mode and selection before returning to prompt */
+	if (vimnav.mode == VIMNAV_VISUAL || vimnav.mode == VIMNAV_VISUAL_LINE) {
+		vimnav.mode = VIMNAV_NORMAL;
+		vimnav_notify_zsh_visual_end();
+		selclear();
+	}
 	if (term.scr > 0) {
 		kscrolldown(&(Arg){ .i = term.scr });
 	}
 	vimnav.y = term.c.y;
 	vimnav_sync_to_zsh_cursor();
+	tfulldirt();
 }
 
 /* zsh cursor/visual sync functions */
@@ -1695,7 +1702,12 @@ vimnav_handle_key(ulong ksym, uint state)
 		break;
 
 	default:
-		handled = 0;
+		/* In visual mode, consume unrecognized keys to prevent them
+		 * from leaking to zsh and leaving a ghost selection */
+		if (vimnav.mode == VIMNAV_VISUAL || vimnav.mode == VIMNAV_VISUAL_LINE)
+			handled = 1;
+		else
+			handled = 0;
 		break;
 	}
 
