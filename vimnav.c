@@ -1724,6 +1724,8 @@ vimnav_handle_key(ulong ksym, uint state)
 	case 'u':  /* undo */
 	case '.':  /* repeat last command */
 	case '~':  /* toggle case */
+	case 'J':  /* zsh history navigation (user-bound) */
+	case 'K':  /* zsh history navigation (user-bound) */
 		/* In forced mode: no-ops (no shell to send to) */
 		if (vimnav.forced)
 			break;

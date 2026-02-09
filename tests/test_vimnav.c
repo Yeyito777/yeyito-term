@@ -420,6 +420,41 @@ TEST(vimnav_destructive_ops_disabled)
 	mock_term_free();
 }
 
+/* Test: J/K (Shift+j/k) snap to prompt and pass to zsh */
+TEST(vimnav_JK_snap_to_prompt)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "hello world");
+	mock_set_line(10, "prompt line");
+
+	term.c.x = 5;
+	term.c.y = 10;
+	term.scr = 5;  /* Scrolled up */
+
+	vimnav_enter();
+	vimnav.x = 5;
+	vimnav.y = 5;  /* Viewing history */
+
+	/* 'J' should snap back to prompt and pass to zsh */
+	int handled = vimnav_handle_key('J', 0);
+	ASSERT_EQ(0, handled);  /* Passed to zsh */
+	ASSERT_EQ(0, term.scr);  /* Scrolled back to bottom */
+	ASSERT_EQ(10, vimnav.y);  /* At prompt line */
+
+	/* Reset for K test */
+	term.scr = 5;
+	vimnav.y = 5;
+
+	/* 'K' should snap back to prompt and pass to zsh */
+	handled = vimnav_handle_key('K', 0);
+	ASSERT_EQ(0, handled);
+	ASSERT_EQ(0, term.scr);
+	ASSERT_EQ(10, vimnav.y);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
 /* Test: destructive operations pass through to zsh on prompt line */
 TEST(vimnav_destructive_ops_prompt_passthrough)
 {
@@ -3031,6 +3066,7 @@ TEST_SUITE(vimnav)
 	RUN_TEST(vimnav_destructive_ops_disabled);
 	RUN_TEST(vimnav_destructive_ops_prompt_passthrough);
 	RUN_TEST(vimnav_editing_keys_snap_to_prompt);
+	RUN_TEST(vimnav_JK_snap_to_prompt);
 	RUN_TEST(vimnav_inherits_zsh_visual);
 	RUN_TEST(vimnav_visual_handoff_on_k);
 	RUN_TEST(vimnav_escape_clears_zsh_visual);
