@@ -616,6 +616,49 @@ TEST(vimnav_cursor_sync_on_return_to_prompt)
 	mock_term_free();
 }
 
+/* Test: repeated j in prompt space keeps cursor synced to zsh (e.g., after Ctrl+L) */
+TEST(vimnav_cursor_sync_repeated_j_in_prompt_space)
+{
+	mock_term_init(24, 80);
+	/* After Ctrl+L: prompt at row 0, history in scrollback */
+	mock_set_line(0, "% ");  /* Empty prompt, no user input */
+	mock_set_hist(0, "some old output");
+	mock_set_hist(1, "more old output");
+
+	term.c.x = 2;
+	term.c.y = 0;  /* Prompt at top of screen (after Ctrl+L) */
+	term.scr = 0;
+	vimnav.zsh_cursor = 0;  /* No input typed */
+	vimnav.zsh_visual = 0;
+
+	vimnav_enter();
+	/* x = prompt_end (2) + zsh_cursor (0) = 2 */
+	ASSERT_EQ(2, vimnav.x);
+	ASSERT_EQ(0, vimnav.y);
+
+	/* Scroll up into history - cursor one row above prompt */
+	term.scr = 1;
+	vimnav.y = 0;
+	vimnav.x = 3;
+	vimnav.savedx = 3;
+
+	/* Press j: enters prompt space (prompt is at screen row scr+c.y = 1).
+	 * First transition into prompt space - should sync. */
+	vimnav_handle_key('j', 0);
+	ASSERT_EQ(1, vimnav.y);  /* Moved to prompt row */
+	ASSERT_EQ(2, vimnav.x);  /* Synced: prompt_end (2) + zsh_cursor (0) */
+
+	/* Press j again: already in prompt space, term.scr=1 > 0 so it scrolls
+	 * down by 1. Cursor stays in prompt space. Must still sync to zsh cursor,
+	 * NOT fall to linelen-1. */
+	ASSERT(term.scr > 0);
+	vimnav_handle_key('j', 0);
+	ASSERT_EQ(2, vimnav.x);  /* Still synced to zsh cursor */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
 /* Test: visual mode prevents cursor sync until selection done */
 TEST(vimnav_visual_mode_defers_cursor_sync)
 {
@@ -2992,6 +3035,7 @@ TEST_SUITE(vimnav)
 	RUN_TEST(vimnav_visual_handoff_on_k);
 	RUN_TEST(vimnav_escape_clears_zsh_visual);
 	RUN_TEST(vimnav_cursor_sync_on_return_to_prompt);
+	RUN_TEST(vimnav_cursor_sync_repeated_j_in_prompt_space);
 	RUN_TEST(vimnav_visual_mode_defers_cursor_sync);
 	RUN_TEST(vimnav_yank_clears_zsh_visual);
 	RUN_TEST(vimnav_v_toggle_off_notifies_zsh);

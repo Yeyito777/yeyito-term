@@ -463,7 +463,6 @@ static void
 vimnav_move_down(void)
 {
 	int linelen;
-	int was_in_prompt_space = vimnav_is_prompt_space(vimnav.y);
 
 	if (vimnav.forced && IS_SET(MODE_ALTSCREEN)) {
 		/* Forced mode on alt screen: full screen is navigable */
@@ -498,9 +497,11 @@ vimnav_move_down(void)
 		}
 	}
 
-	/* If entering prompt space from history in normal mode, sync to zsh cursor.
+	/* If in prompt space in normal mode, sync to zsh cursor.
+	 * This covers both entering prompt space from history AND staying
+	 * in prompt space while scrolling down (e.g., repeated j after Ctrl+L).
 	 * Don't sync during visual mode - wait until selection is done. */
-	if (!was_in_prompt_space && vimnav_is_prompt_space(vimnav.y) &&
+	if (vimnav_is_prompt_space(vimnav.y) &&
 	    vimnav.mode == VIMNAV_NORMAL) {
 		int prompt_end = vimnav_find_prompt_end(vimnav.y);
 		vimnav.x = prompt_end + vimnav.zsh_cursor;
