@@ -1148,7 +1148,10 @@ vimnav_move_screen_bottom(void)
 	int linelen;
 	int bottom_y;
 
-	if (term.scr == 0) {
+	if (vimnav.forced && IS_SET(MODE_ALTSCREEN)) {
+		/* Forced mode on alt screen: full screen is navigable */
+		bottom_y = term.row - 1;
+	} else if (term.scr == 0) {
 		/* Not scrolled: prompt visible at term.c.y */
 		bottom_y = term.c.y;
 	} else {
@@ -1174,7 +1177,10 @@ vimnav_move_screen_middle(void)
 	int linelen;
 	int bottom_y;
 
-	if (term.scr == 0) {
+	if (vimnav.forced && IS_SET(MODE_ALTSCREEN)) {
+		/* Forced mode on alt screen: full screen is navigable */
+		bottom_y = term.row - 1;
+	} else if (term.scr == 0) {
 		/* Not scrolled: prompt visible at term.c.y */
 		bottom_y = term.c.y;
 	} else {

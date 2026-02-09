@@ -2811,6 +2811,47 @@ TEST(vimnav_forced_k_no_history_scroll_altscreen)
 	mock_term_free();
 }
 
+/* Test: L goes to bottom of screen on altscreen in forced mode */
+TEST(vimnav_forced_L_bottom_of_screen_altscreen)
+{
+	mock_term_init(24, 80);
+	for (int i = 0; i < 24; i++)
+		mock_set_line(i, "content line");
+	term.c.x = 0;
+	term.c.y = 10;  /* TUI cursor in middle */
+	term.mode |= MODE_ALTSCREEN;
+
+	vimnav_force_enter();
+	ASSERT_EQ(10, vimnav.y);
+
+	/* L should go to bottom of screen, not TUI cursor row */
+	vimnav_handle_key('L', 0);
+	ASSERT_EQ(23, vimnav.y);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: M goes to middle of full screen on altscreen in forced mode */
+TEST(vimnav_forced_M_middle_of_screen_altscreen)
+{
+	mock_term_init(24, 80);
+	for (int i = 0; i < 24; i++)
+		mock_set_line(i, "content line");
+	term.c.x = 0;
+	term.c.y = 10;  /* TUI cursor in middle */
+	term.mode |= MODE_ALTSCREEN;
+
+	vimnav_force_enter();
+
+	/* M should go to middle between H(0) and L(23) = 11 */
+	vimnav_handle_key('M', 0);
+	ASSERT_EQ(11, vimnav.y);  /* (term.row - 1) / 2 = 23 / 2 = 11 */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
 /* Test: visual mode and yank work in forced mode */
 TEST(vimnav_forced_visual_yank_works)
 {
@@ -2974,6 +3015,8 @@ TEST_SUITE(vimnav)
 	RUN_TEST(vimnav_forced_navigation_works);
 	RUN_TEST(vimnav_forced_j_below_cursor_altscreen);
 	RUN_TEST(vimnav_forced_k_no_history_scroll_altscreen);
+	RUN_TEST(vimnav_forced_L_bottom_of_screen_altscreen);
+	RUN_TEST(vimnav_forced_M_middle_of_screen_altscreen);
 	RUN_TEST(vimnav_forced_visual_yank_works);
 	RUN_TEST(vimnav_forced_no_prompt_space);
 }
