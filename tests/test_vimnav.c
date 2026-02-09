@@ -2184,6 +2184,59 @@ TEST(vimnav_M_middle_when_scrolled)
 	mock_term_free();
 }
 
+/* Test: L goes to prompt row (not term.row-1) when scrolled but prompt visible */
+TEST(vimnav_L_scrolled_prompt_visible)
+{
+	mock_term_init(24, 80);
+	mock_set_line(0, "% prompt");
+
+	term.c.x = 5;
+	term.c.y = 0;
+	vimnav.zsh_cursor = 3;
+
+	vimnav_enter();
+	/* Simulate scrolling up after Ctrl+L */
+	term.scr = 5;
+	vimnav.y = 2;
+	vimnav.x = 0;
+	vimnav.savedx = 0;
+
+	int handled = vimnav_handle_key('L', 0);
+	ASSERT_EQ(1, handled);
+	/* Prompt screen row = 0+5 = 5, not 23 */
+	ASSERT_EQ(5, vimnav.y);
+	/* Should sync x to zsh cursor since we landed on prompt */
+	ASSERT_EQ(5, vimnav.x);  /* prompt_end (2) + zsh_cursor (3) */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: M computes middle from prompt screen row when scrolled but visible */
+TEST(vimnav_M_scrolled_prompt_visible)
+{
+	mock_term_init(24, 80);
+	mock_set_line(0, "% prompt");
+
+	term.c.x = 5;
+	term.c.y = 0;
+	vimnav.zsh_cursor = 0;
+
+	vimnav_enter();
+	term.scr = 10;
+	vimnav.y = 5;
+	vimnav.x = 0;
+	vimnav.savedx = 0;
+
+	int handled = vimnav_handle_key('M', 0);
+	ASSERT_EQ(1, handled);
+	/* Prompt screen row = 0+10 = 10, middle = 10/2 = 5 */
+	ASSERT_EQ(5, vimnav.y);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
 /* Test: gg (double g) moves to top of history */
 TEST(vimnav_gg_moves_to_top)
 {
@@ -2425,12 +2478,17 @@ TEST(vimnav_curline_y_below_cursor)
 	vimnav.mode = 1;  /* VIMNAV_NORMAL */
 	vimnav.zsh_visual = 0;
 
-	/* Should return -1 since vimnav.y > term.c.y when not scrolled */
+	/* Should return -1 since vimnav.y (10) > prompt screen row (0+0=0) */
 	ASSERT_EQ(-1, vimnav_curline_y());
 
-	/* When scrolled into history, highlight should work even if vimnav.y > term.c.y */
-	term.scr = 5;  /* Now scrolled into history */
-	ASSERT_EQ(10, vimnav_curline_y());
+	/* Even when scrolled, highlight shouldn't show below prompt screen row.
+	 * Prompt is at screen row 0+5=5, vimnav.y=10 is past it (empty space). */
+	term.scr = 5;
+	ASSERT_EQ(-1, vimnav_curline_y());
+
+	/* But highlight should work at a valid history row above the prompt */
+	vimnav.y = 3;  /* History row, above prompt at screen row 5 */
+	ASSERT_EQ(3, vimnav_curline_y());
 
 	vimnav_exit();
 	mock_term_free();
@@ -2987,6 +3045,8 @@ TEST_SUITE(vimnav)
 	RUN_TEST(vimnav_L_stays_on_screen_when_scrolled);
 	RUN_TEST(vimnav_M_moves_to_middle);
 	RUN_TEST(vimnav_M_middle_when_scrolled);
+	RUN_TEST(vimnav_L_scrolled_prompt_visible);
+	RUN_TEST(vimnav_M_scrolled_prompt_visible);
 	/* gg/G navigation tests */
 	RUN_TEST(vimnav_gg_moves_to_top);
 	RUN_TEST(vimnav_g_nonmatch_clears_pending);
@@ -3042,15 +3102,16 @@ TEST(prompt_range_at_bottom)
 	mock_term_free();
 }
 
-TEST(prompt_range_scrolled)
+TEST(prompt_range_scrolled_off_screen)
 {
 	int start_y, end_y;
 
+	/* Prompt at term.line[23], screen row = 23+5 = 28, off-screen (>= 24) */
 	mock_term_init(24, 80);
 	mock_set_line(23, "% prompt");
 	term.c.x = 5;
 	term.c.y = 23;
-	term.scr = 5;  /* scrolled up */
+	term.scr = 5;  /* scrolled up, prompt pushed off screen */
 	term.mode = 0;
 
 	vimnav_prompt_line_range(&start_y, &end_y);
@@ -3080,11 +3141,101 @@ TEST(prompt_range_altscreen)
 	mock_term_free();
 }
 
+TEST(prompt_range_scrolled_still_visible)
+{
+	int start_y, end_y;
+
+	/* After Ctrl+L: prompt at term.line[0], scrolled up 3 lines.
+	 * Screen row = 0+3 = 3, still visible (< 24).
+	 * This was the bug: prompt was incorrectly reported as not visible
+	 * whenever term.scr != 0, even if the prompt was still on screen. */
+	mock_term_init(24, 80);
+	mock_set_line(0, "% prompt");
+	term.c.x = 5;
+	term.c.y = 0;
+	term.scr = 3;
+	term.mode = 0;
+
+	vimnav_prompt_line_range(&start_y, &end_y);
+
+	ASSERT_EQ(3, start_y);  /* prompt's screen row */
+	ASSERT_EQ(3, end_y);
+
+	mock_term_free();
+}
+
+TEST(prompt_range_scrolled_just_barely_visible)
+{
+	int start_y, end_y;
+
+	/* Prompt at term.line[0], scrolled up 23 lines.
+	 * Screen row = 0+23 = 23, last visible row. */
+	mock_term_init(24, 80);
+	mock_set_line(0, "% prompt");
+	term.c.x = 5;
+	term.c.y = 0;
+	term.scr = 23;
+	term.mode = 0;
+
+	vimnav_prompt_line_range(&start_y, &end_y);
+
+	ASSERT_EQ(23, start_y);
+	ASSERT_EQ(23, end_y);
+
+	mock_term_free();
+}
+
+TEST(prompt_range_scrolled_just_off_screen)
+{
+	int start_y, end_y;
+
+	/* Prompt at term.line[0], scrolled up 24 lines.
+	 * Screen row = 0+24 = 24 >= 24, off screen. */
+	mock_term_init(24, 80);
+	mock_set_line(0, "% prompt");
+	term.c.x = 5;
+	term.c.y = 0;
+	term.scr = 24;
+	term.mode = 0;
+
+	vimnav_prompt_line_range(&start_y, &end_y);
+
+	ASSERT_EQ(-1, start_y);
+	ASSERT_EQ(-1, end_y);
+
+	mock_term_free();
+}
+
+TEST(prompt_range_scrolled_mid_screen)
+{
+	int start_y, end_y;
+
+	/* Prompt at term.line[5], scrolled up 3 lines.
+	 * Screen row = 5+3 = 8, still visible. */
+	mock_term_init(24, 80);
+	mock_set_line(5, "% prompt");
+	term.c.x = 5;
+	term.c.y = 5;
+	term.scr = 3;
+	term.mode = 0;
+
+	vimnav_prompt_line_range(&start_y, &end_y);
+
+	ASSERT_EQ(8, start_y);
+	ASSERT_EQ(8, end_y);
+
+	mock_term_free();
+}
+
 TEST_SUITE(prompt_range)
 {
 	RUN_TEST(prompt_range_at_bottom);
-	RUN_TEST(prompt_range_scrolled);
+	RUN_TEST(prompt_range_scrolled_off_screen);
 	RUN_TEST(prompt_range_altscreen);
+	RUN_TEST(prompt_range_scrolled_still_visible);
+	RUN_TEST(prompt_range_scrolled_just_barely_visible);
+	RUN_TEST(prompt_range_scrolled_just_off_screen);
+	RUN_TEST(prompt_range_scrolled_mid_screen);
 }
 
 int

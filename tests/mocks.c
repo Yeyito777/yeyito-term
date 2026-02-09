@@ -10,6 +10,10 @@
 #include "mocks.h"
 #include "../vimnav.h"
 
+#define TLINE(y)	((y) < term.scr ? term.hist[((y) + term.histi - \
+			term.scr + HISTSIZE + 1) % HISTSIZE] : \
+			term.line[(y) - term.scr])
+
 /* Global mock state */
 Term term;
 Selection sel;
@@ -143,7 +147,7 @@ tlinelen(int y)
 	if (y < 0 || y >= term.row)
 		return 0;
 
-	line = term.line[y];
+	line = TLINE(y);
 	i = term.col;
 
 	/* Strip trailing nulls (mock-specific: unwritten cells are 0) */

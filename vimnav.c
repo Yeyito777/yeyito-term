@@ -238,8 +238,8 @@ vimnav_curline_y(void)
 		return -1;
 	if (vimnav_is_prompt_space(vimnav.y))
 		return -1;
-	/* When not scrolled, don't highlight rows below cursor (empty space) */
-	if (term.scr == 0 && vimnav.y > term.c.y)
+	/* Don't highlight rows below prompt (empty space) */
+	if (vimnav.y > term.c.y + term.scr)
 		return -1;
 	return vimnav.y;
 }
@@ -248,13 +248,16 @@ void
 vimnav_prompt_line_range(int *start_y, int *end_y)
 {
 	/* Returns the screen row range of the prompt space, or -1/-1 if
-	 * not visible (scrolled up or alt screen). */
-	if (IS_SET(MODE_ALTSCREEN) || term.scr != 0) {
+	 * not visible (scrolled off screen or alt screen).
+	 * The prompt is at screen row (term.c.y + term.scr). */
+	int prompt_end_y = term.c.y + term.scr;
+
+	if (IS_SET(MODE_ALTSCREEN) || prompt_end_y >= term.row) {
 		*start_y = *end_y = -1;
 		return;
 	}
 	*start_y = vimnav_find_prompt_start_y();
-	*end_y = term.c.y;
+	*end_y = prompt_end_y;
 }
 
 static int
@@ -440,9 +443,10 @@ vimnav_move_up(void)
 	/* Handoff: if we left prompt space with zsh in visual mode, inherit selection */
 	if (was_in_prompt_space && !vimnav_is_prompt_space(vimnav.y) &&
 	    vimnav.zsh_visual && vimnav.mode == VIMNAV_NORMAL) {
-		int prompt_end = vimnav_find_prompt_end(term.c.y);
+		int prompt_screen_y = term.c.y + term.scr;
+		int prompt_end = vimnav_find_prompt_end(prompt_screen_y);
 		vimnav.anchor_x = prompt_end + vimnav.zsh_visual_anchor;
-		vimnav.anchor_abs_y = term.c.y - term.scr;  /* Anchor stays on prompt line */
+		vimnav.anchor_abs_y = term.c.y;  /* Anchor stays on prompt line */
 		if (vimnav.zsh_visual_line) {
 			vimnav.mode = VIMNAV_VISUAL_LINE;
 		} else {
@@ -1103,9 +1107,10 @@ vimnav_move_top(void)
 	/* Handoff: if we left prompt space with zsh in visual mode, inherit selection */
 	if (was_in_prompt_space && !vimnav_is_prompt_space(vimnav.y) &&
 	    vimnav.zsh_visual && vimnav.mode == VIMNAV_NORMAL) {
-		int prompt_end = vimnav_find_prompt_end(term.c.y);
+		int prompt_screen_y = term.c.y + term.scr;
+		int prompt_end = vimnav_find_prompt_end(prompt_screen_y);
 		vimnav.anchor_x = prompt_end + vimnav.zsh_visual_anchor;
-		vimnav.anchor_abs_y = term.c.y - term.scr;  /* Anchor stays on prompt line */
+		vimnav.anchor_abs_y = term.c.y;  /* Anchor stays on prompt line */
 		if (vimnav.zsh_visual_line) {
 			vimnav.mode = VIMNAV_VISUAL_LINE;
 		} else {
@@ -1164,12 +1169,9 @@ vimnav_move_screen_bottom(void)
 	if (vimnav.forced && IS_SET(MODE_ALTSCREEN)) {
 		/* Forced mode on alt screen: full screen is navigable */
 		bottom_y = term.row - 1;
-	} else if (term.scr == 0) {
-		/* Not scrolled: prompt visible at term.c.y */
-		bottom_y = term.c.y;
 	} else {
-		/* Scrolled: use bottom of visible screen */
-		bottom_y = term.row - 1;
+		/* Prompt's screen row, clamped to screen bounds */
+		bottom_y = MIN(term.c.y + term.scr, term.row - 1);
 	}
 
 	vimnav.y = bottom_y;
@@ -1193,12 +1195,9 @@ vimnav_move_screen_middle(void)
 	if (vimnav.forced && IS_SET(MODE_ALTSCREEN)) {
 		/* Forced mode on alt screen: full screen is navigable */
 		bottom_y = term.row - 1;
-	} else if (term.scr == 0) {
-		/* Not scrolled: prompt visible at term.c.y */
-		bottom_y = term.c.y;
 	} else {
-		/* Scrolled: use bottom of visible screen */
-		bottom_y = term.row - 1;
+		/* Prompt's screen row, clamped to screen bounds */
+		bottom_y = MIN(term.c.y + term.scr, term.row - 1);
 	}
 
 	vimnav.y = bottom_y / 2;
@@ -1316,37 +1315,43 @@ vimnav_has_main_prompt(int screen_y)
 static int
 vimnav_find_prompt_start_y(void)
 {
-	/* Find the Y position where the prompt starts by searching upward
-	 * from term.c.y for a line with a main prompt delimiter.
-	 * For multi-line commands, this finds the first line of the command. */
+	/* Find the screen row where the prompt starts by searching upward
+	 * from the prompt's screen row for a line with a main prompt delimiter.
+	 * For multi-line commands, this finds the first line of the command.
+	 * Only searches within term.line[] (screen rows >= term.scr). */
 	int y;
+	int prompt_y = term.c.y + term.scr;
 
-	for (y = term.c.y; y >= 0; y--) {
+	for (y = prompt_y; y >= term.scr; y--) {
 		if (vimnav_has_main_prompt(y)) {
 			return y;
 		}
 	}
-	/* If no prompt found, assume current line */
-	return term.c.y;
+	/* If no prompt found, assume prompt's screen row */
+	return prompt_y;
 }
 
 static int
 vimnav_is_prompt_space(int y)
 {
-	/* Check if y is within the prompt space (multi-line command region).
-	 * Returns 1 if y is between prompt_start and term.c.y (inclusive). */
+	/* Check if screen row y is within the prompt space (multi-line command region).
+	 * The prompt is at screen row (term.c.y + term.scr). It's visible when
+	 * that row is within the screen bounds. Returns 1 if y is between
+	 * prompt_start and the prompt's screen row (inclusive). */
 	int prompt_start;
+	int prompt_end_y;
 
 	if (vimnav.forced) {
 		return 0;  /* Forced mode: no prompt space concept */
 	}
 
-	if (term.scr != 0) {
-		return 0;  /* Not at bottom of scrollback */
+	prompt_end_y = term.c.y + term.scr;
+	if (prompt_end_y >= term.row) {
+		return 0;  /* Prompt scrolled off screen */
 	}
 
 	prompt_start = vimnav_find_prompt_start_y();
-	return (y >= prompt_start && y <= term.c.y);
+	return (y >= prompt_start && y <= prompt_end_y);
 }
 
 static void
