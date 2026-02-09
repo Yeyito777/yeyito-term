@@ -2752,6 +2752,65 @@ TEST(vimnav_forced_navigation_works)
 	mock_term_free();
 }
 
+/* Test: j moves below TUI cursor position in forced mode on altscreen */
+TEST(vimnav_forced_j_below_cursor_altscreen)
+{
+	mock_term_init(24, 80);
+	for (int i = 0; i < 24; i++)
+		mock_set_line(i, "content line");
+	term.c.x = 0;
+	term.c.y = 10;
+	term.mode |= MODE_ALTSCREEN;
+
+	vimnav_force_enter();
+	ASSERT_EQ(10, vimnav.y);
+
+	/* j should move below the TUI cursor position */
+	for (int i = 11; i <= 23; i++) {
+		vimnav_handle_key('j', 0);
+		ASSERT_EQ(i, vimnav.y);
+	}
+
+	/* At bottom, j is a no-op */
+	vimnav_handle_key('j', 0);
+	ASSERT_EQ(23, vimnav.y);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: k at row 0 on altscreen does not scroll into main screen history */
+TEST(vimnav_forced_k_no_history_scroll_altscreen)
+{
+	mock_term_init(24, 80);
+	for (int i = 0; i < 24; i++)
+		mock_set_line(i, "content line");
+	term.c.x = 0;
+	term.c.y = 5;
+	term.mode |= MODE_ALTSCREEN;
+
+	/* Put some content in history so it would scroll if allowed */
+	term.histi = 5;
+	for (int i = 1; i <= 5; i++)
+		mock_set_hist(i, "old history line");
+
+	vimnav_force_enter();
+
+	/* Move to top of screen */
+	for (int i = 0; i < 5; i++)
+		vimnav_handle_key('k', 0);
+	ASSERT_EQ(0, vimnav.y);
+	ASSERT_EQ(0, term.scr);
+
+	/* k at row 0 should NOT scroll into history on altscreen */
+	vimnav_handle_key('k', 0);
+	ASSERT_EQ(0, vimnav.y);
+	ASSERT_EQ(0, term.scr);  /* No scroll happened */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
 /* Test: visual mode and yank work in forced mode */
 TEST(vimnav_forced_visual_yank_works)
 {
@@ -2913,6 +2972,8 @@ TEST_SUITE(vimnav)
 	RUN_TEST(vimnav_forced_a_exits);
 	RUN_TEST(vimnav_forced_editing_keys_noop);
 	RUN_TEST(vimnav_forced_navigation_works);
+	RUN_TEST(vimnav_forced_j_below_cursor_altscreen);
+	RUN_TEST(vimnav_forced_k_no_history_scroll_altscreen);
 	RUN_TEST(vimnav_forced_visual_yank_works);
 	RUN_TEST(vimnav_forced_no_prompt_space);
 }

@@ -2845,16 +2845,19 @@ draw(void)
 		int vox = vimnav.ox;
 
 		/* Clamp cursor to valid content (prompt is at term.scr + term.c.y).
-		 * Handles Ctrl+L (clear screen) moving the prompt up. */
-		int max_valid_y = term.scr + term.c.y;
-		if (vy > max_valid_y) {
-			vy = max_valid_y;
-			vimnav.y = vy;
-			if (term.scr == 0) {
-				vx = term.c.x;
-				vimnav.x = vx;
-				vimnav.savedx = vx;
-				vimnav.last_shell_x = term.c.x;
+		 * Handles Ctrl+L (clear screen) moving the prompt up.
+		 * Skip in forced mode on alt screen - full screen is navigable. */
+		if (!(vimnav.forced && IS_SET(MODE_ALTSCREEN))) {
+			int max_valid_y = term.scr + term.c.y;
+			if (vy > max_valid_y) {
+				vy = max_valid_y;
+				vimnav.y = vy;
+				if (term.scr == 0) {
+					vx = term.c.x;
+					vimnav.x = vx;
+					vimnav.savedx = vx;
+					vimnav.last_shell_x = term.c.x;
+				}
 			}
 		}
 

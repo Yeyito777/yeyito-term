@@ -411,8 +411,9 @@ vimnav_move_up(void)
 	if (vimnav.y > 0) {
 		/* Move cursor up within visible area */
 		vimnav.y--;
-	} else {
-		/* At top of screen, try to scroll up */
+	} else if (!IS_SET(MODE_ALTSCREEN)) {
+		/* At top of screen, try to scroll up into history.
+		 * Skip on alt screen - history belongs to the main screen. */
 		term.scr++;
 		if (term.scr > HISTSIZE - 1 || !vimnav_has_history_content(term.scr)) {
 			/* Can't scroll or no content in history, revert */
@@ -446,31 +447,38 @@ vimnav_move_down(void)
 {
 	int linelen;
 	int was_in_prompt_space = vimnav_is_prompt_space(vimnav.y);
-	/* The prompt is at screen row (term.scr + term.c.y) in scrolled view.
-	 * Valid content is rows [0, term.scr + term.c.y]. Everything below is dead space. */
-	int max_valid_y = term.scr + term.c.y;
 
-	if (vimnav.y >= max_valid_y) {
-		/* At or past prompt position, only allow scrolling down if scrolled */
-		if (term.scr > 0) {
-			kscrolldown(&(Arg){ .i = 1 });
-			/* Recalculate after scroll and clamp if needed */
-			max_valid_y = term.scr + term.c.y;
-			if (vimnav.y > max_valid_y) {
-				vimnav.y = max_valid_y;
-				if (term.scr == 0) {
-					vimnav.x = term.c.x;
-					vimnav.last_shell_x = term.c.x;
+	if (vimnav.forced && IS_SET(MODE_ALTSCREEN)) {
+		/* Forced mode on alt screen: full screen is navigable */
+		if (vimnav.y < term.row - 1)
+			vimnav.y++;
+	} else {
+		/* The prompt is at screen row (term.scr + term.c.y) in scrolled view.
+		 * Valid content is rows [0, term.scr + term.c.y]. Everything below is dead space. */
+		int max_valid_y = term.scr + term.c.y;
+
+		if (vimnav.y >= max_valid_y) {
+			/* At or past prompt position, only allow scrolling down if scrolled */
+			if (term.scr > 0) {
+				kscrolldown(&(Arg){ .i = 1 });
+				/* Recalculate after scroll and clamp if needed */
+				max_valid_y = term.scr + term.c.y;
+				if (vimnav.y > max_valid_y) {
+					vimnav.y = max_valid_y;
+					if (term.scr == 0) {
+						vimnav.x = term.c.x;
+						vimnav.last_shell_x = term.c.x;
+					}
 				}
 			}
+			/* If term.scr == 0, can't move down at all */
+		} else if (vimnav.y >= term.row - 1) {
+			/* At bottom of screen but not at prompt yet, scroll down */
+			kscrolldown(&(Arg){ .i = 1 });
+		} else {
+			/* Can move down freely within valid range */
+			vimnav.y++;
 		}
-		/* If term.scr == 0, can't move down at all */
-	} else if (vimnav.y >= term.row - 1) {
-		/* At bottom of screen but not at prompt yet, scroll down */
-		kscrolldown(&(Arg){ .i = 1 });
-	} else {
-		/* Can move down freely within valid range */
-		vimnav.y++;
 	}
 
 	/* If entering prompt space from history in normal mode, sync to zsh cursor.
