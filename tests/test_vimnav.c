@@ -2076,8 +2076,8 @@ TEST(vimnav_H_moves_to_screen_top)
 	mock_term_free();
 }
 
-/* Test: L moves cursor to prompt line and syncs to zsh cursor */
-TEST(vimnav_L_moves_to_prompt_and_syncs)
+/* Test: L moves cursor to bottom visible line (prompt line when not scrolled) */
+TEST(vimnav_L_moves_to_screen_bottom)
 {
 	mock_term_init(24, 80);
 	mock_set_line(5, "history line");
@@ -2086,7 +2086,7 @@ TEST(vimnav_L_moves_to_prompt_and_syncs)
 	term.c.x = 5;
 	term.c.y = 20;
 	term.scr = 0;
-	vimnav.zsh_cursor = 3;  /* zsh cursor at position 3 after prompt */
+	vimnav.zsh_cursor = 3;
 
 	vimnav_enter();
 	vimnav.y = 5;  /* Start in history */
@@ -2095,17 +2095,15 @@ TEST(vimnav_L_moves_to_prompt_and_syncs)
 
 	int handled = vimnav_handle_key('L', 0);
 	ASSERT_EQ(1, handled);
-	ASSERT_EQ(20, vimnav.y);  /* Moved to prompt line */
-	ASSERT(tisvimnav());  /* Still in nav mode */
-	/* x should be synced to zsh cursor: prompt_end (2) + zsh_cursor (3) = 5 */
-	ASSERT_EQ(5, vimnav.x);
+	ASSERT_EQ(20, vimnav.y);  /* Bottom visible line = prompt when not scrolled */
+	ASSERT(tisvimnav());
 
 	vimnav_exit();
 	mock_term_free();
 }
 
-/* Test: L scrolls down if scrolled up, stays in nav mode */
-TEST(vimnav_L_scrolls_down_if_needed)
+/* Test: L moves to bottom of visible screen when scrolled up (not to prompt) */
+TEST(vimnav_L_stays_on_screen_when_scrolled)
 {
 	mock_term_init(24, 80);
 	mock_set_line(5, "history line");
@@ -2113,19 +2111,20 @@ TEST(vimnav_L_scrolls_down_if_needed)
 
 	term.c.x = 5;
 	term.c.y = 20;
-	term.scr = 5;  /* Scrolled up */
 	vimnav.zsh_cursor = 0;
 
 	vimnav_enter();
+	/* Simulate user scrolling up after entering nav mode */
+	term.scr = 5;
 	vimnav.y = 5;
 	vimnav.x = 3;
 	vimnav.savedx = 3;
 
 	int handled = vimnav_handle_key('L', 0);
 	ASSERT_EQ(1, handled);
-	ASSERT_EQ(0, term.scr);  /* Scrolled back to bottom */
-	ASSERT_EQ(20, vimnav.y);  /* At prompt line */
-	ASSERT(tisvimnav());  /* Still in nav mode */
+	ASSERT_EQ(5, term.scr);  /* Should NOT scroll down */
+	ASSERT_EQ(23, vimnav.y);  /* Bottom of visible screen (row - 1) */
+	ASSERT(tisvimnav());
 
 	vimnav_exit();
 	mock_term_free();
@@ -2884,8 +2883,8 @@ TEST_SUITE(vimnav)
 	RUN_TEST(vimnav_fF_prompt_passthrough);
 	/* H/M/L screen navigation tests */
 	RUN_TEST(vimnav_H_moves_to_screen_top);
-	RUN_TEST(vimnav_L_moves_to_prompt_and_syncs);
-	RUN_TEST(vimnav_L_scrolls_down_if_needed);
+	RUN_TEST(vimnav_L_moves_to_screen_bottom);
+	RUN_TEST(vimnav_L_stays_on_screen_when_scrolled);
 	RUN_TEST(vimnav_M_moves_to_middle);
 	RUN_TEST(vimnav_M_middle_when_scrolled);
 	/* gg/G navigation tests */

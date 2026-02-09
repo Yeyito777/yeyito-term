@@ -1133,23 +1133,29 @@ vimnav_move_screen_top(void)
 	vimnav_update_selection();
 }
 
-/* L - move cursor to prompt line (like G but without scrolling to history top first) */
+/* L - move cursor to last visible line on screen */
 static void
-vimnav_move_screen_prompt(void)
+vimnav_move_screen_bottom(void)
 {
 	int linelen;
+	int bottom_y;
 
-	/* Scroll to show prompt if scrolled away */
-	if (term.scr > 0) {
-		kscrolldown(&(Arg){ .i = term.scr });
+	if (term.scr == 0) {
+		/* Not scrolled: prompt visible at term.c.y */
+		bottom_y = term.c.y;
+	} else {
+		/* Scrolled: use bottom of visible screen */
+		bottom_y = term.row - 1;
 	}
-	vimnav.y = term.c.y;
+
+	vimnav.y = bottom_y;
 
 	linelen = tlinelen(vimnav.y);
 	vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
 
-	/* Sync cursor to zsh position when entering prompt space */
-	vimnav_sync_to_zsh_cursor();
+	/* Sync cursor to zsh position if we landed in prompt space */
+	if (vimnav_is_prompt_space(vimnav.y))
+		vimnav_sync_to_zsh_cursor();
 	vimnav_update_selection();
 }
 
@@ -1601,7 +1607,7 @@ vimnav_handle_key(ulong ksym, uint state)
 		vimnav_move_screen_top();
 		break;
 	case 'L':
-		vimnav_move_screen_prompt();
+		vimnav_move_screen_bottom();
 		break;
 	case 'M':
 		vimnav_move_screen_middle();
