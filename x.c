@@ -1553,7 +1553,7 @@ xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 		og.mode |= ATTR_SELECTED;
 	xdrawglyph(og, ox, oy);
 
-	if (IS_SET(MODE_HIDE))
+	if (IS_SET(MODE_HIDE) && !vimnav.forced)
 		return;
 
 	/*
@@ -1561,7 +1561,21 @@ xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 	 */
 	g.mode &= ATTR_BOLD|ATTR_ITALIC|ATTR_UNDERLINE|ATTR_STRUCK|ATTR_WIDE;
 
-	if (IS_SET(MODE_REVERSE)) {
+	if (vimnav.forced) {
+		/* Coral red cursor for forced nav mode */
+		static int allocated = 0;
+		static Color forcedcol;
+		if (!allocated) {
+			XRenderColor rc = { .red = 0xffff, .green = 0x6b6b,
+			                    .blue = 0x6b6b, .alpha = 0xffff };
+			XftColorAllocValue(xw.dpy, xw.vis, xw.cmap,
+			                   &rc, &forcedcol);
+			allocated = 1;
+		}
+		drawcol = forcedcol;
+		g.fg = defaultbg;
+		g.bg = TRUECOLOR(0xff, 0x6b, 0x6b);
+	} else if (IS_SET(MODE_REVERSE)) {
 		g.mode |= ATTR_REVERSE;
 		g.bg = defaultfg;
 		if (selected(cx, cy)) {
@@ -1765,6 +1779,12 @@ xsetmode(int set, unsigned int flags)
 }
 
 int
+xgetcursor(void)
+{
+	return win.cursor;
+}
+
+int
 xsetcursor(int cursor)
 {
 	if (!BETWEEN(cursor, 0, 7)) /* 7: st extension */
@@ -1887,6 +1907,20 @@ kpress(XEvent *ev)
 			ttywrite(rightshiftseq, strlen(rightshiftseq), 1);
 			return;
 		}
+	}
+
+	/* Shift+Escape: force-toggle vim nav mode */
+	if (ksym == XK_Escape && (e->state & ShiftMask)) {
+		if (vimnav.forced) {
+			vimnav_exit();
+		} else if (!tisvimnav()) {
+			vimnav_force_enter();
+		} else {
+			/* Already in regular nav mode: upgrade to forced */
+			vimnav.forced = 1;
+			tfulldirt();
+		}
+		return;
 	}
 
 	/* Vim navigation mode key handling */

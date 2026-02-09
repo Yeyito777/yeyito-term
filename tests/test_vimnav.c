@@ -2537,6 +2537,278 @@ TEST(vimnav_visual_mode_consumes_unknown_keys)
 	mock_term_free();
 }
 
+/* Test: force_enter works even on alt screen */
+TEST(vimnav_force_enter_works_on_altscreen)
+{
+	mock_term_init(24, 80);
+	mock_set_line(10, "TUI content here");
+	term.mode = MODE_ALTSCREEN;
+	term.c.x = 5;
+	term.c.y = 10;
+
+	/* Normal enter should fail on alt screen */
+	vimnav_enter();
+	ASSERT(!tisvimnav());
+
+	/* Force enter should work */
+	vimnav_force_enter();
+	ASSERT(tisvimnav());
+	ASSERT_EQ(1, vimnav.forced);
+	ASSERT_EQ(5, vimnav.x);
+	ASSERT_EQ(10, vimnav.y);
+
+	vimnav_exit();
+	ASSERT(!tisvimnav());
+	ASSERT_EQ(0, vimnav.forced);
+
+	mock_term_free();
+}
+
+/* Test: force_enter doesn't double-enter if already in nav mode */
+TEST(vimnav_force_enter_no_double_entry)
+{
+	mock_term_init(24, 80);
+	term.c.x = 0;
+	term.c.y = 10;
+
+	vimnav_force_enter();
+	ASSERT(tisvimnav());
+
+	/* Second force_enter should be a no-op */
+	vimnav.x = 5;  /* Change position to detect if it resets */
+	vimnav_force_enter();
+	ASSERT_EQ(5, vimnav.x);  /* Shouldn't have been reset */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: setting forced flag on regular nav mode upgrades to forced behavior */
+TEST(vimnav_upgrade_regular_to_forced)
+{
+	mock_term_init(24, 80);
+	mock_set_line(10, "% echo hello");
+	term.c.x = 5;
+	term.c.y = 10;
+	term.scr = 0;
+	vimnav.zsh_cursor = 3;
+
+	/* Enter regular nav mode */
+	vimnav_enter();
+	ASSERT(tisvimnav());
+	ASSERT_EQ(0, vimnav.forced);
+
+	/* In regular nav mode, h on prompt passes to zsh */
+	vimnav.x = 5;
+	vimnav.savedx = 5;
+	ASSERT_EQ(0, vimnav_handle_key('h', 0));  /* Passed to zsh */
+
+	/* Upgrade to forced mode (simulates what kpress does on Shift+Esc) */
+	vimnav.forced = 1;
+
+	/* Now h on same line should be handled by st */
+	vimnav.x = 5;
+	vimnav.savedx = 5;
+	ASSERT_EQ(1, vimnav_handle_key('h', 0));  /* Handled by st */
+	ASSERT_EQ(4, vimnav.x);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: Escape exits forced nav mode */
+TEST(vimnav_forced_escape_exits)
+{
+	mock_term_init(24, 80);
+	mock_set_line(10, "some content");
+	term.c.x = 3;
+	term.c.y = 10;
+
+	vimnav_force_enter();
+	ASSERT(tisvimnav());
+
+	int handled = vimnav_handle_key(XK_Escape, 0);
+	ASSERT_EQ(1, handled);
+	ASSERT(!tisvimnav());
+
+	mock_term_free();
+}
+
+/* Test: Escape in forced visual mode clears visual but stays in nav mode */
+TEST(vimnav_forced_escape_clears_visual_first)
+{
+	mock_term_init(24, 80);
+	mock_set_line(10, "some content");
+	term.c.x = 3;
+	term.c.y = 10;
+
+	vimnav_force_enter();
+	vimnav_handle_key('v', 0);
+	ASSERT_EQ(2, vimnav.mode);  /* VIMNAV_VISUAL */
+
+	/* First Escape clears visual, stays in normal */
+	int handled = vimnav_handle_key(XK_Escape, 0);
+	ASSERT_EQ(1, handled);
+	ASSERT(tisvimnav());
+	ASSERT_EQ(1, vimnav.mode);  /* VIMNAV_NORMAL */
+
+	/* Second Escape exits forced nav mode */
+	handled = vimnav_handle_key(XK_Escape, 0);
+	ASSERT_EQ(1, handled);
+	ASSERT(!tisvimnav());
+
+	mock_term_free();
+}
+
+/* Test: i exits forced nav mode */
+TEST(vimnav_forced_i_exits)
+{
+	mock_term_init(24, 80);
+	mock_set_line(10, "some content");
+	term.c.x = 3;
+	term.c.y = 10;
+
+	vimnav_force_enter();
+	ASSERT(tisvimnav());
+
+	int handled = vimnav_handle_key('i', 0);
+	ASSERT_EQ(1, handled);
+	ASSERT(!tisvimnav());
+
+	mock_term_free();
+}
+
+/* Test: a exits forced nav mode */
+TEST(vimnav_forced_a_exits)
+{
+	mock_term_init(24, 80);
+	mock_set_line(10, "some content");
+	term.c.x = 3;
+	term.c.y = 10;
+
+	vimnav_force_enter();
+	ASSERT(tisvimnav());
+
+	int handled = vimnav_handle_key('a', 0);
+	ASSERT_EQ(1, handled);
+	ASSERT(!tisvimnav());
+
+	mock_term_free();
+}
+
+/* Test: editing keys are no-ops in forced mode */
+TEST(vimnav_forced_editing_keys_noop)
+{
+	char editing_keys[] = { 'x', 'X', 'd', 'D', 'c', 'C', 's', 'S', 'r', 'R',
+	                        'A', 'I', 'o', 'O', 'u', '.', '~', 'p', 0 };
+
+	for (int i = 0; editing_keys[i]; i++) {
+		mock_term_init(24, 80);
+		mock_set_line(10, "some content");
+		term.c.x = 3;
+		term.c.y = 10;
+
+		vimnav_force_enter();
+		mock_reset();
+
+		int handled = vimnav_handle_key(editing_keys[i], 0);
+		ASSERT_EQ(1, handled);  /* Key consumed */
+		ASSERT(tisvimnav());    /* Still in nav mode */
+		ASSERT_EQ(0, mock_state.ttywrite_calls);  /* Nothing sent to shell */
+
+		vimnav_exit();
+		mock_term_free();
+	}
+}
+
+/* Test: navigation keys work in forced mode */
+TEST(vimnav_forced_navigation_works)
+{
+	mock_term_init(24, 80);
+	mock_set_line(10, "hello world test");
+	term.c.x = 3;
+	term.c.y = 10;
+
+	vimnav_force_enter();
+	ASSERT_EQ(3, vimnav.x);
+	ASSERT_EQ(10, vimnav.y);
+
+	/* h moves left */
+	vimnav_handle_key('h', 0);
+	ASSERT_EQ(2, vimnav.x);
+
+	/* l moves right */
+	vimnav_handle_key('l', 0);
+	ASSERT_EQ(3, vimnav.x);
+
+	/* 0 moves to beginning */
+	vimnav_handle_key('0', 0);
+	ASSERT_EQ(0, vimnav.x);
+
+	/* $ moves to end */
+	vimnav_handle_key('$', 0);
+	ASSERT_EQ(15, vimnav.x);  /* "hello world test" = 16 chars, last index 15 */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: visual mode and yank work in forced mode */
+TEST(vimnav_forced_visual_yank_works)
+{
+	mock_term_init(24, 80);
+	mock_set_line(10, "hello world test");
+	term.c.x = 0;
+	term.c.y = 10;
+
+	vimnav_force_enter();
+	vimnav.x = 6;  /* on 'w' */
+	vimnav.savedx = 6;
+
+	/* Enter visual mode */
+	vimnav_handle_key('v', 0);
+	ASSERT_EQ(2, vimnav.mode);  /* VIMNAV_VISUAL */
+
+	/* Select word forward */
+	vimnav_handle_key('e', 0);
+	ASSERT_EQ(10, vimnav.x);  /* end of "world" */
+
+	/* Yank — don't mock_reset() since it would clear sel state */
+	int prev_xsetsel = mock_state.xsetsel_calls;
+	vimnav_handle_key('y', 0);
+	ASSERT_EQ(1, vimnav.mode);  /* Back to VIMNAV_NORMAL */
+	ASSERT(mock_state.xsetsel_calls > prev_xsetsel);  /* Text was yanked */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: prompt space always returns 0 in forced mode */
+TEST(vimnav_forced_no_prompt_space)
+{
+	mock_term_init(24, 80);
+	mock_set_line(10, "% echo hello");  /* Looks like a prompt */
+	term.c.x = 5;
+	term.c.y = 10;
+	term.scr = 0;
+
+	vimnav_force_enter();
+
+	/* h/l should be handled internally (not passed to zsh) */
+	vimnav.x = 5;
+	vimnav.savedx = 5;
+	int handled = vimnav_handle_key('h', 0);
+	ASSERT_EQ(1, handled);  /* Handled by st */
+	ASSERT_EQ(4, vimnav.x);
+
+	handled = vimnav_handle_key('l', 0);
+	ASSERT_EQ(1, handled);  /* Handled by st */
+	ASSERT_EQ(5, vimnav.x);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
 /* Test suite */
 TEST_SUITE(vimnav)
 {
@@ -2632,6 +2904,18 @@ TEST_SUITE(vimnav)
 	/* Visual mode snap-to-prompt cleanup tests */
 	RUN_TEST(vimnav_editing_keys_clear_visual_on_snap);
 	RUN_TEST(vimnav_visual_mode_consumes_unknown_keys);
+	/* Forced nav mode (Shift+Escape) tests */
+	RUN_TEST(vimnav_force_enter_works_on_altscreen);
+	RUN_TEST(vimnav_force_enter_no_double_entry);
+	RUN_TEST(vimnav_upgrade_regular_to_forced);
+	RUN_TEST(vimnav_forced_escape_exits);
+	RUN_TEST(vimnav_forced_escape_clears_visual_first);
+	RUN_TEST(vimnav_forced_i_exits);
+	RUN_TEST(vimnav_forced_a_exits);
+	RUN_TEST(vimnav_forced_editing_keys_noop);
+	RUN_TEST(vimnav_forced_navigation_works);
+	RUN_TEST(vimnav_forced_visual_yank_works);
+	RUN_TEST(vimnav_forced_no_prompt_space);
 }
 
 int

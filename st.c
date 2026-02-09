@@ -2860,8 +2860,10 @@ draw(void)
 
 		/* Sync cursor with shell only when shell cursor actually moved.
 		 * This allows h/l movement while still tracking zsh cursor changes.
-		 * Note: Don't decrement here - zsh already handles vim cursor offset. */
-		if (term.scr == 0 && vy == term.c.y && term.c.x != vimnav.last_shell_x) {
+		 * Note: Don't decrement here - zsh already handles vim cursor offset.
+		 * Skip in forced mode - no shell coordination. */
+		if (!vimnav.forced &&
+		    term.scr == 0 && vy == term.c.y && term.c.x != vimnav.last_shell_x) {
 			vx = term.c.x;
 			vimnav.x = vx;
 			vimnav.savedx = vx;
@@ -2873,8 +2875,17 @@ draw(void)
 		LIMIT(vox, 0, term.col - 1);
 		LIMIT(voy, 0, term.row - 1);
 
-		xdrawcursor(vx, vy, TLINE(vy)[vx],
-				vox, voy, TLINE(voy)[vox]);
+		/* In forced mode, override cursor style to block */
+		if (vimnav.forced) {
+			int saved = xgetcursor();
+			xsetcursor(2);
+			xdrawcursor(vx, vy, TLINE(vy)[vx],
+					vox, voy, TLINE(voy)[vox]);
+			xsetcursor(saved);
+		} else {
+			xdrawcursor(vx, vy, TLINE(vy)[vx],
+					vox, voy, TLINE(voy)[vox]);
+		}
 
 		vimnav.ox = vimnav.x;
 		vimnav.oy = vimnav.y;

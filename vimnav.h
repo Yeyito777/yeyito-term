@@ -18,6 +18,7 @@ typedef struct {
 	int anchor_abs_y;   /* visual mode anchor y (absolute: screen_y - term.scr) */
 	int last_shell_x;   /* last known shell cursor x for sync detection */
 	int pending_y;      /* waiting for second y in yy sequence */
+	int forced;         /* 1 if forced entry (Shift+Esc), no zsh coordination */
 	/* zsh-reported state (for cursor sync) */
 	int zsh_cursor;     /* cursor position reported by zsh */
 	int zsh_visual;     /* 1 if zsh is in visual mode */
@@ -38,6 +39,7 @@ extern VimNav vimnav;
 
 /* Public functions */
 void vimnav_enter(void);
+void vimnav_force_enter(void);
 void vimnav_exit(void);
 int tisvimnav(void);
 int tisvimnav_paste(void);

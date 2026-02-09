@@ -1304,6 +1304,10 @@ vimnav_is_prompt_space(int y)
 	 * Returns 1 if y is between prompt_start and term.c.y (inclusive). */
 	int prompt_start;
 
+	if (vimnav.forced) {
+		return 0;  /* Forced mode: no prompt space concept */
+	}
+
 	if (term.scr != 0) {
 		return 0;  /* Not at bottom of scrollback */
 	}
@@ -1397,6 +1401,30 @@ vimnav_enter(void)
 }
 
 void
+vimnav_force_enter(void)
+{
+	if (vimnav.mode != VIMNAV_INACTIVE)
+		return;
+
+	vimnav.y = term.c.y;
+	vimnav.x = term.c.x;
+	vimnav.savedx = vimnav.x;
+	vimnav.ox = vimnav.x;
+	vimnav.oy = vimnav.y;
+	vimnav.prompt_y = term.c.y;
+	vimnav.scr_at_entry = term.scr;
+	vimnav.pending_textobj = 0;
+	vimnav.pending_find = 0;
+	vimnav.pending_g = 0;
+	vimnav.last_shell_x = vimnav.x;
+	vimnav.forced = 1;
+
+	vimnav.mode = VIMNAV_NORMAL;
+	selclear();
+	tfulldirt();
+}
+
+void
 vimnav_exit(void)
 {
 	if (vimnav.mode == VIMNAV_INACTIVE)
@@ -1406,6 +1434,7 @@ vimnav_exit(void)
 	vimnav.pending_textobj = 0;
 	vimnav.pending_find = 0;
 	vimnav.pending_g = 0;
+	vimnav.forced = 0;
 	selclear();
 	tfulldirt();
 }
@@ -1629,6 +1658,11 @@ vimnav_handle_key(ulong ksym, uint state)
 			vimnav.pending_textobj = ksym;
 			break;
 		}
+		/* In forced mode: exit nav mode (return to app) */
+		if (vimnav.forced) {
+			vimnav_exit();
+			break;
+		}
 		/* In normal mode: snap to prompt and pass to zsh (insert/append) */
 		vimnav_snap_to_prompt();
 		return 0;
@@ -1651,6 +1685,9 @@ vimnav_handle_key(ulong ksym, uint state)
 	case 'u':  /* undo */
 	case '.':  /* repeat last command */
 	case '~':  /* toggle case */
+		/* In forced mode: no-ops (no shell to send to) */
+		if (vimnav.forced)
+			break;
 		vimnav_snap_to_prompt();
 		return 0;  /* Pass through to zsh */
 
@@ -1678,6 +1715,9 @@ vimnav_handle_key(ulong ksym, uint state)
 
 	/* Paste after cursor (vim-style 'p') */
 	case 'p':
+		/* In forced mode: no-ops (no shell to paste into) */
+		if (vimnav.forced)
+			break;
 		vimnav_snap_to_prompt();
 		vimnav_paste_strip_newlines = 1;
 		vimnav_paste_after_cursor = 1;
@@ -1685,14 +1725,19 @@ vimnav_handle_key(ulong ksym, uint state)
 		clippaste(NULL);
 		break;
 
-	/* Escape: clear visual selection or stay in normal mode */
+	/* Escape: clear visual selection, exit forced mode, or stay in normal mode */
 	case 0xff1b: /* XK_Escape */
 		if (vimnav.mode == VIMNAV_VISUAL || vimnav.mode == VIMNAV_VISUAL_LINE) {
 			vimnav.mode = VIMNAV_NORMAL;
-			vimnav_notify_zsh_visual_end();  /* Tell zsh to exit visual mode */
+			if (!vimnav.forced)
+				vimnav_notify_zsh_visual_end();  /* Tell zsh to exit visual mode */
 			selclear();
-			vimnav_sync_to_zsh_cursor();  /* Sync cursor if in prompt space */
+			if (!vimnav.forced)
+				vimnav_sync_to_zsh_cursor();  /* Sync cursor if in prompt space */
 			tfulldirt();
+		} else if (vimnav.forced) {
+			/* Forced mode: Escape exits nav mode */
+			vimnav_exit();
 		} else if (vimnav.zsh_visual) {
 			/* zsh is in visual mode on prompt line - clear st's rendering and notify zsh */
 			vimnav_notify_zsh_visual_end();  /* Sends Escape to zsh and clears flag */
