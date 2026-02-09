@@ -2828,6 +2828,10 @@ draw(void)
 	if (!xstartdraw())
 		return;
 
+	/* Debug mode: force full redraw so overlays clean up when prompt moves */
+	if (debug_mode)
+		tfulldirt();
+
 	/* adjust cursor position */
 	LIMIT(term.ocx, 0, term.col-1);
 	LIMIT(term.ocy, 0, term.row-1);
