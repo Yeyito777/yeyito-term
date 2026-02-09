@@ -2751,8 +2751,8 @@ TEST(vimnav_upgrade_regular_to_forced)
 	mock_term_free();
 }
 
-/* Test: Escape exits forced nav mode */
-TEST(vimnav_forced_escape_exits)
+/* Test: Escape does NOT exit forced nav mode */
+TEST(vimnav_forced_escape_stays)
 {
 	mock_term_init(24, 80);
 	mock_set_line(10, "some content");
@@ -2764,7 +2764,8 @@ TEST(vimnav_forced_escape_exits)
 
 	int handled = vimnav_handle_key(XK_Escape, 0);
 	ASSERT_EQ(1, handled);
-	ASSERT(!tisvimnav());
+	ASSERT(tisvimnav());
+	ASSERT_EQ(1, vimnav.mode);  /* Still VIMNAV_NORMAL */
 
 	mock_term_free();
 }
@@ -2787,10 +2788,11 @@ TEST(vimnav_forced_escape_clears_visual_first)
 	ASSERT(tisvimnav());
 	ASSERT_EQ(1, vimnav.mode);  /* VIMNAV_NORMAL */
 
-	/* Second Escape exits forced nav mode */
+	/* Second Escape stays in forced nav mode (does not exit) */
 	handled = vimnav_handle_key(XK_Escape, 0);
 	ASSERT_EQ(1, handled);
-	ASSERT(!tisvimnav());
+	ASSERT(tisvimnav());
+	ASSERT_EQ(1, vimnav.mode);  /* Still VIMNAV_NORMAL */
 
 	mock_term_free();
 }
@@ -3147,7 +3149,7 @@ TEST_SUITE(vimnav)
 	RUN_TEST(vimnav_force_enter_works_on_altscreen);
 	RUN_TEST(vimnav_force_enter_no_double_entry);
 	RUN_TEST(vimnav_upgrade_regular_to_forced);
-	RUN_TEST(vimnav_forced_escape_exits);
+	RUN_TEST(vimnav_forced_escape_stays);
 	RUN_TEST(vimnav_forced_escape_clears_visual_first);
 	RUN_TEST(vimnav_forced_i_exits);
 	RUN_TEST(vimnav_forced_a_exits);

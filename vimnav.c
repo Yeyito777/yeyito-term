@@ -1766,7 +1766,7 @@ vimnav_handle_key(ulong ksym, uint state)
 		clippaste(NULL);
 		break;
 
-	/* Escape: clear visual selection, exit forced mode, or stay in normal mode */
+	/* Escape: clear visual selection or stay in normal mode */
 	case 0xff1b: /* XK_Escape */
 		if (vimnav.mode == VIMNAV_VISUAL || vimnav.mode == VIMNAV_VISUAL_LINE) {
 			vimnav.mode = VIMNAV_NORMAL;
@@ -1776,9 +1776,6 @@ vimnav_handle_key(ulong ksym, uint state)
 			if (!vimnav.forced)
 				vimnav_sync_to_zsh_cursor();  /* Sync cursor if in prompt space */
 			tfulldirt();
-		} else if (vimnav.forced) {
-			/* Forced mode: Escape exits nav mode */
-			vimnav_exit();
 		} else if (vimnav.zsh_visual) {
 			/* zsh is in visual mode on prompt line - clear st's rendering and notify zsh */
 			vimnav_notify_zsh_visual_end();  /* Sends Escape to zsh and clears flag */
