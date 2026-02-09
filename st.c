@@ -236,6 +236,7 @@ static ssize_t xwrite(int, const char *, size_t);
 /* Globals */
 Term term;       /* non-static for vimnav.c access */
 Selection sel;   /* non-static for vimnav.c access */
+int debug_mode = 0;
 static CSIEscape csiescseq;
 static STREscape strescseq;
 static int iofd = 1;

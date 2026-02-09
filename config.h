@@ -126,6 +126,8 @@ static const char *colorname[] = {
 	"#f1faee", /* 259 → reverse cursor (foam white) */
 	"#4f5258", /* 260 → selection background */
 	"#090d35", /* 261 → vimnav current line background */
+	"#1a1a00", /* 262 → debug prompt line bg (dark yellow tinge) */
+	"#ffe066", /* 263 → debug prompt line text (golden reflection) */
 };
 
 
@@ -139,6 +141,8 @@ unsigned int defaultcs = 258;
 static unsigned int defaultrcs = 259;
 unsigned int selectionbg = 260;
 unsigned int vimnav_curline_bg = 261;
+unsigned int debug_prompt_bg = 262;
+unsigned int debug_prompt_fg = 263;
 
 /*
  * Default shape of cursor

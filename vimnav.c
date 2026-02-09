@@ -244,6 +244,19 @@ vimnav_curline_y(void)
 	return vimnav.y;
 }
 
+void
+vimnav_prompt_line_range(int *start_y, int *end_y)
+{
+	/* Returns the screen row range of the prompt space, or -1/-1 if
+	 * not visible (scrolled up or alt screen). */
+	if (IS_SET(MODE_ALTSCREEN) || term.scr != 0) {
+		*start_y = *end_y = -1;
+		return;
+	}
+	*start_y = vimnav_find_prompt_start_y();
+	*end_y = term.c.y;
+}
+
 static int
 vimnav_screen_y(void)
 {

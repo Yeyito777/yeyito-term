@@ -46,6 +46,7 @@ int tisvimnav_paste(void);
 void vimnav_paste_done(void);
 int vimnav_handle_key(ulong ksym, uint state);
 int vimnav_curline_y(void);  /* returns y to highlight, or -1 if none */
+void vimnav_prompt_line_range(int *start_y, int *end_y);
 
 /* zsh cursor/visual sync functions (called from st.c OSC handler) */
 void vimnav_set_zsh_cursor(int pos);

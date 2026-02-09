@@ -3021,6 +3021,72 @@ TEST_SUITE(vimnav)
 	RUN_TEST(vimnav_forced_no_prompt_space);
 }
 
+/* === Prompt line range tests === */
+
+TEST(prompt_range_at_bottom)
+{
+	int start_y, end_y;
+
+	mock_term_init(24, 80);
+	mock_set_line(23, "% prompt");
+	term.c.x = 5;
+	term.c.y = 23;
+	term.scr = 0;
+	term.mode = 0;  /* no alt screen */
+
+	vimnav_prompt_line_range(&start_y, &end_y);
+
+	ASSERT_EQ(23, start_y);
+	ASSERT_EQ(23, end_y);
+
+	mock_term_free();
+}
+
+TEST(prompt_range_scrolled)
+{
+	int start_y, end_y;
+
+	mock_term_init(24, 80);
+	mock_set_line(23, "% prompt");
+	term.c.x = 5;
+	term.c.y = 23;
+	term.scr = 5;  /* scrolled up */
+	term.mode = 0;
+
+	vimnav_prompt_line_range(&start_y, &end_y);
+
+	ASSERT_EQ(-1, start_y);
+	ASSERT_EQ(-1, end_y);
+
+	mock_term_free();
+}
+
+TEST(prompt_range_altscreen)
+{
+	int start_y, end_y;
+
+	mock_term_init(24, 80);
+	mock_set_line(23, "% prompt");
+	term.c.x = 5;
+	term.c.y = 23;
+	term.scr = 0;
+	term.mode = (1 << 2);  /* MODE_ALTSCREEN */
+
+	vimnav_prompt_line_range(&start_y, &end_y);
+
+	ASSERT_EQ(-1, start_y);
+	ASSERT_EQ(-1, end_y);
+
+	mock_term_free();
+}
+
+TEST_SUITE(prompt_range)
+{
+	RUN_TEST(prompt_range_at_bottom);
+	RUN_TEST(prompt_range_scrolled);
+	RUN_TEST(prompt_range_altscreen);
+}
+
 int
 main(void)
 {
@@ -3028,6 +3094,7 @@ main(void)
 	printf("========================================\n");
 
 	RUN_SUITE(vimnav);
+	RUN_SUITE(prompt_range);
 
 	return test_summary();
 }

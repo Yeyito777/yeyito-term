@@ -1466,6 +1466,14 @@ xdrawglyphfontspecs(const XftGlyphFontSpec *specs, Glyph base, int len, int x, i
 	if (y == vimnav_curline_y() && base.bg == defaultbg)
 		bg = &dc.col[vimnav_curline_bg];
 
+	/* Debug mode: highlight prompt lines with yellow tinge */
+	if (debug_mode && base.bg == defaultbg) {
+		int ps, pe;
+		vimnav_prompt_line_range(&ps, &pe);
+		if (ps >= 0 && y >= ps && y <= pe)
+			bg = &dc.col[debug_prompt_bg];
+	}
+
 	if (base.mode & ATTR_SELECTED)
 		bg = &dc.col[selectionbg];
 
@@ -1717,6 +1725,29 @@ xdrawline(Line line, int x1, int y1, int x2)
 	}
 	if (i > 0)
 		xdrawglyphfontspecs(specs, base, i, ox, y1);
+
+	/* Debug mode: draw "prompt line" hint text after content */
+	if (debug_mode) {
+		int ps, pe;
+		vimnav_prompt_line_range(&ps, &pe);
+		if (ps >= 0 && y1 >= ps && y1 <= pe) {
+			const char *label = "     prompt line";
+			int label_len = 16;
+			int ll = tlinelen(y1);
+			int text_x = borderpx + (ll > 0 ? ll : 0) * win.cw;
+			int text_y = borderpx + y1 * win.ch + dc.font.ascent;
+			int label_width = label_len * win.cw;
+			/* Only draw if it fits on screen */
+			if (text_x + label_width <= borderpx + win.tw) {
+				XftDrawRect(xw.draw, &dc.col[debug_prompt_bg],
+						text_x, borderpx + y1 * win.ch,
+						label_width, win.ch);
+				XftDrawStringUtf8(xw.draw, &dc.col[debug_prompt_fg],
+						dc.font.match, text_x, text_y,
+						(const FcChar8 *)label, label_len);
+			}
+		}
+	}
 }
 
 void
@@ -2147,11 +2178,11 @@ run(void)
 void
 usage(void)
 {
-	die("usage: %s [-aiv] [-c class] [-f font] [-g geometry]"
+	die("usage: %s [-adiv] [-c class] [-f font] [-g geometry]"
 	    " [-n name] [-o file]\n"
 	    "          [-T title] [-t title] [-w windowid]"
 	    " [[-e] command [args ...]]\n"
-	    "       %s [-aiv] [-c class] [-f font] [-g geometry]"
+	    "       %s [-adiv] [-c class] [-f font] [-g geometry]"
 	    " [-n name] [-o file]\n"
 	    "          [-T title] [-t title] [-w windowid] -l line"
 	    " [stty_args ...]\n", argv0, argv0);
@@ -2200,6 +2231,9 @@ main(int argc, char *argv[])
 		break;
 	case 'w':
 		opt_embed = EARGF(usage());
+		break;
+	case 'd':
+		debug_mode = 1;
 		break;
 	case 'v':
 		die("%s " VERSION "\n", argv0);
