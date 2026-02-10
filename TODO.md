@@ -1,5 +1,3 @@
-- [ ] There are some prompt line issues and inconsistensies when it comes to snapping / going to the prompt line, identify them and fix them one by one.
-- [ ] Add a keybind or way to go to previous command
 - [ ] Copying from an ssh is scuffed as fuck since it adds spaces to the copy. Pasting to ssh also does this (It adds spaces where \ or \n should go (nothing just wrapped) this prevents opening curl commands for example)
 - [ ] Add Ctrl+num cursor movement relative to the first line (nvim config-like)
 - [ ] When command line content updates (includes cursor) after a Ctrl+L it always snaps the view such that the top row is the top row after Ctrl+L originally, even if prompt line is in view. It shouldn't do this.
