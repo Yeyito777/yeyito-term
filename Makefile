@@ -4,7 +4,7 @@
 
 include config.mk
 
-SRC = st.c x.c vimnav.c sshind.c
+SRC = st.c x.c vimnav.c sshind.c notif.c
 OBJ = $(SRC:.c=.o)
 
 all: st
@@ -16,9 +16,10 @@ config.h:
 	$(CC) $(STCFLAGS) -c $<
 
 st.o: config.h st.h win.h vimnav.h
-x.o: arg.h config.h st.h win.h sshind.h
+x.o: arg.h config.h st.h win.h sshind.h notif.h
 vimnav.o: st.h vimnav.h
 sshind.o: sshind.h
+notif.o: sshind.h notif.h
 
 $(OBJ): config.h config.mk
 
@@ -33,7 +34,7 @@ clean:
 dist: clean
 	mkdir -p st-$(VERSION)
 	cp -R FAQ LEGACY TODO LICENSE Makefile README config.mk\
-		config.def.h st.info st.1 arg.h st.h win.h vimnav.h sshind.h $(SRC)\
+		config.def.h st.info st.1 arg.h st.h win.h vimnav.h sshind.h notif.h $(SRC)\
 		st-$(VERSION)
 	tar -cf - st-$(VERSION) | gzip > st-$(VERSION).tar.gz
 	rm -rf st-$(VERSION)
@@ -46,6 +47,8 @@ install: st
 	sed "s/VERSION/$(VERSION)/g" < st.1 > $(DESTDIR)$(MANPREFIX)/man1/st.1
 	chmod 644 $(DESTDIR)$(MANPREFIX)/man1/st.1
 	tic -sx st.info
+	cp -f scripts/st-notify $(DESTDIR)$(PREFIX)/bin/st-notify
+	chmod 755 $(DESTDIR)$(PREFIX)/bin/st-notify
 	@echo Please see the README file regarding the terminfo entry of st.
 
 uninstall:
@@ -55,7 +58,7 @@ uninstall:
 # Testing
 TEST_SRC = tests/mocks.c tests/test_vimnav.c vimnav.c
 TEST_OBJ = tests/mocks.o tests/test_vimnav.o tests/vimnav.o
-TESTFLAGS = -I. -g -Wall -Wextra
+TESTFLAGS = -I. -g -Wall -Wextra -D_XOPEN_SOURCE=600
 
 tests/mocks.o: tests/mocks.c tests/mocks.h st.h
 	$(CC) $(TESTFLAGS) -c tests/mocks.c -o tests/mocks.o
@@ -90,14 +93,22 @@ tests/test_cwd.o: tests/test_cwd.c tests/test.h
 test_cwd: tests/test_cwd.o
 	$(CC) -o tests/test_cwd tests/test_cwd.o
 
-test: test_vimnav test_sshind test_scrollback test_cwd
+# notif tests (self-contained with X11 mocks - includes notif.c directly)
+tests/test_notif.o: tests/test_notif.c tests/test.h sshind.h notif.h notif.c
+	$(CC) $(TESTFLAGS) -c tests/test_notif.c -o tests/test_notif.o
+
+test_notif: tests/test_notif.o
+	$(CC) -o tests/test_notif tests/test_notif.o
+
+test: test_vimnav test_sshind test_scrollback test_cwd test_notif
 	@echo "Running tests..."
 	@./tests/test_vimnav
 	@./tests/test_sshind
 	@./tests/test_scrollback
 	@./tests/test_cwd
+	@./tests/test_notif
 
 clean-tests:
-	rm -f tests/*.o tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd
+	rm -f tests/*.o tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif
 
 .PHONY: all clean dist install uninstall test clean-tests

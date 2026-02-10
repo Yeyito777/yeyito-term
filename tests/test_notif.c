@@ -1,17 +1,21 @@
 /* See LICENSE for license details. */
-/* Unit tests for sshind module */
+/* Unit tests for notif module */
 
-/* Define SSHIND_TEST to use mock X11 types instead of real ones */
+/* Define NOTIF_TEST to use mock X11 types instead of real ones */
+#define NOTIF_TEST
+
+/* Also define SSHIND_TEST since we include sshind.h via notif.c */
 #define SSHIND_TEST
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "test.h"
 
 /*
- * Mock X11/Xft types - must be defined before including sshind.h
+ * Mock X11/Xft types - must be defined before including notif.h
  * These shadow the real X11 types for testing purposes
  */
 
@@ -52,6 +56,7 @@ typedef struct {
 	unsigned long border_pixel;
 	Bool override_redirect;
 	long event_mask;
+	Colormap colormap;
 } XSetWindowAttributes;
 
 typedef struct {
@@ -64,6 +69,7 @@ typedef unsigned char FcChar8;
 #define CWBorderPixel 2
 #define CWOverrideRedirect 4
 #define CWEventMask 8
+#define CWColormap 16
 #define ExposureMask 1
 #define InputOutput 1
 #define GCGraphicsExposures 1
@@ -81,7 +87,7 @@ static struct {
 	GC created_gc;
 } x11_track;
 
-/* Mock X window globals that sshind.c expects */
+/* Mock X window globals that notif.c expects */
 typedef struct {
 	int tw, th;
 	int w, h;
@@ -119,18 +125,19 @@ typedef struct {
 	GC gc;
 } DC;
 
-/* Define the extern globals that sshind.c references */
+/* Define the extern globals that notif.c references */
 XWindow xw;
 TermWindow win;
 DC dc;
 char *usedfont = "monospace";
 double usedfontsize = 12.0;
+int debug_mode = 0;
 
 /* Mock X11 function implementations */
 static Display mock_display;
 static Visual mock_visual;
 static struct _XGC mock_main_gc;
-static struct _XGC mock_sshind_gc;
+static struct _XGC mock_notif_gc;
 static XftDraw mock_xftdraw;
 static XftFont mock_font = { .ascent = 10, .descent = 4 };
 static FcPattern mock_pattern;
@@ -263,8 +270,8 @@ GC XCreateGC(Display *dpy, Drawable d, unsigned long valuemask,
              XGCValues *values) {
 	(void)dpy; (void)d; (void)valuemask; (void)values;
 	x11_track.xcreategc_calls++;
-	x11_track.created_gc = &mock_sshind_gc;
-	return &mock_sshind_gc;
+	x11_track.created_gc = &mock_notif_gc;
+	return &mock_notif_gc;
 }
 
 int XFreeGC(Display *dpy, GC gc) {
@@ -283,8 +290,12 @@ int XCopyArea(Display *dpy, Drawable src, Drawable dest, GC gc,
 	return 0;
 }
 
-/* Now include sshind.c directly - it will use our mock types */
-#include "../sshind.c"
+/* Mock sshind functions needed by notif.c */
+int sshind_active(void) { return 0; }
+int sshind_height(void) { return 0; }
+
+/* Now include notif.c directly - it will use our mock types */
+#include "../notif.c"
 
 /* Reset tracking state */
 static void
@@ -310,67 +321,67 @@ init_mock_xwindow(void)
 	win.w = 800;
 	win.h = 600;
 
-	/* Main terminal GC - this should NOT be used by sshind */
+	/* Main terminal GC - this should NOT be used by notif */
 	dc.gc = &mock_main_gc;
 
 	reset_x11_track();
 }
 
-/* Test: sshind_active returns correct state */
-TEST(sshind_active_initial_state)
+/* Test: notif_active returns correct initial state */
+TEST(notif_active_initial_state)
 {
 	init_mock_xwindow();
 
 	/* Should be inactive initially */
-	ASSERT_EQ(0, sshind_active());
+	ASSERT_EQ(0, notif_active());
 }
 
-/* Test: sshind_show activates indicator */
-TEST(sshind_show_activates)
+/* Test: notif_show activates notification */
+TEST(notif_show_activates)
 {
 	init_mock_xwindow();
 
-	sshind_show("testhost");
+	notif_show("test message");
 
-	ASSERT_EQ(1, sshind_active());
+	ASSERT_EQ(1, notif_active());
 
-	sshind_hide();
+	notif_hide();
 }
 
-/* Test: sshind_hide deactivates indicator */
-TEST(sshind_hide_deactivates)
+/* Test: notif_hide deactivates notification */
+TEST(notif_hide_deactivates)
 {
 	init_mock_xwindow();
 
-	sshind_show("testhost");
-	ASSERT_EQ(1, sshind_active());
+	notif_show("test message");
+	ASSERT_EQ(1, notif_active());
 
-	sshind_hide();
-	ASSERT_EQ(0, sshind_active());
+	notif_hide();
+	ASSERT_EQ(0, notif_active());
 }
 
-/* Test: sshind creates its own GC */
-TEST(sshind_creates_own_gc)
+/* Test: notif creates its own GC */
+TEST(notif_creates_own_gc)
 {
 	init_mock_xwindow();
 
-	sshind_show("testhost");
+	notif_show("test message");
 
 	/* Should have created a GC */
 	ASSERT_EQ(1, x11_track.xcreategc_calls);
 
-	sshind_hide();
+	notif_hide();
 }
 
-/* Test: sshind_draw uses its own GC, not dc.gc */
-TEST(sshind_draw_uses_own_gc)
+/* Test: notif_draw uses its own GC, not dc.gc */
+TEST(notif_draw_uses_own_gc)
 {
 	init_mock_xwindow();
 
-	sshind_show("testhost");
+	notif_show("test message");
 	reset_x11_track();  /* Reset to track only the draw call */
 
-	sshind_draw();
+	notif_draw();
 
 	/* XCopyArea should have been called */
 	ASSERT_EQ(1, x11_track.xcopyarea_calls);
@@ -378,69 +389,112 @@ TEST(sshind_draw_uses_own_gc)
 	/* The GC used should NOT be dc.gc (the main terminal's GC) */
 	ASSERT(x11_track.last_copyarea_gc != dc.gc);
 
-	/* It should be the GC we created for sshind */
-	ASSERT(x11_track.last_copyarea_gc == &mock_sshind_gc);
+	/* It should be the GC we created for notif */
+	ASSERT(x11_track.last_copyarea_gc == &mock_notif_gc);
 
-	sshind_hide();
+	notif_hide();
 }
 
-/* Test: sshind_hide frees the GC */
-TEST(sshind_hide_frees_gc)
+/* Test: notif_hide frees the GC */
+TEST(notif_hide_frees_gc)
 {
 	init_mock_xwindow();
 
-	sshind_show("testhost");
+	notif_show("test message");
 	reset_x11_track();
 
-	sshind_hide();
+	notif_hide();
 
 	/* Should have freed the GC */
 	ASSERT_EQ(1, x11_track.xfreegc_calls);
 }
 
-/* Test: multiple show/hide cycles work correctly */
-TEST(sshind_multiple_cycles)
+/* Test: notif_check_timeout returns positive when not expired */
+TEST(notif_check_timeout_not_expired)
 {
 	init_mock_xwindow();
 
-	/* First cycle */
-	sshind_show("host1");
-	ASSERT_EQ(1, sshind_active());
-	sshind_hide();
-	ASSERT_EQ(0, sshind_active());
+	notif_show("test message");
 
-	/* Second cycle */
+	/* Set show_time to 1 second ago */
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	notif.show_time.tv_sec = now.tv_sec - 1;
+	notif.show_time.tv_nsec = now.tv_nsec;
+
+	int remaining = notif_check_timeout(&now);
+
+	/* Should have ~4000ms remaining (5000 - 1000) */
+	ASSERT(remaining > 0);
+	ASSERT(remaining <= notif_display_ms);
+
+	notif_hide();
+}
+
+/* Test: notif_check_timeout returns negative when expired */
+TEST(notif_check_timeout_expired)
+{
+	init_mock_xwindow();
+
+	notif_show("test message");
+
+	/* Set show_time to 6 seconds ago */
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	notif.show_time.tv_sec = now.tv_sec - 6;
+	notif.show_time.tv_nsec = now.tv_nsec;
+
+	int remaining = notif_check_timeout(&now);
+
+	/* Should be expired (negative or zero) */
+	ASSERT(remaining <= 0);
+
+	notif_hide();
+}
+
+/* Test: calling show twice cleans up first notification */
+TEST(notif_replaces_existing)
+{
+	init_mock_xwindow();
+
+	notif_show("first message");
+	ASSERT_EQ(1, notif_active());
+
+	/* Show again - should clean up first, then create new */
 	reset_x11_track();
-	sshind_show("host2");
-	ASSERT_EQ(1, sshind_active());
+	notif_show("second message");
+
+	/* Should still be active */
+	ASSERT_EQ(1, notif_active());
+
+	/* Should have freed old GC and created new one */
+	ASSERT_EQ(1, x11_track.xfreegc_calls);
 	ASSERT_EQ(1, x11_track.xcreategc_calls);
 
-	sshind_draw();
-	ASSERT(x11_track.last_copyarea_gc != dc.gc);
-
-	sshind_hide();
-	ASSERT_EQ(0, sshind_active());
+	notif_hide();
 }
 
 /* Test suite */
-TEST_SUITE(sshind)
+TEST_SUITE(notif)
 {
-	RUN_TEST(sshind_active_initial_state);
-	RUN_TEST(sshind_show_activates);
-	RUN_TEST(sshind_hide_deactivates);
-	RUN_TEST(sshind_creates_own_gc);
-	RUN_TEST(sshind_draw_uses_own_gc);
-	RUN_TEST(sshind_hide_frees_gc);
-	RUN_TEST(sshind_multiple_cycles);
+	RUN_TEST(notif_active_initial_state);
+	RUN_TEST(notif_show_activates);
+	RUN_TEST(notif_hide_deactivates);
+	RUN_TEST(notif_creates_own_gc);
+	RUN_TEST(notif_draw_uses_own_gc);
+	RUN_TEST(notif_hide_frees_gc);
+	RUN_TEST(notif_check_timeout_not_expired);
+	RUN_TEST(notif_check_timeout_expired);
+	RUN_TEST(notif_replaces_existing);
 }
 
 int
 main(void)
 {
-	printf("st sshind test suite\n");
+	printf("st notif test suite\n");
 	printf("========================================\n");
 
-	RUN_SUITE(sshind);
+	RUN_SUITE(notif);
 
 	return test_summary();
 }

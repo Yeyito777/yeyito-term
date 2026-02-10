@@ -5,6 +5,7 @@
 
 #include <stdint.h>
 #include <sys/types.h>
+#include <time.h>
 
 /* macros */
 #define MIN(a, b)		((a) < (b) ? (a) : (b))
@@ -127,6 +128,15 @@ void sshind_hide(void);
 void sshind_draw(void);
 void sshind_resize(void);
 int sshind_active(void);
+int sshind_height(void);
+
+/* Notification overlay */
+void notif_show(const char *msg);
+void notif_hide(void);
+void notif_draw(void);
+void notif_resize(void);
+int notif_active(void);
+int notif_check_timeout(struct timespec *now);
 
 size_t utf8encode(Rune, char *);
 

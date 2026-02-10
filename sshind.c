@@ -30,7 +30,7 @@ typedef struct {
 	Window win;
 	Drawable buf;
 	void *specbuf; /* font spec buffer used for rendering */
-	Atom xembed, wmdeletewin, netwmname, netwmiconname, netwmpid;
+	Atom xembed, wmdeletewin, netwmname, netwmiconname, netwmpid, stcwd, stnotify;
 	struct {
 		XIM xim;
 		XIC xic;
@@ -79,6 +79,14 @@ int
 sshind_active(void)
 {
 	return sshind.active;
+}
+
+int
+sshind_height(void)
+{
+	if (!sshind.active)
+		return 0;
+	return sshind.height + 2 * sshind_border_width;
 }
 
 void

@@ -22,5 +22,6 @@ void sshind_hide(void);
 void sshind_draw(void);
 void sshind_resize(void);
 int sshind_active(void);
+int sshind_height(void);
 
 #endif /* SSHIND_H */

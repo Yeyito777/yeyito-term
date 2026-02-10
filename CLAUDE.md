@@ -17,6 +17,7 @@ Make sure to modify the required zsh config in README.md if you make a change th
 - x.c - X11 windowing
 - vimnav.c/vimnav.h - Vim-style navigation mode
 - sshind.c/sshind.h - SSH indicator overlay
+- notif.c/notif.h - Notification popup overlay
 
 ## TERMINOLOGY & IDIOMS
 
@@ -84,6 +85,13 @@ Used to show/hide the SSH connection indicator overlay.
 |----------|-----------|-------------|
 | `\033]778;ssh;HOSTNAME\a` | shell → st | Show SSH indicator with hostname |
 | `\033]778;ssh;exit\a` | shell → st | Hide SSH indicator |
+
+### Custom X11 properties
+
+| Property | Set by | Description |
+|----------|--------|-------------|
+| `_ST_CWD` | OSC 779 (zsh → st) | Shell's current working directory |
+| `_ST_NOTIFY` | External (xprop → st) | Notification message; st shows overlay popup, auto-dismisses after timeout. Property is deleted after reading. Use `scripts/st-notify <pid> "msg"` or set directly with `xprop`. |
 
 ### Reserved OSC numbers
 - **777**: Nav mode / vim coordination (TAKEN)

@@ -1,0 +1,22 @@
+#!/bin/bash
+# st-notify - Send notification to an st terminal window
+# Usage: st-notify <st-pid> "message"
+
+pid="$1"
+msg="$2"
+
+if [ -z "$pid" ] || [ -z "$msg" ]; then
+    echo "Usage: st-notify <st-pid> \"message\"" >&2
+    exit 1
+fi
+
+# Find X window with matching _NET_WM_PID
+wid=$(xdotool search --pid "$pid" 2>/dev/null | head -1)
+
+if [ -z "$wid" ]; then
+    echo "No window found for PID $pid" >&2
+    exit 1
+fi
+
+# Set the _ST_NOTIFY property — st will pick this up via PropertyNotify
+xprop -id "$wid" -f _ST_NOTIFY 8u -set _ST_NOTIFY "$msg"

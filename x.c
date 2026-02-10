@@ -64,6 +64,7 @@ static void ttysend(const Arg *);
 /* config.h for applying patches and the configuration. */
 #include "config.h"
 #include "sshind.h"
+#include "notif.h"
 #include "vimnav.h"
 
 /* XEMBED messages */
@@ -96,7 +97,7 @@ typedef struct {
 	Window win;
 	Drawable buf;
 	GlyphFontSpec *specbuf; /* font spec buffer used for rendering */
-	Atom xembed, wmdeletewin, netwmname, netwmiconname, netwmpid, stcwd;
+	Atom xembed, wmdeletewin, netwmname, netwmiconname, netwmpid, stcwd, stnotify;
 	struct {
 		XIM xim;
 		XIC xic;
@@ -518,6 +519,19 @@ propnotify(XEvent *e)
 			 xpev->atom == clipboard)) {
 		selnotify(e);
 	}
+
+	if (xpev->state == PropertyNewValue && xpev->atom == xw.stnotify) {
+		Atom type;
+		int format;
+		unsigned long nitems, rem;
+		unsigned char *data = NULL;
+		if (XGetWindowProperty(xw.dpy, xw.win, xw.stnotify, 0, 256, True,
+				XInternAtom(xw.dpy, "UTF8_STRING", False),
+				&type, &format, &nitems, &rem, &data) == Success && data) {
+			notif_show((char *)data);
+			XFree(data);
+		}
+	}
 }
 
 void
@@ -552,26 +566,16 @@ selnotify(XEvent *e)
 			/*
 			 * If there is some PropertyNotify with no data, then
 			 * this is the signal of the selection owner that all
-			 * data has been transferred. We won't need to receive
-			 * PropertyNotify events anymore.
+			 * data has been transferred. PropertyChangeMask stays
+			 * on for _ST_NOTIFY monitoring.
 			 */
-			MODBIT(xw.attrs.event_mask, 0, PropertyChangeMask);
-			XChangeWindowAttributes(xw.dpy, xw.win, CWEventMask,
-					&xw.attrs);
 		}
 
 		if (type == incratom) {
 			/*
-			 * Activate the PropertyNotify events so we receive
-			 * when the selection owner does send us the next
-			 * chunk of data.
-			 */
-			MODBIT(xw.attrs.event_mask, 1, PropertyChangeMask);
-			XChangeWindowAttributes(xw.dpy, xw.win, CWEventMask,
-					&xw.attrs);
-
-			/*
-			 * Deleting the property is the transfer start signal.
+			 * PropertyChangeMask is always on (for _ST_NOTIFY),
+			 * so we just need to delete the property to signal
+			 * transfer start.
 			 */
 			XDeleteProperty(xw.dpy, xw.win, (int)property);
 			continue;
@@ -1180,7 +1184,8 @@ xinit(int cols, int rows)
 	xw.attrs.bit_gravity = NorthWestGravity;
 	xw.attrs.event_mask = FocusChangeMask | KeyPressMask | KeyReleaseMask
 		| ExposureMask | VisibilityChangeMask | StructureNotifyMask
-		| ButtonMotionMask | ButtonPressMask | ButtonReleaseMask;
+		| ButtonMotionMask | ButtonPressMask | ButtonReleaseMask
+		| PropertyChangeMask;
 	xw.attrs.colormap = xw.cmap;
 
 	root = XRootWindow(xw.dpy, xw.scr);
@@ -1243,6 +1248,7 @@ xinit(int cols, int rows)
 			PropModeReplace, (uchar *)&thispid, 1);
 
 	xw.stcwd = XInternAtom(xw.dpy, "_ST_CWD", False);
+	xw.stnotify = XInternAtom(xw.dpy, "_ST_NOTIFY", False);
 
 	win.mode = MODE_NUMLOCK;
 	resettitle();
@@ -1787,6 +1793,7 @@ expose(XEvent *ev)
 {
 	redraw();
 	sshind_draw();
+	notif_draw();
 }
 
 void
@@ -2102,6 +2109,7 @@ resize(XEvent *e)
 
 	cresize(e->xconfigure.width, e->xconfigure.height);
 	sshind_resize();
+	notif_resize();
 }
 
 void
@@ -2198,6 +2206,16 @@ run(void)
 				tsetdirtattr(ATTR_BLINK);
 				lastblink = now;
 				timeout = blinktimeout;
+			}
+		}
+
+		if (notif_active()) {
+			int notif_remain = notif_check_timeout(&now);
+			if (notif_remain <= 0) {
+				notif_hide();
+			} else {
+				if (timeout < 0 || notif_remain < timeout)
+					timeout = notif_remain;
 			}
 		}
 
