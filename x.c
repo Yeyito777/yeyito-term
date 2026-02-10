@@ -2211,9 +2211,7 @@ run(void)
 
 		if (notif_active()) {
 			int notif_remain = notif_check_timeout(&now);
-			if (notif_remain <= 0) {
-				notif_hide();
-			} else {
+			if (notif_remain > 0) {
 				if (timeout < 0 || notif_remain < timeout)
 					timeout = notif_remain;
 			}

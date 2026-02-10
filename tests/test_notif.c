@@ -1,5 +1,5 @@
 /* See LICENSE for license details. */
-/* Unit tests for notif module */
+/* Unit tests for notif module (stacked toast system) */
 
 /* Define NOTIF_TEST to use mock X11 types instead of real ones */
 #define NOTIF_TEST
@@ -29,7 +29,7 @@ typedef int Status;
 /* Mock struct types (need at least one member to be complete) */
 typedef struct _XDisplay { int dummy; } Display;
 typedef struct _Visual { int dummy; } Visual;
-typedef struct _XGC { int dummy; } *GC;
+typedef struct _XGC { int id; } *GC;
 typedef struct _XftDraw { int dummy; } XftDraw;
 
 /* Minimal struct definitions */
@@ -78,14 +78,25 @@ typedef unsigned char FcChar8;
 #define True 1
 #define False 0
 
+/* Include notif.h early for NOTIF_MAX_TOASTS define */
+#include "../notif.h"
+
 /* Track X11 calls for verification */
 static struct {
 	int xcreategc_calls;
 	int xfreegc_calls;
 	int xcopyarea_calls;
+	int xmovewindow_calls;
+	int xcreatewindow_calls;
+	int xdestroywindow_calls;
+	int xftfontopen_calls;
+	int xftfontclose_calls;
 	GC last_copyarea_gc;
-	GC created_gc;
 } x11_track;
+
+/* Mock GC pool - each XCreateGC returns a unique GC */
+static struct _XGC mock_gcs[NOTIF_MAX_TOASTS + 2];
+static int mock_gc_next;
 
 /* Mock X window globals that notif.c expects */
 typedef struct {
@@ -137,10 +148,11 @@ int debug_mode = 0;
 static Display mock_display;
 static Visual mock_visual;
 static struct _XGC mock_main_gc;
-static struct _XGC mock_notif_gc;
 static XftDraw mock_xftdraw;
 static XftFont mock_font = { .ascent = 10, .descent = 4 };
 static FcPattern mock_pattern;
+static int next_window_id;
+static int next_pixmap_id;
 
 FcPattern *FcNameParse(const FcChar8 *name) {
 	(void)name;
@@ -177,17 +189,19 @@ void FcPatternDestroy(FcPattern *p) {
 
 XftFont *XftFontOpenPattern(Display *dpy, FcPattern *pattern) {
 	(void)dpy; (void)pattern;
+	x11_track.xftfontopen_calls++;
 	return &mock_font;
 }
 
 void XftFontClose(Display *dpy, XftFont *font) {
 	(void)dpy; (void)font;
+	x11_track.xftfontclose_calls++;
 }
 
 void XftTextExtentsUtf8(Display *dpy, XftFont *font, const FcChar8 *string,
                         int len, XGlyphInfo *extents) {
-	(void)dpy; (void)font; (void)string; (void)len;
-	extents->xOff = 100;
+	(void)dpy; (void)font; (void)string;
+	extents->xOff = len * 8;  /* Mock: 8 pixels per character */
 }
 
 int XftColorAllocName(Display *dpy, Visual *visual, Colormap cmap,
@@ -237,11 +251,13 @@ Window XCreateWindow(Display *dpy, Window parent, int x, int y,
 	(void)dpy; (void)parent; (void)x; (void)y; (void)width; (void)height;
 	(void)border_width; (void)depth; (void)class; (void)visual;
 	(void)valuemask; (void)attributes;
-	return 123;  /* Fake window ID */
+	x11_track.xcreatewindow_calls++;
+	return next_window_id++;
 }
 
 int XDestroyWindow(Display *dpy, Window w) {
 	(void)dpy; (void)w;
+	x11_track.xdestroywindow_calls++;
 	return 0;
 }
 
@@ -252,13 +268,14 @@ int XMapRaised(Display *dpy, Window w) {
 
 int XMoveWindow(Display *dpy, Window w, int x, int y) {
 	(void)dpy; (void)w; (void)x; (void)y;
+	x11_track.xmovewindow_calls++;
 	return 0;
 }
 
 Drawable XCreatePixmap(Display *dpy, Drawable d, unsigned int width,
                        unsigned int height, unsigned int depth) {
 	(void)dpy; (void)d; (void)width; (void)height; (void)depth;
-	return 456;  /* Fake pixmap ID */
+	return next_pixmap_id++;
 }
 
 int XFreePixmap(Display *dpy, Drawable pixmap) {
@@ -270,8 +287,7 @@ GC XCreateGC(Display *dpy, Drawable d, unsigned long valuemask,
              XGCValues *values) {
 	(void)dpy; (void)d; (void)valuemask; (void)values;
 	x11_track.xcreategc_calls++;
-	x11_track.created_gc = &mock_notif_gc;
-	return &mock_notif_gc;
+	return &mock_gcs[mock_gc_next++];
 }
 
 int XFreeGC(Display *dpy, GC gc) {
@@ -302,6 +318,7 @@ static void
 reset_x11_track(void)
 {
 	memset(&x11_track, 0, sizeof(x11_track));
+	mock_gc_next = 0;
 }
 
 /* Initialize mock X window state */
@@ -311,6 +328,7 @@ init_mock_xwindow(void)
 	memset(&xw, 0, sizeof(xw));
 	memset(&win, 0, sizeof(win));
 	memset(&dc, 0, sizeof(dc));
+	memset(&notif, 0, sizeof(notif));
 
 	xw.dpy = &mock_display;
 	xw.vis = &mock_visual;
@@ -322,7 +340,10 @@ init_mock_xwindow(void)
 	win.h = 600;
 
 	/* Main terminal GC - this should NOT be used by notif */
-	dc.gc = &mock_main_gc;
+	dc.gc = (GC)&mock_main_gc;
+
+	next_window_id = 100;
+	next_pixmap_id = 1000;
 
 	reset_x11_track();
 }
@@ -344,6 +365,7 @@ TEST(notif_show_activates)
 	notif_show("test message");
 
 	ASSERT_EQ(1, notif_active());
+	ASSERT_EQ(1, notif.count);
 
 	notif_hide();
 }
@@ -358,16 +380,17 @@ TEST(notif_hide_deactivates)
 
 	notif_hide();
 	ASSERT_EQ(0, notif_active());
+	ASSERT_EQ(0, notif.count);
 }
 
-/* Test: notif creates its own GC */
+/* Test: notif creates its own GC per toast */
 TEST(notif_creates_own_gc)
 {
 	init_mock_xwindow();
 
 	notif_show("test message");
 
-	/* Should have created a GC */
+	/* Should have created exactly one GC for the toast */
 	ASSERT_EQ(1, x11_track.xcreategc_calls);
 
 	notif_hide();
@@ -379,7 +402,7 @@ TEST(notif_draw_uses_own_gc)
 	init_mock_xwindow();
 
 	notif_show("test message");
-	reset_x11_track();  /* Reset to track only the draw call */
+	reset_x11_track();
 
 	notif_draw();
 
@@ -388,9 +411,6 @@ TEST(notif_draw_uses_own_gc)
 
 	/* The GC used should NOT be dc.gc (the main terminal's GC) */
 	ASSERT(x11_track.last_copyarea_gc != dc.gc);
-
-	/* It should be the GC we created for notif */
-	ASSERT(x11_track.last_copyarea_gc == &mock_notif_gc);
 
 	notif_hide();
 }
@@ -419,20 +439,22 @@ TEST(notif_check_timeout_not_expired)
 	/* Set show_time to 1 second ago */
 	struct timespec now;
 	clock_gettime(CLOCK_MONOTONIC, &now);
-	notif.show_time.tv_sec = now.tv_sec - 1;
-	notif.show_time.tv_nsec = now.tv_nsec;
+	notif.toasts[0].show_time.tv_sec = now.tv_sec - 1;
+	notif.toasts[0].show_time.tv_nsec = now.tv_nsec;
 
 	int remaining = notif_check_timeout(&now);
 
 	/* Should have ~4000ms remaining (5000 - 1000) */
 	ASSERT(remaining > 0);
 	ASSERT(remaining <= notif_display_ms);
+	/* Toast should still be active */
+	ASSERT_EQ(1, notif.count);
 
 	notif_hide();
 }
 
-/* Test: notif_check_timeout returns negative when expired */
-TEST(notif_check_timeout_expired)
+/* Test: notif_check_timeout removes expired toasts */
+TEST(notif_check_timeout_removes_expired)
 {
 	init_mock_xwindow();
 
@@ -441,35 +463,123 @@ TEST(notif_check_timeout_expired)
 	/* Set show_time to 6 seconds ago */
 	struct timespec now;
 	clock_gettime(CLOCK_MONOTONIC, &now);
-	notif.show_time.tv_sec = now.tv_sec - 6;
-	notif.show_time.tv_nsec = now.tv_nsec;
+	notif.toasts[0].show_time.tv_sec = now.tv_sec - 6;
+	notif.toasts[0].show_time.tv_nsec = now.tv_nsec;
 
 	int remaining = notif_check_timeout(&now);
 
-	/* Should be expired (negative or zero) */
-	ASSERT(remaining <= 0);
+	/* Should be expired and removed */
+	ASSERT(remaining < 0);
+	ASSERT_EQ(0, notif.count);
+	ASSERT_EQ(0, notif_active());
+}
+
+/* Test: multiple shows create stacked toasts */
+TEST(notif_stacks_multiple)
+{
+	init_mock_xwindow();
+
+	notif_show("first");
+	notif_show("second");
+
+	ASSERT_EQ(2, notif.count);
+	ASSERT_EQ(2, x11_track.xcreategc_calls);
+
+	/* Newest toast is at index 0 */
+	ASSERT_STR_EQ("second", notif.toasts[0].msg);
+	ASSERT_STR_EQ("first", notif.toasts[1].msg);
 
 	notif_hide();
 }
 
-/* Test: calling show twice cleans up first notification */
-TEST(notif_replaces_existing)
+/* Test: shared font is loaded once and freed once */
+TEST(notif_shared_font_loaded_once)
 {
 	init_mock_xwindow();
 
-	notif_show("first message");
-	ASSERT_EQ(1, notif_active());
+	notif_show("first");
+	notif_show("second");
 
-	/* Show again - should clean up first, then create new */
+	/* Font should be loaded exactly once (shared) */
+	ASSERT_EQ(1, x11_track.xftfontopen_calls);
+
+	notif_hide();
+
+	/* Font should be freed exactly once */
+	ASSERT_EQ(1, x11_track.xftfontclose_calls);
+}
+
+/* Test: at max capacity, oldest toast is evicted */
+TEST(notif_max_evicts_oldest)
+{
+	int i;
+	char msg[32];
+	init_mock_xwindow();
+
+	/* Fill to max capacity */
+	for (i = 0; i < NOTIF_MAX_TOASTS; i++) {
+		snprintf(msg, sizeof(msg), "toast %d", i);
+		notif_show(msg);
+	}
+	ASSERT_EQ(NOTIF_MAX_TOASTS, notif.count);
+
+	/* Show one more - should evict the oldest */
+	notif_show("overflow");
+
+	ASSERT_EQ(NOTIF_MAX_TOASTS, notif.count);
+	ASSERT_STR_EQ("overflow", notif.toasts[0].msg);
+
+	/* The oldest (toast 0) should be gone; toast 1 is now last */
+	ASSERT_STR_EQ("toast 1", notif.toasts[NOTIF_MAX_TOASTS - 1].msg);
+
+	notif_hide();
+}
+
+/* Test: multiline message gets correct height and line count */
+TEST(notif_multiline_height)
+{
+	int line_height, expected_height;
+	init_mock_xwindow();
+
+	notif_show("line one\nline two\nline three");
+
+	ASSERT_EQ(3, notif.toasts[0].nlines);
+
+	/* Height should account for 3 lines */
+	line_height = mock_font.ascent + mock_font.descent;
+	expected_height = 3 * line_height + 2 * notif_padding + 2 * notif_border_width;
+	ASSERT_EQ(expected_height, notif.toasts[0].height);
+
+	notif_hide();
+}
+
+/* Test: expired middle toast removed, remaining repositioned */
+TEST(notif_expired_middle_reposition)
+{
+	struct timespec now;
+	init_mock_xwindow();
+
+	notif_show("oldest");
+	notif_show("middle");
+	notif_show("newest");
+
+	ASSERT_EQ(3, notif.count);
+
+	/* Make the middle toast (index 1) expire */
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	notif.toasts[1].show_time.tv_sec = now.tv_sec - 6;
+	notif.toasts[1].show_time.tv_nsec = now.tv_nsec;
+
 	reset_x11_track();
-	notif_show("second message");
+	notif_check_timeout(&now);
 
-	/* Should still be active */
-	ASSERT_EQ(1, notif_active());
+	/* Middle toast removed, count reduced */
+	ASSERT_EQ(2, notif.count);
+	ASSERT_STR_EQ("newest", notif.toasts[0].msg);
+	ASSERT_STR_EQ("oldest", notif.toasts[1].msg);
 
-	/* Should have freed old GC and created new one */
-	ASSERT_EQ(1, x11_track.xfreegc_calls);
-	ASSERT_EQ(1, x11_track.xcreategc_calls);
+	/* Remaining toasts repositioned */
+	ASSERT(x11_track.xmovewindow_calls > 0);
 
 	notif_hide();
 }
@@ -484,14 +594,18 @@ TEST_SUITE(notif)
 	RUN_TEST(notif_draw_uses_own_gc);
 	RUN_TEST(notif_hide_frees_gc);
 	RUN_TEST(notif_check_timeout_not_expired);
-	RUN_TEST(notif_check_timeout_expired);
-	RUN_TEST(notif_replaces_existing);
+	RUN_TEST(notif_check_timeout_removes_expired);
+	RUN_TEST(notif_stacks_multiple);
+	RUN_TEST(notif_shared_font_loaded_once);
+	RUN_TEST(notif_max_evicts_oldest);
+	RUN_TEST(notif_multiline_height);
+	RUN_TEST(notif_expired_middle_reposition);
 }
 
 int
 main(void)
 {
-	printf("st notif test suite\n");
+	printf("st notif test suite (stacked toasts)\n");
 	printf("========================================\n");
 
 	RUN_SUITE(notif);

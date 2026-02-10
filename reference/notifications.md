@@ -1,6 +1,6 @@
 # Notification Overlay System
 
-The notification system allows external programs to display popup messages on an st terminal window. The mechanism uses X11 window properties: an external process sets the `_ST_NOTIFY` property on the st window, st detects the change via `PropertyNotify`, renders a styled overlay popup in the top-right corner, and auto-dismisses it after a configurable timeout (default 5 seconds).
+The notification system allows external programs to display popup messages on an st terminal window. It uses a **stacked toast** design: each new notification appears at the top-right corner, pushing existing toasts downward. Each toast auto-dismisses independently after a configurable timeout (default 5 seconds). The mechanism uses X11 window properties: an external process sets the `_ST_NOTIFY` property on the st window, st detects the change via `PropertyNotify`, renders a styled overlay popup, and auto-dismisses it after the timeout.
 
 This is a purely external interface — unlike the SSH indicator (which uses OSC escape sequences from the shell), notifications are triggered by setting an X11 property from any process that knows the window ID. No shell coordination or OSC sequences are involved.
 
@@ -20,6 +20,16 @@ The script finds the X window belonging to the given PID using `xdotool search -
 xprop -id <window-id> -f _ST_NOTIFY 8u -set _ST_NOTIFY "Your message here"
 ```
 
+### Multi-line notifications
+
+Messages containing newline characters are rendered as multi-line toasts. The toast width adapts to the widest line and the height adapts to the number of lines.
+
+```bash
+xprop -id <window-id> -f _ST_NOTIFY 8u -set _ST_NOTIFY "Line one
+Line two
+Line three"
+```
+
 ### Via any X11 client
 
 Any program with access to the display can call `XChangeProperty()` to set `_ST_NOTIFY` on the st window. st reads and deletes the property atomically (the `XGetWindowProperty` call uses `delete=True`), so there is no stale state.
@@ -35,21 +45,39 @@ The notification system does **not** use OSC escape sequences. It uses an X11 wi
 - The sender only needs the window ID (discoverable via `_NET_WM_PID` + `xdotool`)
 - The property is deleted after reading, preventing stale state
 
-### Overlay rendering
+### Stacked toast design
 
-The notification popup is a child X window of the main st window, using double-buffered Xft rendering. It creates its own `GC`, `XftDraw`, `Pixmap`, and `XftFont` — completely independent of the main terminal's drawing context. This isolation means the notification overlay cannot interfere with terminal rendering and vice versa.
+New notifications do **not** replace the current one. Instead:
+
+- New toast appears at the top-right corner (index 0 in the stack)
+- Existing toasts are pushed down by the height of the new toast plus `notif_toast_gap`
+- Each toast has its own independent timer starting from when it was shown
+- When any toast expires, it is removed and toasts below it shift upward
+- Maximum `NOTIF_MAX_TOASTS` (8) toasts can be stacked simultaneously
+- If a new notification arrives at max capacity, the oldest toast is evicted
+
+### Shared resources
+
+The font and colors are loaded once when the first toast appears and freed when the last toast disappears. Each individual toast has its own X window, pixmap, XftDraw, and GC — completely independent of the main terminal's drawing context and of other toasts.
+
+### Multi-line rendering
+
+Each notification message is split on newline characters (`\n`). The toast dimensions adapt:
+- **Width**: based on the widest line (plus padding and border)
+- **Height**: based on the number of lines times the line height (plus padding and border)
+
+Line data is stored as offsets into the message buffer (not pointers), making the toast structs safe to copy during array shifts.
 
 ### Positioning
 
-The popup appears in the top-right corner of the terminal, offset by `notif_margin` (10px) from the edges. If the SSH indicator (`sshind`) is active, the notification shifts down below it by `sshind_height() + notif_margin` pixels to avoid overlap.
+Toasts stack vertically in the top-right corner. The Y position of each toast is calculated as:
+- `notif_margin` (10px) from the top edge
+- Plus `sshind_height() + notif_margin` if the SSH indicator is active
+- Plus the cumulative height of all toasts above it (each toast's height + 2 * border_width + toast_gap)
 
 ### Auto-dismiss timer
 
-On show, `clock_gettime(CLOCK_MONOTONIC)` records the timestamp. The main event loop in `run()` checks `notif_check_timeout()` each iteration. When the elapsed time exceeds `notif_display_ms` (5000ms), `notif_hide()` is called and all X resources are freed. The timeout also participates in the `pselect()` timeout calculation so st wakes up precisely when dismissal is due, rather than polling.
-
-### Replacement behavior
-
-If a new notification arrives while one is already displayed, `notif_show()` calls `notif_hide()` first to tear down the existing overlay (destroying the window, pixmap, font, GC, and colors), then creates a fresh overlay for the new message. The timeout resets to the full `notif_display_ms` from the new show time.
+On show, `clock_gettime(CLOCK_MONOTONIC)` records the timestamp for each toast. The main event loop in `run()` checks `notif_check_timeout()` each iteration. This function iterates all active toasts, removes any that have exceeded `notif_display_ms`, and returns the minimum remaining time across all toasts. The timeout participates in the `pselect()` calculation so st wakes up precisely when the next dismissal is due.
 
 ## Configuration
 
@@ -57,84 +85,83 @@ All configuration is in `notif.h` as `static const` variables (same pattern as `
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `notif_border_color` | `"#5fafd7"` | Border color (steel blue) |
-| `notif_bg_color` | `"#001520"` | Background color (very dark blue) |
+| `notif_border_color` | `"#00ff88"` | Border color (bright green) |
+| `notif_bg_color` | `"#000f08"` | Background color (dark green, blends with #00050f) |
 | `notif_fg_color` | `"#ffffff"` | Text color (white) |
 | `notif_border_width` | `2` | Border thickness in pixels |
 | `notif_margin` | `10` | Margin from parent window edge in pixels |
 | `notif_padding` | `8` | Internal padding between border and text in pixels |
 | `notif_font_scale` | `1.5` | Font size multiplier relative to `usedfontsize` |
 | `notif_display_ms` | `5000` | Auto-dismiss timeout in milliseconds |
+| `notif_toast_gap` | `6` | Vertical gap between stacked toasts in pixels |
+| `NOTIF_MAX_TOASTS` | `8` | Maximum simultaneous toasts (define) |
+| `NOTIF_MAX_LINES` | `16` | Maximum lines per toast message (define) |
 
 ## Debug Mode
 
-When st is started with `-d` (debug mode), the notification system logs to stderr:
+When st is started with `-d` (debug mode), the notification system logs detailed state to stderr:
 
 ```
-notif: showing "Your message here"
-notif: hiding "Your message here"
+notif: [toast 0] showing "Your message" (254x49, 1 lines, stack: 2)
+notif: --- stack dump (after show) ---
+notif:   count=2, shared_loaded=1
+notif:   [0] "Your message" (254x49, 1 lines, 4999ms remaining, y=10)
+notif:   [1] "Previous message" (280x49, 1 lines, 3500ms remaining, y=69)
+notif: --- end dump ---
+notif: [toast 1] hiding "Previous message" (lived 5019ms, stack: 2 -> 1)
 ```
 
-This is useful for verifying that notifications are being received and dismissed correctly without needing to see the visual overlay.
+This shows:
+- Per-toast show/hide events with dimensions, line count, and stack size
+- Full stack dumps after each new toast showing all positions and remaining timeouts
+- Toast lifetime when hiding (how long it was displayed)
 
 ## Relevant Files and Functions
 
 ### notif.h
 
-| Item | Line | Description |
-|------|------|-------------|
-| `TIMEDIFF` macro | 10 | Local definition (guarded by `#ifndef`) for use in `notif_check_timeout()` without requiring `st.h` |
-| Configuration statics | 18-25 | All visual and timing parameters |
-| `notif_show()` | 28 | Show a notification with the given message |
-| `notif_hide()` | 29 | Dismiss the current notification and free all X resources |
-| `notif_draw()` | 30 | Redraw the notification overlay (called on Expose events) |
-| `notif_resize()` | 31 | Reposition the overlay after terminal resize |
-| `notif_active()` | 32 | Returns 1 if a notification is currently displayed |
-| `notif_check_timeout()` | 33 | Returns remaining ms until dismissal (negative/zero = expired) |
+| Item | Description |
+|------|-------------|
+| `TIMEDIFF` macro | Local definition (guarded by `#ifndef`) for timeout calculation |
+| Configuration statics | All visual and timing parameters |
+| `NOTIF_MAX_TOASTS` | Maximum simultaneous toasts (8) |
+| `NOTIF_MAX_LINES` | Maximum lines per toast message (16) |
+| `notif_show()` | Add a new toast with the given message |
+| `notif_hide()` | Dismiss all toasts and free all resources |
+| `notif_draw()` | Redraw all toast overlays (called on Expose events) |
+| `notif_resize()` | Reposition all toasts after terminal resize |
+| `notif_active()` | Returns 1 if any toast is currently displayed |
+| `notif_check_timeout()` | Removes expired toasts, returns min remaining ms |
 
 ### notif.c
 
-| Function | Line | Description |
-|----------|------|-------------|
-| `notif_active()` | 83 | Returns `notif.active` flag |
-| `notif_check_timeout()` | 89 | Computes `notif_display_ms - elapsed` using `TIMEDIFF`. Returns remaining ms, or -1 if inactive |
-| `notif_show()` | 101 | Full lifecycle: hide existing if active, store message, load scaled font via Fontconfig/Xft, measure text, allocate colors, compute position (offset below sshind if active), create child window with `CWColormap`, create pixmap + XftDraw + GC, map window, record show time, draw |
-| `notif_hide()` | 211 | Destroys all X resources in order: XftDraw, Pixmap, Window, XftFont, GC, then frees XftColors. Clears active flag and message |
-| `notif_draw()` | 251 | Clears background with `XftDrawRect`, draws text with `XftDrawStringUtf8`, copies pixmap to window with `XCopyArea` using the notification's own GC |
-| `notif_resize()` | 274 | Recalculates top-right position (accounting for sshind), calls `XMoveWindow` |
-| Static state struct | 69-80 | `active`, `msg[512]`, `win`, `buf`, `draw`, `font`, `fg/bg/border`, `width/height`, `gc`, `show_time` |
+| Item | Description |
+|------|-------------|
+| `NotifToast` typedef | Per-toast state: active, msg, line offsets/lengths, X resources, dimensions, show_time |
+| `notif` static struct | Stack state: array of toasts, count, shared font and colors |
+| `notif_toast_y()` | Calculates Y position for toast at given stack index |
+| `notif_parse_lines()` | Splits message on newlines, stores offsets and lengths |
+| `notif_load_shared()` | Loads font and colors on first toast |
+| `notif_free_shared()` | Frees font and colors when last toast dismissed |
+| `notif_destroy_toast()` | Destroys per-toast X resources (window, pixmap, draw, GC) |
+| `notif_draw_toast()` | Renders a single toast: clears bg, draws each line, copies to window |
+| `notif_remove_toast()` | Destroys toast at index, shifts array, repositions remaining |
+| `notif_debug_dump()` | Logs full stack state (positions, remaining times) in debug mode |
+| `notif_active()` | Returns `notif.count > 0` |
+| `notif_check_timeout()` | Iterates from end to start, removes expired, returns min remaining |
+| `notif_show()` | Loads shared resources, evicts oldest if full, shifts stack, creates new toast at index 0, repositions existing toasts |
+| `notif_hide()` | Destroys all toasts, frees shared resources |
+| `notif_draw()` | Iterates all toasts, calls `notif_draw_toast()` |
+| `notif_resize()` | Repositions all toasts based on new window dimensions |
 
 ### x.c
 
-| Location | Line | Description |
-|----------|------|-------------|
-| `#include "notif.h"` | 67 | Header inclusion, after `sshind.h` |
-| `xw.stnotify` atom in `XWindow` struct | 100 | Atom field for the `_ST_NOTIFY` property |
-| `PropertyChangeMask` in event mask | 1188 | Always-on in `xinit()`, enables `PropertyNotify` events for both clipboard INCR transfers and `_ST_NOTIFY` detection |
-| `xw.stnotify` atom registration in `xinit()` | 1251 | `XInternAtom(xw.dpy, "_ST_NOTIFY", False)` |
-| `propnotify()` handler | 523-534 | On `PropertyNewValue` for `xw.stnotify`: calls `XGetWindowProperty` with `delete=True` to atomically read and remove the property, then calls `notif_show()` with the data. Reads up to 256 long-words (1024 bytes) as `UTF8_STRING` |
-| `expose()` hook | 1796 | Calls `notif_draw()` after `sshind_draw()` |
-| `resize()` hook | 2112 | Calls `notif_resize()` after `sshind_resize()` |
-| Timer logic in `run()` | 2212-2220 | After the blink timeout block: checks `notif_active()`, calls `notif_check_timeout(&now)`. If expired, calls `notif_hide()`. If not expired, adjusts `pselect()` timeout so the loop wakes up at exactly the right time for dismissal |
-| INCR transfer cleanup | 566-572 | `PropertyChangeMask` is no longer toggled off after INCR clipboard transfers complete, since it must stay on for `_ST_NOTIFY` monitoring |
-
-### st.h
-
-| Item | Line | Description |
-|------|------|-------------|
-| `notif_show()` | 134 | Public declaration |
-| `notif_hide()` | 135 | Public declaration |
-| `notif_draw()` | 136 | Public declaration |
-| `notif_resize()` | 137 | Public declaration |
-| `notif_active()` | 138 | Public declaration |
-| `notif_check_timeout()` | 139 | Public declaration |
-
-### sshind.h / sshind.c
-
-| Item | File | Line | Description |
-|------|------|------|-------------|
-| `sshind_height()` | sshind.h | 25 | Declaration added for notif.c to query sshind overlay height |
-| `sshind_height()` | sshind.c | 84 | Returns `sshind.height + 2 * sshind_border_width` if active, 0 otherwise |
+| Location | Description |
+|----------|-------------|
+| `propnotify()` | On `PropertyNewValue` for `xw.stnotify`: reads and deletes property, calls `notif_show()` |
+| `expose()` | Calls `notif_draw()` after `sshind_draw()` |
+| `resize()` | Calls `notif_resize()` after `sshind_resize()` |
+| Timer logic in `run()` | Checks `notif_active()`, calls `notif_check_timeout()` which handles removal internally, adjusts `pselect()` timeout for next dismissal |
 
 ### scripts/st-notify
 
@@ -145,53 +172,46 @@ This is useful for verifying that notifications are being received and dismissed
 | 14 | `xdotool search --pid "$pid"` to find the X window ID for the given PID |
 | 22 | `xprop -id "$wid" -f _ST_NOTIFY 8u -set _ST_NOTIFY "$msg"` to set the property as a UTF-8 string |
 
-### Makefile
-
-| Target | Description |
-|--------|-------------|
-| `notif.o` | Compiled from `notif.c`, depends on `sshind.h notif.h` |
-| `x.o` | Now also depends on `notif.h` |
-| `test_notif` | Compiles `tests/test_notif.c` (self-contained, includes `notif.c` directly with X11 mocks) |
-| `install` | Copies `scripts/st-notify` to `$(DESTDIR)$(PREFIX)/bin/` alongside `st` |
-
 ### tests/test_notif.c
 
-| Test | Line | Description |
-|------|------|-------------|
-| `notif_active_initial_state` | 331 | Inactive by default on startup |
-| `notif_show_activates` | 340 | `notif_active()` returns 1 after `notif_show()` |
-| `notif_hide_deactivates` | 352 | `notif_active()` returns 0 after `notif_hide()` |
-| `notif_creates_own_gc` | 364 | `XCreateGC` is called exactly once during `notif_show()` |
-| `notif_draw_uses_own_gc` | 377 | `XCopyArea` uses the notification's GC, not `dc.gc` |
-| `notif_hide_frees_gc` | 399 | `XFreeGC` is called during `notif_hide()` |
-| `notif_check_timeout_not_expired` | 413 | Returns positive remaining time when show_time is 1 second ago |
-| `notif_check_timeout_expired` | 435 | Returns zero or negative when show_time is 6 seconds ago |
-| `notif_replaces_existing` | 456 | Calling `notif_show()` twice frees old GC and creates new one |
+| Test | Description |
+|------|-------------|
+| `notif_active_initial_state` | Inactive by default on startup |
+| `notif_show_activates` | `notif_active()` returns 1 after `notif_show()` |
+| `notif_hide_deactivates` | `notif_active()` returns 0 after `notif_hide()` |
+| `notif_creates_own_gc` | `XCreateGC` called once per toast |
+| `notif_draw_uses_own_gc` | `XCopyArea` uses toast's GC, not `dc.gc` |
+| `notif_hide_frees_gc` | `XFreeGC` called during `notif_hide()` |
+| `notif_check_timeout_not_expired` | Returns positive remaining time for recent toast |
+| `notif_check_timeout_removes_expired` | Removes expired toast, returns -1 when empty |
+| `notif_stacks_multiple` | Two shows create two toasts, newest at index 0 |
+| `notif_shared_font_loaded_once` | Font loaded once for multiple toasts, freed once on hide |
+| `notif_max_evicts_oldest` | At max capacity, oldest toast evicted |
+| `notif_multiline_height` | Multi-line message gets correct line count and height |
+| `notif_expired_middle_reposition` | Middle toast expired, remaining repositioned |
 
 ## Flow
 
 ### External program sends notification
 
 ```
-External process (e.g. build script, timer, monitoring tool)
-  → Finds st's window ID via xdotool search --pid or _NET_WM_PID
-  → Calls xprop to set _ST_NOTIFY property on the window
-    (or XChangeProperty directly from C/Python/etc.)
+External process
+  → Sets _ST_NOTIFY property on st window
 
 st's X event loop (run() in x.c)
-  → XNextEvent delivers PropertyNotify
-  → handler[PropertyNotify] → propnotify()
-  → Checks xpev->atom == xw.stnotify && xpev->state == PropertyNewValue
-  → XGetWindowProperty with delete=True reads data, removes property
-  → Calls notif_show(data)
-    → Tears down any existing notification
-    → Loads scaled font, measures text, allocates colors
-    → Creates child window (XCreateWindow with CWColormap)
-    → Creates pixmap, XftDraw, GC for double buffering
-    → XMapRaised to show the overlay
-    → clock_gettime records show_time
-    → notif_draw() renders text to pixmap, copies to window
-  → XFree(data)
+  → PropertyNotify for xw.stnotify
+  → propnotify() reads and deletes property
+  → notif_show(msg)
+    → notif_load_shared() loads font/colors if first toast
+    → If at max capacity, notif_remove_toast(count-1) evicts oldest
+    → Shifts existing toasts down by one index
+    → Parses message into lines (splits on '\n')
+    → Measures widest line, calculates toast dimensions
+    → Creates X window, pixmap, XftDraw, GC at top-right position
+    → Records show_time, marks active
+    → Repositions all existing toasts (pushed down)
+    → Draws the new toast
+    → Debug: logs show event and full stack dump
 ```
 
 ### Timer-based auto-dismiss
@@ -199,57 +219,49 @@ st's X event loop (run() in x.c)
 ```
 run() main loop iteration:
   → clock_gettime(CLOCK_MONOTONIC, &now)
-  → Process X events, tty reads
-  → After blink timeout block:
-  → notif_active() returns 1
-  → notif_check_timeout(&now) computes remaining ms
-  → If remaining <= 0:
-      → notif_hide() destroys all X resources
-  → If remaining > 0 and remaining < current timeout:
-      → timeout = remaining (ensures pselect wakes at dismissal time)
-  → draw(), XFlush
+  → notif_active() returns 1 (count > 0)
+  → notif_check_timeout(&now):
+    → Iterates toasts from end to start
+    → For each: computes remaining = notif_display_ms - elapsed
+    → If remaining <= 0: notif_remove_toast(i)
+      → Destroys toast's X resources
+      → Shifts array, repositions remaining toasts
+      → If count becomes 0: notif_free_shared()
+    → Returns minimum remaining time across active toasts
+  → If remaining > 0: adjusts pselect() timeout
 ```
 
-### Window resize while notification is visible
+### Window resize while toasts are visible
 
 ```
 ConfigureNotify event
   → resize() in x.c
   → cresize() updates win.w, win.h
-  → sshind_resize() repositions SSH indicator
+  → sshind_resize()
   → notif_resize()
-    → Recalculates x = win.w - notif.width - notif_margin
-    → Recalculates y = notif_margin (+ sshind offset if active)
-    → XMoveWindow repositions the overlay
-```
-
-### Expose event redraws overlay
-
-```
-Expose event
-  → expose() in x.c
-  → redraw() redraws terminal content
-  → sshind_draw() redraws SSH indicator
-  → notif_draw()
-    → XftDrawRect clears background
-    → XftDrawStringUtf8 renders message text
-    → XCopyArea copies pixmap to overlay window
+    → For each toast: recalculates x (right-aligned) and y (stacked)
+    → XMoveWindow repositions each toast
 ```
 
 ## X11 Resource Lifecycle
 
-Each `notif_show()` creates these X resources, all destroyed by `notif_hide()`:
+### Shared resources (loaded once, freed when last toast dismissed)
 
 | Resource | Created by | Destroyed by |
 |----------|-----------|--------------|
-| `XftFont` | `XftFontOpenPattern` | `XftFontClose` |
-| `XftColor` (x3: fg, bg, border) | `XftColorAllocName` | `XftColorFree` |
-| Child `Window` | `XCreateWindow` | `XDestroyWindow` |
-| `Pixmap` (double buffer) | `XCreatePixmap` | `XFreePixmap` |
-| `XftDraw` | `XftDrawCreate` | `XftDrawDestroy` |
-| `GC` | `XCreateGC` | `XFreeGC` |
+| `XftFont` | `XftFontOpenPattern` in `notif_load_shared()` | `XftFontClose` in `notif_free_shared()` |
+| `XftColor` (x3: fg, bg, border) | `XftColorAllocName` in `notif_load_shared()` | `XftColorFree` in `notif_free_shared()` |
 
-The child window is created with `override_redirect = True` so the window manager does not attempt to manage, decorate, or reposition it. The `CWColormap` flag is passed explicitly to avoid `BadMatch` errors when the parent window's colormap differs from the default.
+### Per-toast resources (created per show, destroyed per dismiss)
+
+| Resource | Created by | Destroyed by |
+|----------|-----------|--------------|
+| Child `Window` | `XCreateWindow` in `notif_show()` | `XDestroyWindow` in `notif_destroy_toast()` |
+| `Pixmap` (double buffer) | `XCreatePixmap` in `notif_show()` | `XFreePixmap` in `notif_destroy_toast()` |
+| `XftDraw` | `XftDrawCreate` in `notif_show()` | `XftDrawDestroy` in `notif_destroy_toast()` |
+| `GC` | `XCreateGC` in `notif_show()` | `XFreeGC` in `notif_destroy_toast()` |
+
+Each toast window is created with `override_redirect = True` so the window manager does not manage it. The `CWColormap` flag is passed explicitly to avoid `BadMatch` errors.
 
 ## Struct Layout Constraint
 
