@@ -11,6 +11,8 @@ Make sure to modify the required zsh config in README.md if you make a change th
 | **forced nav mode**, Shift+Escape, TUI navigation, alt screen nav | `reference/forced-nav-mode.md` |
 | **debug mode**, `-d` flag, prompt overlay, prompt highlight | `reference/debug-mode.md` |
 | **Ctrl+number**, function keys, F14-F24, screen percentage, Unicode insert | `reference/function-keys.md` |
+| **notification**, notify, popup, `_ST_NOTIFY`, st-notify | `reference/notifications.md` |
+| **cwd**, `_ST_CWD`, OSC 779, working directory, spawntermhere | `reference/cwd-property.md` |
 
 ## CODE ORGANIZATION
 - st.c/st.h - Core terminal functionality
