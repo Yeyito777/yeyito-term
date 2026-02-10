@@ -3247,6 +3247,62 @@ TEST(vimnav_close_brace_no_next_prompt_goes_to_current)
 	mock_term_free();
 }
 
+/* Test: Ctrl+E at bottom (term.scr == 0) should not move cursor */
+TEST(vimnav_ctrl_e_no_scroll_no_cursor_move)
+{
+	mock_term_init(24, 80);
+	mock_set_line(20, "% echo hello");
+
+	term.c.x = 5;
+	term.c.y = 20;
+	term.scr = 0;
+
+	vimnav_enter();
+	/* Cursor on prompt line */
+	ASSERT_EQ(20, vimnav.y);
+	int old_y = vimnav.y;
+	int old_x = vimnav.x;
+
+	/* Ctrl+E when fully scrolled down - should do nothing */
+	int handled = vimnav_handle_key('e', 4);  /* 4 = ControlMask */
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(old_y, vimnav.y);
+	ASSERT_EQ(old_x, vimnav.x);
+	ASSERT_EQ(0, term.scr);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: Ctrl+Y at top of history should not move cursor */
+TEST(vimnav_ctrl_y_no_scroll_no_cursor_move)
+{
+	mock_term_init(24, 80);
+
+	/* No history content at all */
+	term.histi = 0;
+	mock_set_line(23, "% prompt");
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.y = 0;
+	vimnav.x = 0;
+	vimnav.savedx = 0;
+
+	/* Ctrl+Y when no history to scroll into - should do nothing */
+	int handled = vimnav_handle_key('y', 4);  /* 4 = ControlMask */
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(0, vimnav.y);
+	ASSERT_EQ(0, vimnav.x);
+	ASSERT_EQ(0, term.scr);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
 /* Test suite */
 TEST_SUITE(vimnav)
 {
@@ -3370,6 +3426,9 @@ TEST_SUITE(vimnav)
 	RUN_TEST(vimnav_open_brace_from_current_prompt);
 	RUN_TEST(vimnav_close_brace_jumps_to_next_prompt);
 	RUN_TEST(vimnav_close_brace_no_next_prompt_goes_to_current);
+
+	RUN_TEST(vimnav_ctrl_e_no_scroll_no_cursor_move);
+	RUN_TEST(vimnav_ctrl_y_no_scroll_no_cursor_move);
 }
 
 /* === Prompt line range tests === */

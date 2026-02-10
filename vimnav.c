@@ -1628,26 +1628,45 @@ vimnav_handle_key(ulong ksym, uint state)
 	if (state & ControlMask) {
 		int linelen;
 		int max_valid_y;
+		int old_scr, old_y, old_x;
 		switch (ksym) {
 		case 'e':
+			old_scr = term.scr;
+			old_y = vimnav.y;
+			old_x = vimnav.x;
 			vimnav_scroll_down(1);
-			/* Move cursor up to keep it on the same content line */
-			if (vimnav.y > 0) {
-				vimnav.y--;
-				linelen = tlinelen(vimnav.y);
-				vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
-				vimnav_update_selection();
+			if (term.scr < old_scr) {
+				/* Scroll happened - move cursor up to keep it on the same content line */
+				if (vimnav.y > 0) {
+					vimnav.y--;
+					linelen = tlinelen(vimnav.y);
+					vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
+					vimnav_update_selection();
+				}
+			} else {
+				/* Couldn't scroll - undo any cursor movement from scroll_down */
+				vimnav.y = old_y;
+				vimnav.x = old_x;
 			}
 			return 1;
 		case 'y':
+			old_scr = term.scr;
+			old_y = vimnav.y;
+			old_x = vimnav.x;
 			vimnav_scroll_up(1);
-			/* Move cursor down to keep it on the same content line */
-			max_valid_y = term.scr + term.c.y;
-			if (vimnav.y < max_valid_y && vimnav.y < term.row - 1) {
-				vimnav.y++;
-				linelen = tlinelen(vimnav.y);
-				vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
-				vimnav_update_selection();
+			if (term.scr > old_scr) {
+				/* Scroll happened - move cursor down to keep it on the same content line */
+				max_valid_y = term.scr + term.c.y;
+				if (vimnav.y < max_valid_y && vimnav.y < term.row - 1) {
+					vimnav.y++;
+					linelen = tlinelen(vimnav.y);
+					vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
+					vimnav_update_selection();
+				}
+			} else {
+				/* Couldn't scroll - undo any cursor movement from scroll_up */
+				vimnav.y = old_y;
+				vimnav.x = old_x;
 			}
 			return 1;
 		case 'u':
