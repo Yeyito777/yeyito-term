@@ -106,6 +106,7 @@ static int vimnav_is_prompt_space(int y);
 static void vimnav_update_selection(void);
 static void vimnav_notify_zsh_visual_end(void);
 static void vimnav_sync_to_zsh_cursor(void);
+static int vimnav_has_main_prompt(int screen_y);
 
 /* Notify zsh that visual mode selection has ended (send Escape) */
 static void
@@ -1147,6 +1148,112 @@ vimnav_move_bottom(void)
 	vimnav_update_selection();
 }
 
+/* { - move to previous prompt line (or top of history) */
+static void
+vimnav_move_prev_prompt(void)
+{
+	int y;
+	int was_in_prompt_space = vimnav_is_prompt_space(vimnav.y);
+
+	/* First, scan within visible screen above cursor */
+	for (y = vimnav.y - 1; y >= 0; y--) {
+		if (vimnav_has_main_prompt(y))
+			goto found;
+	}
+
+	/* Not found on screen. Scan into history by increasing term.scr. */
+	if (!IS_SET(MODE_ALTSCREEN)) {
+		while (term.scr < HISTSIZE - 1) {
+			int old_scr = term.scr;
+			term.scr++;
+			if (!vimnav_has_history_content(term.scr)) {
+				term.scr = old_scr;
+				break;
+			}
+			/* The new line scrolled in at screen top is TLINE(0) */
+			if (vimnav_has_main_prompt(0)) {
+				y = 0;
+				tfulldirt();
+				goto found;
+			}
+		}
+	}
+
+	/* No prompt found above. Move to top of reachable history (like gg). */
+	vimnav.y = 0;
+	vimnav.x = 0;
+	vimnav.savedx = 0;
+	tfulldirt();
+	goto handoff;
+
+found:
+	vimnav.y = y;
+	vimnav.x = 0;
+	vimnav.savedx = 0;
+	tfulldirt();
+
+handoff:
+	/* Handoff: if we left prompt space with zsh in visual mode, inherit selection */
+	if (was_in_prompt_space && !vimnav_is_prompt_space(vimnav.y) &&
+	    vimnav.zsh_visual && vimnav.mode == VIMNAV_NORMAL) {
+		int prompt_screen_y = term.c.y + term.scr;
+		int prompt_end = vimnav_find_prompt_end(prompt_screen_y);
+		vimnav.anchor_x = prompt_end + vimnav.zsh_visual_anchor;
+		vimnav.anchor_abs_y = term.c.y;
+		if (vimnav.zsh_visual_line) {
+			vimnav.mode = VIMNAV_VISUAL_LINE;
+		} else {
+			vimnav.mode = VIMNAV_VISUAL;
+		}
+	}
+
+	vimnav_update_selection();
+}
+
+/* } - move to next prompt line (or current prompt) */
+static void
+vimnav_move_next_prompt(void)
+{
+	int y;
+	int max_valid_y = term.scr + term.c.y;
+
+	/* Scan downward from current position */
+	for (y = vimnav.y + 1; y <= max_valid_y; y++) {
+		if (vimnav_has_main_prompt(y))
+			goto found;
+	}
+
+	/* No prompt found below. Go to current active prompt (like G). */
+	if (term.scr > 0)
+		kscrolldown(&(Arg){ .i = term.scr });
+	vimnav.y = term.c.y;
+	vimnav.savedx = 0;
+	vimnav_sync_to_zsh_cursor();
+	vimnav_update_selection();
+	return;
+
+found:
+	/* If target is below visible screen, scroll to bring it into view */
+	if (y >= term.row) {
+		int scroll_amount = y - (term.row - 1);
+		if (scroll_amount > term.scr)
+			scroll_amount = term.scr;
+		kscrolldown(&(Arg){ .i = scroll_amount });
+		y -= scroll_amount;
+	}
+
+	vimnav.y = y;
+	vimnav.x = 0;
+	vimnav.savedx = 0;
+
+	/* If we landed in the current prompt space, sync to zsh cursor */
+	if (vimnav_is_prompt_space(vimnav.y))
+		vimnav_sync_to_zsh_cursor();
+
+	tfulldirt();
+	vimnav_update_selection();
+}
+
 /* H - move cursor to top line of current screen */
 static void
 vimnav_move_screen_top(void)
@@ -1644,6 +1751,14 @@ vimnav_handle_key(ulong ksym, uint state)
 		break;
 	case 'M':
 		vimnav_move_screen_middle();
+		break;
+
+	/* Jump to previous/next prompt line ({/}) */
+	case '{':
+		vimnav_move_prev_prompt();
+		break;
+	case '}':
+		vimnav_move_next_prompt();
 		break;
 
 	/* Find character on line (f/F) */

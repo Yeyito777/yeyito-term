@@ -3046,6 +3046,207 @@ TEST(vimnav_forced_no_prompt_space)
 	mock_term_free();
 }
 
+/* Test: { jumps to previous prompt on screen */
+TEST(vimnav_open_brace_jumps_to_prev_prompt)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "$ ls");
+	mock_set_line(6, "file1.txt");
+	mock_set_line(7, "file2.txt");
+	mock_set_line(10, "$ echo hello");
+	mock_set_line(11, "hello");
+	mock_set_line(20, "% prompt");
+
+	term.c.x = 5;
+	term.c.y = 20;
+	term.scr = 0;
+	vimnav.zsh_cursor = 0;
+
+	vimnav_enter();
+	vimnav.y = 11;  /* On "hello" output line */
+	vimnav.x = 3;
+	vimnav.savedx = 3;
+
+	int handled = vimnav_handle_key('{', 0);
+
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(10, vimnav.y);  /* Jumped to "$ echo hello" */
+	ASSERT_EQ(0, vimnav.x);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: { skips output lines to reach prompt */
+TEST(vimnav_open_brace_skips_output_lines)
+{
+	mock_term_init(24, 80);
+	mock_set_line(2, "$ first-cmd");
+	mock_set_line(3, "output1");
+	mock_set_line(4, "output2");
+	mock_set_line(5, "output3");
+	mock_set_line(6, "output4");
+	mock_set_line(20, "% prompt");
+
+	term.c.x = 5;
+	term.c.y = 20;
+	term.scr = 0;
+	vimnav.zsh_cursor = 0;
+
+	vimnav_enter();
+	vimnav.y = 6;
+	vimnav.x = 0;
+	vimnav.savedx = 0;
+
+	int handled = vimnav_handle_key('{', 0);
+
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(2, vimnav.y);  /* Jumped to "$ first-cmd" */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: { from one prompt jumps to the previous prompt */
+TEST(vimnav_open_brace_from_prompt_to_prev_prompt)
+{
+	mock_term_init(24, 80);
+	mock_set_line(3, "$ first");
+	mock_set_line(4, "output");
+	mock_set_line(5, "$ second");
+	mock_set_line(20, "% prompt");
+
+	term.c.x = 5;
+	term.c.y = 20;
+	term.scr = 0;
+	vimnav.zsh_cursor = 0;
+
+	vimnav_enter();
+	vimnav.y = 5;  /* On "$ second" prompt */
+	vimnav.x = 3;
+	vimnav.savedx = 3;
+
+	int handled = vimnav_handle_key('{', 0);
+
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(3, vimnav.y);  /* Jumped to "$ first" */
+	ASSERT_EQ(0, vimnav.x);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: { with no prompt above goes to top (row 0) */
+TEST(vimnav_open_brace_no_prev_prompt_goes_to_top)
+{
+	mock_term_init(24, 80);
+	mock_set_line(0, "some output");
+	mock_set_line(1, "more output");
+	mock_set_line(20, "% prompt");
+
+	term.c.x = 5;
+	term.c.y = 20;
+	term.scr = 0;
+	vimnav.zsh_cursor = 0;
+
+	vimnav_enter();
+	vimnav.y = 1;
+	vimnav.x = 0;
+	vimnav.savedx = 0;
+
+	int handled = vimnav_handle_key('{', 0);
+
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(0, vimnav.y);  /* Top of screen */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: { from current prompt jumps to previous prompt in history */
+TEST(vimnav_open_brace_from_current_prompt)
+{
+	mock_term_init(24, 80);
+	mock_set_line(10, "$ old-cmd");
+	mock_set_line(11, "output");
+	mock_set_line(20, "% prompt");
+
+	term.c.x = 5;
+	term.c.y = 20;
+	term.scr = 0;
+	vimnav.zsh_cursor = 0;
+
+	vimnav_enter();
+	ASSERT_EQ(20, vimnav.y);
+
+	int handled = vimnav_handle_key('{', 0);
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(10, vimnav.y);  /* Jumped to "$ old-cmd" */
+	ASSERT_EQ(0, vimnav.x);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: } jumps to next prompt on screen */
+TEST(vimnav_close_brace_jumps_to_next_prompt)
+{
+	mock_term_init(24, 80);
+	mock_set_line(2, "$ first");
+	mock_set_line(3, "output1");
+	mock_set_line(4, "output2");
+	mock_set_line(8, "$ second");
+	mock_set_line(9, "output3");
+	mock_set_line(20, "% prompt");
+
+	term.c.x = 5;
+	term.c.y = 20;
+	term.scr = 0;
+	vimnav.zsh_cursor = 0;
+
+	vimnav_enter();
+	vimnav.y = 3;  /* On "output1" */
+	vimnav.x = 2;
+	vimnav.savedx = 2;
+
+	int handled = vimnav_handle_key('}', 0);
+
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(8, vimnav.y);  /* Jumped to "$ second" */
+	ASSERT_EQ(0, vimnav.x);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: } with no next prompt goes to current prompt (like G) */
+TEST(vimnav_close_brace_no_next_prompt_goes_to_current)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "$ cmd");
+	mock_set_line(6, "output");
+	mock_set_line(7, "more output");
+	mock_set_line(20, "% prompt");
+
+	term.c.x = 5;
+	term.c.y = 20;
+	term.scr = 0;
+	vimnav.zsh_cursor = 3;
+
+	vimnav_enter();
+	vimnav.y = 6;
+	vimnav.x = 0;
+	vimnav.savedx = 0;
+
+	int handled = vimnav_handle_key('}', 0);
+
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(20, vimnav.y);  /* Jumped to current prompt */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
 /* Test suite */
 TEST_SUITE(vimnav)
 {
@@ -3161,6 +3362,14 @@ TEST_SUITE(vimnav)
 	RUN_TEST(vimnav_forced_M_middle_of_screen_altscreen);
 	RUN_TEST(vimnav_forced_visual_yank_works);
 	RUN_TEST(vimnav_forced_no_prompt_space);
+	/* { and } prompt-jump tests */
+	RUN_TEST(vimnav_open_brace_jumps_to_prev_prompt);
+	RUN_TEST(vimnav_open_brace_skips_output_lines);
+	RUN_TEST(vimnav_open_brace_from_prompt_to_prev_prompt);
+	RUN_TEST(vimnav_open_brace_no_prev_prompt_goes_to_top);
+	RUN_TEST(vimnav_open_brace_from_current_prompt);
+	RUN_TEST(vimnav_close_brace_jumps_to_next_prompt);
+	RUN_TEST(vimnav_close_brace_no_next_prompt_goes_to_current);
 }
 
 /* === Prompt line range tests === */
