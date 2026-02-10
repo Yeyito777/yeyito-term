@@ -3,3 +3,4 @@ st
 tests/test_vimnav
 tests/test_sshind
 tests/test_scrollback
+tests/test_cwd
