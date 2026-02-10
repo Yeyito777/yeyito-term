@@ -114,8 +114,8 @@ All configuration is in `notif.h` as `static const` variables (same pattern as `
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `notif_border_color` | `"#00ff88"` | Border color (bright green) |
-| `notif_bg_color` | `"#000f08"` | Background color (dark green, blends with #00050f) |
+| `notif_border_color` | `"#1d9bf0"` | Border color (blue) |
+| `notif_bg_color` | `"#00050f"` | Background color (terminal background) |
 | `notif_fg_color` | `"#ffffff"` | Text color (white) |
 | `notif_border_width` | `2` | Border thickness in pixels |
 | `notif_margin` | `10` | Margin from parent window edge in pixels |

@@ -17,8 +17,8 @@
  * New notifications appear at the top, pushing old ones down.
  * Each toast auto-dismisses independently after notif_display_ms.
  */
-static const char *notif_border_color = "#00ff88";    /* bright green */
-static const char *notif_bg_color = "#000f08";         /* dark green (blends with #00050f bg) */
+static const char *notif_border_color = "#1d9bf0";    /* blue */
+static const char *notif_bg_color = "#00050f";         /* terminal background */
 static const char *notif_fg_color = "#ffffff";         /* white text */
 static const int notif_border_width = 2;               /* border thickness */
 static const int notif_margin = 10;                    /* margin from parent window edge */
