@@ -96,7 +96,7 @@ typedef struct {
 	Window win;
 	Drawable buf;
 	GlyphFontSpec *specbuf; /* font spec buffer used for rendering */
-	Atom xembed, wmdeletewin, netwmname, netwmiconname, netwmpid;
+	Atom xembed, wmdeletewin, netwmname, netwmiconname, netwmpid, stcwd;
 	struct {
 		XIM xim;
 		XIC xic;
@@ -1242,6 +1242,8 @@ xinit(int cols, int rows)
 	XChangeProperty(xw.dpy, xw.win, xw.netwmpid, XA_CARDINAL, 32,
 			PropModeReplace, (uchar *)&thispid, 1);
 
+	xw.stcwd = XInternAtom(xw.dpy, "_ST_CWD", False);
+
 	win.mode = MODE_NUMLOCK;
 	resettitle();
 	xhints();
@@ -1688,6 +1690,14 @@ xsettitle(char *p)
 	XSetWMName(xw.dpy, xw.win, &prop);
 	XSetTextProperty(xw.dpy, xw.win, &prop, xw.netwmname);
 	XFree(prop.value);
+}
+
+void
+xsetcwd(char *cwd)
+{
+	XChangeProperty(xw.dpy, xw.win, xw.stcwd,
+			XInternAtom(xw.dpy, "UTF8_STRING", False), 8,
+			PropModeReplace, (uchar *)cwd, strlen(cwd));
 }
 
 int

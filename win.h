@@ -34,6 +34,7 @@ int xsetcolorname(int, const char *);
 int xgetcolor(int, unsigned char *, unsigned char *, unsigned char *);
 void xseticontitle(char *);
 void xsettitle(char *);
+void xsetcwd(char *);
 int xgetcursor(void);
 int xsetcursor(int);
 void xsetmode(int, unsigned int);

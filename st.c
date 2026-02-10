@@ -2116,6 +2116,14 @@ strhandle(void)
 					sshind_show(strescseq.args[2]);
 			}
 			return;
+		case 779: /* st custom: CWD reporting */
+			if (narg > 1 && strescseq.args[1][0] != '\0') {
+				if (debug_mode)
+					fprintf(stderr, "OSC 779: cwd=%s\n",
+						strescseq.args[1]);
+				xsetcwd(strescseq.args[1]);
+			}
+			return;
 		}
 		break;
 	case 'k': /* old title set compatibility */

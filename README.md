@@ -85,6 +85,12 @@ bindkey -M vicmd 'K' up-line-or-history
 # Make zsh's visual mode highlight invisible (st renders the selection instead)
 zle_highlight=(region:none)
 
+# Report cwd to st (exposed as _ST_CWD X property)
+function chpwd {
+  printf '\033]779;%s\a' "$PWD"
+}
+chpwd  # report initial directory
+
 ssh() {
   local host="${@: -1}"
   printf '\033]778;ssh;%s\007' "$host"

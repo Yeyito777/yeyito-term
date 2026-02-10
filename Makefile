@@ -83,13 +83,21 @@ tests/test_scrollback.o: tests/test_scrollback.c tests/test.h tests/mocks.h st.h
 test_scrollback: tests/mocks.o tests/test_scrollback.o tests/vimnav.o
 	$(CC) -o tests/test_scrollback tests/mocks.o tests/test_scrollback.o tests/vimnav.o
 
-test: test_vimnav test_sshind test_scrollback
+# cwd tests (self-contained - tests OSC 779 parsing logic)
+tests/test_cwd.o: tests/test_cwd.c tests/test.h
+	$(CC) $(TESTFLAGS) -c tests/test_cwd.c -o tests/test_cwd.o
+
+test_cwd: tests/test_cwd.o
+	$(CC) -o tests/test_cwd tests/test_cwd.o
+
+test: test_vimnav test_sshind test_scrollback test_cwd
 	@echo "Running tests..."
 	@./tests/test_vimnav
 	@./tests/test_sshind
 	@./tests/test_scrollback
+	@./tests/test_cwd
 
 clean-tests:
-	rm -f tests/*.o tests/test_vimnav tests/test_sshind tests/test_scrollback
+	rm -f tests/*.o tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd
 
 .PHONY: all clean dist install uninstall test clean-tests
