@@ -3303,6 +3303,134 @@ TEST(vimnav_ctrl_y_no_scroll_no_cursor_move)
 	mock_term_free();
 }
 
+/* Test: Ctrl+1 jumps to top of screen (0%) */
+TEST(vimnav_ctrl1_jumps_to_top)
+{
+	mock_term_init(24, 80);
+	mock_set_line(0, "top line");
+	mock_set_line(10, "middle line");
+	mock_set_line(20, "% prompt");
+
+	term.c.x = 5;
+	term.c.y = 20;
+	term.scr = 0;
+	vimnav.zsh_cursor = 0;
+
+	vimnav_enter();
+	vimnav.y = 10;
+	vimnav.x = 5;
+	vimnav.savedx = 5;
+
+	int handled = vimnav_handle_key('1', 4);  /* 4 = ControlMask */
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(0, vimnav.y);  /* 0% = top */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: Ctrl+6 jumps to middle of screen (50%) */
+TEST(vimnav_ctrl6_jumps_to_middle)
+{
+	mock_term_init(24, 80);
+	mock_set_line(0, "top line");
+	mock_set_line(20, "% prompt");
+
+	term.c.x = 5;
+	term.c.y = 20;
+	term.scr = 0;
+	vimnav.zsh_cursor = 0;
+
+	vimnav_enter();
+	vimnav.y = 0;
+	vimnav.x = 0;
+	vimnav.savedx = 0;
+
+	int handled = vimnav_handle_key('6', 4);  /* 4 = ControlMask */
+	ASSERT_EQ(1, handled);
+	/* 50% of screen (23 rows) = 12, prompt at 20 so no clamping */
+	ASSERT_EQ(12, vimnav.y);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: Ctrl+- jumps to bottom of screen (100%) */
+TEST(vimnav_ctrl_minus_jumps_to_bottom)
+{
+	mock_term_init(24, 80);
+	mock_set_line(0, "top line");
+	mock_set_line(20, "% prompt");
+
+	term.c.x = 5;
+	term.c.y = 20;
+	term.scr = 0;
+	vimnav.zsh_cursor = 0;
+
+	vimnav_enter();
+	vimnav.y = 0;
+	vimnav.x = 0;
+	vimnav.savedx = 0;
+
+	int handled = vimnav_handle_key('-', 4);  /* 4 = ControlMask */
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(20, vimnav.y);  /* 100% = prompt row */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: Ctrl+percent uses prompt row as bottom when not scrolled */
+TEST(vimnav_ctrl_percent_respects_prompt)
+{
+	mock_term_init(24, 80);
+	mock_set_line(10, "% prompt");
+
+	term.c.x = 5;
+	term.c.y = 10;  /* Prompt at row 10 */
+	term.scr = 0;
+	vimnav.zsh_cursor = 0;
+
+	vimnav_enter();
+	vimnav.y = 0;
+	vimnav.x = 0;
+	vimnav.savedx = 0;
+
+	/* Ctrl+6 = 50% of screen (23) = 12, clamped to prompt at row 10 */
+	int handled = vimnav_handle_key('6', 4);
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(10, vimnav.y);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: Ctrl+percent uses full screen when scrolled up past prompt */
+TEST(vimnav_ctrl_percent_scrolled_uses_full_screen)
+{
+	mock_term_init(24, 80);
+	for (int i = 0; i < 24; i++)
+		mock_set_line(i, "line content");
+
+	term.c.x = 5;
+	term.c.y = 23;  /* Prompt at bottom */
+	term.scr = 10;  /* Scrolled up - prompt off screen */
+	vimnav.zsh_cursor = 0;
+
+	vimnav_enter();
+	vimnav.y = 0;
+	vimnav.x = 0;
+	vimnav.savedx = 0;
+
+	/* Ctrl+- = 100%, bottom = min(23+10, 23) = 23 */
+	int handled = vimnav_handle_key('-', 4);
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(23, vimnav.y);  /* Bottom of visible screen */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
 /* Test suite */
 TEST_SUITE(vimnav)
 {
@@ -3429,6 +3557,12 @@ TEST_SUITE(vimnav)
 
 	RUN_TEST(vimnav_ctrl_e_no_scroll_no_cursor_move);
 	RUN_TEST(vimnav_ctrl_y_no_scroll_no_cursor_move);
+	/* Ctrl+1-9,0,- screen percent jump tests */
+	RUN_TEST(vimnav_ctrl1_jumps_to_top);
+	RUN_TEST(vimnav_ctrl6_jumps_to_middle);
+	RUN_TEST(vimnav_ctrl_minus_jumps_to_bottom);
+	RUN_TEST(vimnav_ctrl_percent_respects_prompt);
+	RUN_TEST(vimnav_ctrl_percent_scrolled_uses_full_screen);
 }
 
 /* === Prompt line range tests === */

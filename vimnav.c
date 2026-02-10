@@ -1315,6 +1315,32 @@ vimnav_move_screen_middle(void)
 	vimnav_update_selection();
 }
 
+/* Ctrl+1-9,0,-: move cursor to percent of visible screen */
+static void
+vimnav_move_screen_percent(int percent)
+{
+	int linelen;
+	int target_y;
+
+	target_y = ((term.row - 1) * percent + 50) / 100;
+
+	/* Clamp to prompt line when not in forced mode */
+	if (!vimnav.forced) {
+		int prompt_y = MIN(term.c.y + term.scr, term.row - 1);
+		if (target_y > prompt_y)
+			target_y = prompt_y;
+	}
+
+	vimnav.y = target_y;
+
+	linelen = tlinelen(vimnav.y);
+	vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
+
+	if (vimnav_is_prompt_space(vimnav.y))
+		vimnav_sync_to_zsh_cursor();
+	vimnav_update_selection();
+}
+
 static void
 vimnav_toggle_visual_char(void)
 {
@@ -1692,6 +1718,17 @@ vimnav_handle_key(ulong ksym, uint state)
 			vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
 			vimnav_update_selection();
 			return 1;
+		case '1': vimnav_move_screen_percent(0);   return 1;
+		case '2': vimnav_move_screen_percent(10);  return 1;
+		case '3': vimnav_move_screen_percent(20);  return 1;
+		case '4': vimnav_move_screen_percent(30);  return 1;
+		case '5': vimnav_move_screen_percent(40);  return 1;
+		case '6': vimnav_move_screen_percent(50);  return 1;
+		case '7': vimnav_move_screen_percent(60);  return 1;
+		case '8': vimnav_move_screen_percent(70);  return 1;
+		case '9': vimnav_move_screen_percent(80);  return 1;
+		case '0': vimnav_move_screen_percent(90);  return 1;
+		case '-': vimnav_move_screen_percent(100); return 1;
 		default:
 			return 0;  /* Unknown Ctrl key, exit vim mode */
 		}
