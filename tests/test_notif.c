@@ -584,6 +584,144 @@ TEST(notif_expired_middle_reposition)
 	notif_hide();
 }
 
+/* Test: plain message without metadata header (backward compatible) */
+TEST(notif_no_metadata_plain_msg)
+{
+	init_mock_xwindow();
+
+	notif_show("plain message");
+
+	ASSERT_EQ(1, notif.count);
+	ASSERT_STR_EQ("plain message", notif.toasts[0].msg);
+	ASSERT_EQ(0, notif.toasts[0].pflags);
+	ASSERT_EQ(0, notif.toasts[0].timeout_ms);
+
+	notif_hide();
+}
+
+/* Test: custom timeout parsed from metadata */
+TEST(notif_custom_timeout)
+{
+	struct timespec now;
+	int remaining;
+	init_mock_xwindow();
+
+	/* Format: t=2000\x1f\x1emessage */
+	notif_show("t=2000\x1f" "\x1e" "test timeout");
+
+	ASSERT_EQ(1, notif.count);
+	ASSERT_STR_EQ("test timeout", notif.toasts[0].msg);
+	ASSERT_EQ(2000, notif.toasts[0].timeout_ms);
+
+	/* Set show_time to 1.5 seconds ago - should NOT be expired with 2s timeout */
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	notif.toasts[0].show_time.tv_sec = now.tv_sec - 1;
+	notif.toasts[0].show_time.tv_nsec = now.tv_nsec - 500000000;
+	if (notif.toasts[0].show_time.tv_nsec < 0) {
+		notif.toasts[0].show_time.tv_sec--;
+		notif.toasts[0].show_time.tv_nsec += 1000000000;
+	}
+
+	remaining = notif_check_timeout(&now);
+	ASSERT(remaining > 0);
+	ASSERT_EQ(1, notif.count);
+
+	/* Set show_time to 3 seconds ago - should be expired with 2s timeout */
+	notif.toasts[0].show_time.tv_sec = now.tv_sec - 3;
+	notif.toasts[0].show_time.tv_nsec = now.tv_nsec;
+
+	remaining = notif_check_timeout(&now);
+	ASSERT_EQ(0, notif.count);
+}
+
+/* Test: custom colors set pflags */
+TEST(notif_custom_colors_pflags)
+{
+	init_mock_xwindow();
+
+	notif_show("fg=#ff0000\x1f" "bg=#00ff00\x1f" "b=#0000ff\x1f" "\x1e" "colored");
+
+	ASSERT_EQ(1, notif.count);
+	ASSERT_STR_EQ("colored", notif.toasts[0].msg);
+	ASSERT(notif.toasts[0].pflags & NOTIF_PF_FG);
+	ASSERT(notif.toasts[0].pflags & NOTIF_PF_BG);
+	ASSERT(notif.toasts[0].pflags & NOTIF_PF_BORDER);
+
+	notif_hide();
+}
+
+/* Test: custom textsize opens per-toast font */
+TEST(notif_custom_textsize_font)
+{
+	init_mock_xwindow();
+
+	reset_x11_track();
+	notif_show("ts=24\x1f" "\x1e" "big text");
+
+	ASSERT_EQ(1, notif.count);
+	ASSERT_STR_EQ("big text", notif.toasts[0].msg);
+	ASSERT(notif.toasts[0].pflags & NOTIF_PF_FONT);
+	ASSERT(notif.toasts[0].pfont != NULL);
+
+	/* Should have opened 2 fonts: shared + per-toast */
+	ASSERT_EQ(2, x11_track.xftfontopen_calls);
+
+	notif_hide();
+
+	/* Should have closed 2 fonts: per-toast + shared */
+	ASSERT_EQ(2, x11_track.xftfontclose_calls);
+}
+
+/* Test: per-toast font freed on hide */
+TEST(notif_pertost_resources_freed)
+{
+	init_mock_xwindow();
+
+	notif_show("fg=#ff0000\x1f" "ts=20\x1f" "\x1e" "resource test");
+	ASSERT(notif.toasts[0].pflags & NOTIF_PF_FG);
+	ASSERT(notif.toasts[0].pflags & NOTIF_PF_FONT);
+
+	notif_hide();
+
+	/* After hide, all toasts destroyed, pflags should be cleared */
+	ASSERT_EQ(0, notif.count);
+	ASSERT_EQ(0, notif.toasts[0].pflags);
+}
+
+/* Test: multiple options combined with message */
+TEST(notif_multiple_opts_combined)
+{
+	init_mock_xwindow();
+
+	notif_show("t=3000\x1f" "fg=#aabbcc\x1f" "ts=16\x1f" "\x1e" "multi-opt msg");
+
+	ASSERT_EQ(1, notif.count);
+	ASSERT_STR_EQ("multi-opt msg", notif.toasts[0].msg);
+	ASSERT_EQ(3000, notif.toasts[0].timeout_ms);
+	ASSERT(notif.toasts[0].pflags & NOTIF_PF_FG);
+	ASSERT(notif.toasts[0].pflags & NOTIF_PF_FONT);
+	/* bg and border not set */
+	ASSERT(!(notif.toasts[0].pflags & NOTIF_PF_BG));
+	ASSERT(!(notif.toasts[0].pflags & NOTIF_PF_BORDER));
+
+	notif_hide();
+}
+
+/* Test: metadata with only timeout, no color/font overrides */
+TEST(notif_timeout_only_no_flags)
+{
+	init_mock_xwindow();
+
+	notif_show("t=8000\x1f" "\x1e" "just timeout");
+
+	ASSERT_EQ(1, notif.count);
+	ASSERT_STR_EQ("just timeout", notif.toasts[0].msg);
+	ASSERT_EQ(8000, notif.toasts[0].timeout_ms);
+	ASSERT_EQ(0, notif.toasts[0].pflags);  /* no color/font flags */
+
+	notif_hide();
+}
+
 /* Test suite */
 TEST_SUITE(notif)
 {
@@ -600,6 +738,13 @@ TEST_SUITE(notif)
 	RUN_TEST(notif_max_evicts_oldest);
 	RUN_TEST(notif_multiline_height);
 	RUN_TEST(notif_expired_middle_reposition);
+	RUN_TEST(notif_no_metadata_plain_msg);
+	RUN_TEST(notif_custom_timeout);
+	RUN_TEST(notif_custom_colors_pflags);
+	RUN_TEST(notif_custom_textsize_font);
+	RUN_TEST(notif_pertost_resources_freed);
+	RUN_TEST(notif_multiple_opts_combined);
+	RUN_TEST(notif_timeout_only_no_flags);
 }
 
 int

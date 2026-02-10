@@ -1,13 +1,74 @@
 #!/bin/bash
 # st-notify - Send notification to an st terminal window
-# Usage: st-notify <st-pid> "message"
+# Usage: st-notify [options] <st-pid> "message"
+
+usage() {
+    cat >&2 <<'EOF'
+Usage: st-notify [options] <st-pid> "message"
+
+Options:
+  --timeout,    -t  <ms>    Auto-dismiss timeout in milliseconds (default: 5000)
+  --border,     -b  <hex>   Border color, e.g. "#ff0000"
+  --background, -bg <hex>   Background color
+  --foreground, -fg <hex>   Foreground/text color
+  --textsize,   -ts <int>   Font pixel size (window auto-fits to text)
+  --help,       -h          Show this help
+
+Examples:
+  st-notify $$ "Hello world"
+  st-notify -t 10000 -b "#ff0000" $$ "Error occurred"
+  st-notify -ts 24 -fg "#00ff00" $$ "Big green text"
+EOF
+    exit 1
+}
+
+# Parse options
+meta=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --timeout|-t)
+            [ -z "$2" ] && usage
+            meta="${meta}t=$2$(printf '\x1f')"
+            shift 2
+            ;;
+        --border|-b)
+            [ -z "$2" ] && usage
+            meta="${meta}b=$2$(printf '\x1f')"
+            shift 2
+            ;;
+        --background|-bg)
+            [ -z "$2" ] && usage
+            meta="${meta}bg=$2$(printf '\x1f')"
+            shift 2
+            ;;
+        --foreground|-fg)
+            [ -z "$2" ] && usage
+            meta="${meta}fg=$2$(printf '\x1f')"
+            shift 2
+            ;;
+        --textsize|-ts)
+            [ -z "$2" ] && usage
+            meta="${meta}ts=$2$(printf '\x1f')"
+            shift 2
+            ;;
+        --help|-h)
+            usage
+            ;;
+        -*)
+            echo "Unknown option: $1" >&2
+            usage
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
 
 pid="$1"
 msg="$2"
 
 if [ -z "$pid" ] || [ -z "$msg" ]; then
-    echo "Usage: st-notify <st-pid> \"message\"" >&2
-    exit 1
+    usage
 fi
 
 # Find X window with matching _NET_WM_PID
@@ -18,5 +79,12 @@ if [ -z "$wid" ]; then
     exit 1
 fi
 
+# Build property value: metadata\x1emessage (or just message if no options)
+if [ -n "$meta" ]; then
+    val="$(printf '%s\x1e%s' "$meta" "$msg")"
+else
+    val="$msg"
+fi
+
 # Set the _ST_NOTIFY property — st will pick this up via PropertyNotify
-xprop -id "$wid" -f _ST_NOTIFY 8u -set _ST_NOTIFY "$msg"
+xprop -id "$wid" -f _ST_NOTIFY 8u -set _ST_NOTIFY "$val"

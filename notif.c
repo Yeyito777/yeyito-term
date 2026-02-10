@@ -1,5 +1,6 @@
 /* See LICENSE for license details. */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -65,6 +66,16 @@ extern double usedfontsize;
 extern int debug_mode;
 #endif /* !NOTIF_TEST */
 
+/* Per-toast override flags */
+#define NOTIF_PF_FG     1
+#define NOTIF_PF_BG     2
+#define NOTIF_PF_BORDER 4
+#define NOTIF_PF_FONT   8
+
+/* Metadata separators in property value */
+#define NOTIF_META_SEP   '\x1e'  /* record separator: metadata | message */
+#define NOTIF_META_DELIM '\x1f'  /* unit separator between key=value pairs */
+
 /* Individual toast state */
 typedef struct {
 	int active;
@@ -78,6 +89,11 @@ typedef struct {
 	GC gc;
 	int width, height;
 	struct timespec show_time;
+	/* Per-toast overrides */
+	int timeout_ms;                 /* <=0 = use notif_display_ms */
+	XftFont *pfont;                 /* per-toast font, NULL = use shared */
+	XftColor pfg, pbg, pborder;     /* per-toast colors */
+	int pflags;                     /* bitmask of NOTIF_PF_* */
 } NotifToast;
 
 /* Notification stack state */
@@ -139,45 +155,145 @@ notif_parse_lines(NotifToast *t)
 	}
 }
 
-/* Load shared resources (font and colors) on first toast */
+/* Per-toast accessors: use override if set, else shared */
+static XftFont *
+toast_font(NotifToast *t)
+{
+	return (t->pflags & NOTIF_PF_FONT) ? t->pfont : notif.font;
+}
+
+static XftColor *
+toast_fg(NotifToast *t)
+{
+	return (t->pflags & NOTIF_PF_FG) ? &t->pfg : &notif.fg;
+}
+
+static XftColor *
+toast_bg(NotifToast *t)
+{
+	return (t->pflags & NOTIF_PF_BG) ? &t->pbg : &notif.bg;
+}
+
+static XftColor *
+toast_border(NotifToast *t)
+{
+	return (t->pflags & NOTIF_PF_BORDER) ? &t->pborder : &notif.border;
+}
+
 static int
-notif_load_shared(void)
+toast_timeout(NotifToast *t)
+{
+	return t->timeout_ms > 0 ? t->timeout_ms : notif_display_ms;
+}
+
+/* Open a font at a specific pixel size */
+static XftFont *
+notif_open_font_at_size(double pixelsize)
 {
 	FcPattern *pattern;
 	FcResult result;
 	FcPattern *match;
-	double fontsize;
+	XftFont *font;
 
-	if (notif.shared_loaded)
-		return 1;
-
-	fontsize = usedfontsize * notif_font_scale;
 	pattern = FcNameParse((const FcChar8 *)usedfont);
-	if (!pattern) {
-		fprintf(stderr, "notif: can't parse font pattern\n");
-		return 0;
-	}
+	if (!pattern)
+		return NULL;
+
 	FcPatternDel(pattern, FC_PIXEL_SIZE);
 	FcPatternDel(pattern, FC_SIZE);
-	FcPatternAddDouble(pattern, FC_PIXEL_SIZE, fontsize);
+	FcPatternAddDouble(pattern, FC_PIXEL_SIZE, pixelsize);
 	FcConfigSubstitute(NULL, pattern, FcMatchPattern);
 	XftDefaultSubstitute(xw.dpy, xw.scr, pattern);
 
 	match = FcFontMatch(NULL, pattern, &result);
-	if (!match) {
-		FcPatternDestroy(pattern);
-		fprintf(stderr, "notif: can't match font\n");
-		return 0;
+	FcPatternDestroy(pattern);
+	if (!match)
+		return NULL;
+
+	font = XftFontOpenPattern(xw.dpy, match);
+	if (!font)
+		FcPatternDestroy(match);
+
+	return font;
+}
+
+/* Parse per-toast options from property value metadata header.
+ * Format: key=val\x1fkey=val\x1emessage
+ * If no \x1e found, entire string is the message (backward compatible). */
+static void
+notif_parse_opts(NotifToast *t, const char *raw, const char **msg_out)
+{
+	const char *sep, *p, *end, *eq;
+	char key[16], val[64];
+	int klen, vlen;
+	double ts;
+
+	sep = strchr(raw, NOTIF_META_SEP);
+	if (!sep) {
+		*msg_out = raw;
+		return;
 	}
 
-	notif.font = XftFontOpenPattern(xw.dpy, match);
+	*msg_out = sep + 1;
+	p = raw;
+
+	while (p < sep) {
+		end = memchr(p, NOTIF_META_DELIM, sep - p);
+		if (!end)
+			end = sep;
+
+		eq = memchr(p, '=', end - p);
+		if (eq) {
+			klen = eq - p;
+			vlen = end - eq - 1;
+			if (klen > 0 && klen < (int)sizeof(key)
+			    && vlen > 0 && vlen < (int)sizeof(val)) {
+				memcpy(key, p, klen);
+				key[klen] = '\0';
+				memcpy(val, eq + 1, vlen);
+				val[vlen] = '\0';
+
+				if (strcmp(key, "t") == 0) {
+					t->timeout_ms = atoi(val);
+				} else if (strcmp(key, "fg") == 0) {
+					XftColorAllocName(xw.dpy, xw.vis,
+					    xw.cmap, val, &t->pfg);
+					t->pflags |= NOTIF_PF_FG;
+				} else if (strcmp(key, "bg") == 0) {
+					XftColorAllocName(xw.dpy, xw.vis,
+					    xw.cmap, val, &t->pbg);
+					t->pflags |= NOTIF_PF_BG;
+				} else if (strcmp(key, "b") == 0) {
+					XftColorAllocName(xw.dpy, xw.vis,
+					    xw.cmap, val, &t->pborder);
+					t->pflags |= NOTIF_PF_BORDER;
+				} else if (strcmp(key, "ts") == 0) {
+					ts = atof(val);
+					if (ts > 0) {
+						t->pfont = notif_open_font_at_size(ts);
+						if (t->pfont)
+							t->pflags |= NOTIF_PF_FONT;
+					}
+				}
+			}
+		}
+
+		p = end + 1;
+	}
+}
+
+/* Load shared resources (font and colors) on first toast */
+static int
+notif_load_shared(void)
+{
+	if (notif.shared_loaded)
+		return 1;
+
+	notif.font = notif_open_font_at_size(usedfontsize * notif_font_scale);
 	if (!notif.font) {
-		FcPatternDestroy(pattern);
-		FcPatternDestroy(match);
 		fprintf(stderr, "notif: can't open font\n");
 		return 0;
 	}
-	FcPatternDestroy(pattern);
 
 	XftColorAllocName(xw.dpy, xw.vis, xw.cmap, notif_fg_color, &notif.fg);
 	XftColorAllocName(xw.dpy, xw.vis, xw.cmap, notif_bg_color, &notif.bg);
@@ -227,6 +343,19 @@ notif_destroy_toast(NotifToast *t)
 		t->gc = 0;
 	}
 
+	/* Free per-toast overrides */
+	if (t->pflags & NOTIF_PF_FONT) {
+		XftFontClose(xw.dpy, t->pfont);
+		t->pfont = NULL;
+	}
+	if (t->pflags & NOTIF_PF_FG)
+		XftColorFree(xw.dpy, xw.vis, xw.cmap, &t->pfg);
+	if (t->pflags & NOTIF_PF_BG)
+		XftColorFree(xw.dpy, xw.vis, xw.cmap, &t->pbg);
+	if (t->pflags & NOTIF_PF_BORDER)
+		XftColorFree(xw.dpy, xw.vis, xw.cmap, &t->pborder);
+	t->pflags = 0;
+
 	t->active = 0;
 }
 
@@ -234,22 +363,27 @@ notif_destroy_toast(NotifToast *t)
 static void
 notif_draw_toast(NotifToast *t)
 {
+	XftFont *font;
+	XftColor *fg, *bg;
 	int tx, ty, i, line_height;
 
-	if (!t->active || !t->draw || !notif.font)
+	font = toast_font(t);
+	if (!t->active || !t->draw || !font)
 		return;
 
-	line_height = notif.font->ascent + notif.font->descent;
+	fg = toast_fg(t);
+	bg = toast_bg(t);
+	line_height = font->ascent + font->descent;
 
 	/* Clear background */
-	XftDrawRect(t->draw, &notif.bg, 0, 0, t->width, t->height);
+	XftDrawRect(t->draw, bg, 0, 0, t->width, t->height);
 
 	/* Draw each line */
 	tx = notif_padding + notif_border_width;
-	ty = notif_padding + notif_border_width + notif.font->ascent;
+	ty = notif_padding + notif_border_width + font->ascent;
 
 	for (i = 0; i < t->nlines; i++) {
-		XftDrawStringUtf8(t->draw, &notif.fg, notif.font, tx, ty,
+		XftDrawStringUtf8(t->draw, fg, font, tx, ty,
 		                  (const FcChar8 *)(t->msg + t->line_off[i]),
 		                  t->line_len[i]);
 		ty += line_height;
@@ -322,7 +456,7 @@ notif_debug_dump(const char *context)
 	for (i = 0; i < notif.count; i++) {
 		NotifToast *t = &notif.toasts[i];
 		elapsed = TIMEDIFF(now, t->show_time);
-		remaining = (int)(notif_display_ms - elapsed);
+		remaining = (int)(toast_timeout(t) - elapsed);
 		fprintf(stderr, "notif:   [%d] \"%s\" (%dx%d, %d lines, %dms remaining, y=%d)\n",
 		        i, t->msg, t->width, t->height, t->nlines, remaining,
 		        notif_toast_y(i));
@@ -350,7 +484,7 @@ notif_check_timeout(struct timespec *now)
 	/* Iterate from end to start so removal doesn't affect lower indices */
 	for (i = notif.count - 1; i >= 0; i--) {
 		elapsed = TIMEDIFF((*now), notif.toasts[i].show_time);
-		remaining = (int)(notif_display_ms - elapsed);
+		remaining = (int)(toast_timeout(&notif.toasts[i]) - elapsed);
 		if (remaining <= 0) {
 			notif_remove_toast(i);
 		} else {
@@ -369,6 +503,8 @@ notif_show(const char *msg)
 	XGlyphInfo extents;
 	XSetWindowAttributes attrs;
 	XGCValues gcvalues;
+	XftFont *font;
+	const char *msg_body;
 	int x, y, i, line_height, max_width;
 
 	/* Load shared resources if needed */
@@ -388,17 +524,22 @@ notif_show(const char *msg)
 	/* Initialize the new toast at index 0 */
 	t = &notif.toasts[0];
 	memset(t, 0, sizeof(NotifToast));
-	strncpy(t->msg, msg, sizeof(t->msg) - 1);
+
+	/* Parse per-toast options from metadata header (if any) */
+	notif_parse_opts(t, msg, &msg_body);
+
+	strncpy(t->msg, msg_body, sizeof(t->msg) - 1);
 	t->msg[sizeof(t->msg) - 1] = '\0';
 
 	/* Parse into lines */
 	notif_parse_lines(t);
 
-	/* Measure text - find widest line */
-	line_height = notif.font->ascent + notif.font->descent;
+	/* Measure text - find widest line (use per-toast font if set) */
+	font = toast_font(t);
+	line_height = font->ascent + font->descent;
 	max_width = 0;
 	for (i = 0; i < t->nlines; i++) {
-		XftTextExtentsUtf8(xw.dpy, notif.font,
+		XftTextExtentsUtf8(xw.dpy, font,
 		                   (const FcChar8 *)(t->msg + t->line_off[i]),
 		                   t->line_len[i], &extents);
 		if (extents.xOff > max_width)
@@ -413,8 +554,8 @@ notif_show(const char *msg)
 	y = notif_toast_y(0);
 
 	/* Create X resources for this toast */
-	attrs.background_pixel = notif.bg.pixel;
-	attrs.border_pixel = notif.border.pixel;
+	attrs.background_pixel = toast_bg(t)->pixel;
+	attrs.border_pixel = toast_border(t)->pixel;
 	attrs.override_redirect = True;
 	attrs.event_mask = ExposureMask;
 	attrs.colormap = xw.cmap;

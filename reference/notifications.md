@@ -9,10 +9,37 @@ This is a purely external interface — unlike the SSH indicator (which uses OSC
 ### Via the `st-notify` script
 
 ```bash
-st-notify <st-pid> "Your message here"
+st-notify [options] <st-pid> "Your message here"
 ```
 
-The script finds the X window belonging to the given PID using `xdotool search --pid`, then sets the `_ST_NOTIFY` property using `xprop`. Requires `xdotool` and `xprop` to be installed.
+Options:
+
+| Option | Short | Argument | Description |
+|--------|-------|----------|-------------|
+| `--timeout` | `-t` | `<ms>` | Auto-dismiss timeout in milliseconds (default: 5000) |
+| `--border` | `-b` | `<hex>` | Border color, e.g. `"#ff0000"` |
+| `--background` | `-bg` | `<hex>` | Background color |
+| `--foreground` | `-fg` | `<hex>` | Foreground/text color |
+| `--textsize` | `-ts` | `<int>` | Font pixel size (window auto-fits to text) |
+| `--help` | `-h` | | Show usage help |
+
+Examples:
+
+```bash
+# Basic notification
+st-notify $$ "Hello world"
+
+# Red border, 10-second timeout
+st-notify -t 10000 -b "#ff0000" $$ "Error occurred"
+
+# Large green text
+st-notify -ts 24 -fg "#00ff00" $$ "Big green text"
+
+# Custom colors
+st-notify -fg "#ffffff" -bg "#660000" -b "#ff4444" $$ "Alert!"
+```
+
+The script finds the X window belonging to the given PID using `xdotool search --pid`, then sets the `_ST_NOTIFY` property using `xprop`. When options are provided, they are encoded as a metadata header in the property value (see [Wire Protocol](#per-toast-override-wire-protocol) below). Requires `xdotool` and `xprop` to be installed.
 
 ### Via `xprop` directly
 
@@ -56,9 +83,11 @@ New notifications do **not** replace the current one. Instead:
 - Maximum `NOTIF_MAX_TOASTS` (8) toasts can be stacked simultaneously
 - If a new notification arrives at max capacity, the oldest toast is evicted
 
-### Shared resources
+### Shared resources and per-toast overrides
 
-The font and colors are loaded once when the first toast appears and freed when the last toast disappears. Each individual toast has its own X window, pixmap, XftDraw, and GC — completely independent of the main terminal's drawing context and of other toasts.
+The default font and colors are loaded once when the first toast appears and freed when the last toast disappears. Each individual toast has its own X window, pixmap, XftDraw, and GC — completely independent of the main terminal's drawing context and of other toasts.
+
+Toasts can optionally carry per-toast overrides for timeout, font size, and colors. When set, per-toast resources (custom `XftFont`, custom `XftColor` values) are allocated at show time and freed when that individual toast is dismissed. Toasts without overrides use the shared resources. The `pflags` bitmask (`NOTIF_PF_FG`, `NOTIF_PF_BG`, `NOTIF_PF_BORDER`, `NOTIF_PF_FONT`) tracks which overrides are active per toast.
 
 ### Multi-line rendering
 
@@ -77,7 +106,7 @@ Toasts stack vertically in the top-right corner. The Y position of each toast is
 
 ### Auto-dismiss timer
 
-On show, `clock_gettime(CLOCK_MONOTONIC)` records the timestamp for each toast. The main event loop in `run()` checks `notif_check_timeout()` each iteration. This function iterates all active toasts, removes any that have exceeded `notif_display_ms`, and returns the minimum remaining time across all toasts. The timeout participates in the `pselect()` calculation so st wakes up precisely when the next dismissal is due.
+On show, `clock_gettime(CLOCK_MONOTONIC)` records the timestamp for each toast. The main event loop in `run()` checks `notif_check_timeout()` each iteration. This function iterates all active toasts, removes any that have exceeded their timeout (per-toast `timeout_ms` if set, otherwise `notif_display_ms`), and returns the minimum remaining time across all toasts. The timeout participates in the `pselect()` calculation so st wakes up precisely when the next dismissal is due.
 
 ## Configuration
 
@@ -96,6 +125,47 @@ All configuration is in `notif.h` as `static const` variables (same pattern as `
 | `notif_toast_gap` | `6` | Vertical gap between stacked toasts in pixels |
 | `NOTIF_MAX_TOASTS` | `8` | Maximum simultaneous toasts (define) |
 | `NOTIF_MAX_LINES` | `16` | Maximum lines per toast message (define) |
+
+## Per-toast Override Wire Protocol
+
+When `st-notify` is called with options, it encodes them as a metadata header prepended to the message in the `_ST_NOTIFY` property value. The format uses ASCII control characters as separators:
+
+- `\x1f` (Unit Separator, ASCII 31) — separates key=value pairs
+- `\x1e` (Record Separator, ASCII 30) — separates metadata header from message body
+
+Format: `key=val\x1fkey=val\x1f\x1emessage body`
+
+If no `\x1e` is present, the entire property value is treated as the plain message (backward compatible).
+
+### Metadata keys
+
+| Key | Description | Example |
+|-----|-------------|---------|
+| `t` | Timeout in ms | `t=10000` |
+| `b` | Border color (hex) | `b=#ff0000` |
+| `bg` | Background color (hex) | `bg=#000000` |
+| `fg` | Foreground color (hex) | `fg=#ffffff` |
+| `ts` | Font pixel size | `ts=24` |
+
+### Example property values
+
+```
+# Plain message (no metadata)
+Hello world
+
+# With 10-second timeout
+t=10000\x1f\x1eHello world
+
+# With custom colors and timeout
+t=3000\x1ffg=#ff0000\x1fbg=#000000\x1f\x1eError!
+
+# With custom text size
+ts=24\x1f\x1eBig text
+```
+
+### Window auto-sizing with textsize
+
+When `--textsize` (`ts=`) is specified, a per-toast font is opened at the given pixel size. The toast window dimensions are calculated **after** the font is loaded, so `XftTextExtentsUtf8()` measures using the actual custom font. The window automatically fits the text plus `notif_padding` (8px) and `notif_border_width` (2px) — no oversized windows for small text and no clipping for large text.
 
 ## Debug Mode
 
@@ -137,19 +207,24 @@ This shows:
 
 | Item | Description |
 |------|-------------|
-| `NotifToast` typedef | Per-toast state: active, msg, line offsets/lengths, X resources, dimensions, show_time |
+| `NotifToast` typedef | Per-toast state: active, msg, line offsets/lengths, X resources, dimensions, show_time, per-toast overrides (timeout_ms, pfont, pfg/pbg/pborder, pflags) |
 | `notif` static struct | Stack state: array of toasts, count, shared font and colors |
+| `NOTIF_PF_*` defines | Bitmask flags for per-toast overrides: `NOTIF_PF_FG` (1), `NOTIF_PF_BG` (2), `NOTIF_PF_BORDER` (4), `NOTIF_PF_FONT` (8) |
+| `NOTIF_META_SEP` / `NOTIF_META_DELIM` | Wire protocol separators: `\x1e` (metadata/message) and `\x1f` (between key=value pairs) |
+| `toast_font()` / `toast_fg()` / `toast_bg()` / `toast_border()` / `toast_timeout()` | Per-toast accessors: return override if set, else shared default |
+| `notif_open_font_at_size()` | Opens an XftFont at a specific pixel size (used by shared font loading and per-toast textsize) |
+| `notif_parse_opts()` | Parses metadata header from property value, sets per-toast overrides on the toast struct |
 | `notif_toast_y()` | Calculates Y position for toast at given stack index |
 | `notif_parse_lines()` | Splits message on newlines, stores offsets and lengths |
-| `notif_load_shared()` | Loads font and colors on first toast |
+| `notif_load_shared()` | Loads shared font (via `notif_open_font_at_size`) and colors on first toast |
 | `notif_free_shared()` | Frees font and colors when last toast dismissed |
-| `notif_destroy_toast()` | Destroys per-toast X resources (window, pixmap, draw, GC) |
+| `notif_destroy_toast()` | Destroys per-toast X resources (window, pixmap, draw, GC) and per-toast overrides (custom font, custom colors) |
 | `notif_draw_toast()` | Renders a single toast: clears bg, draws each line, copies to window |
 | `notif_remove_toast()` | Destroys toast at index, shifts array, repositions remaining |
 | `notif_debug_dump()` | Logs full stack state (positions, remaining times) in debug mode |
 | `notif_active()` | Returns `notif.count > 0` |
 | `notif_check_timeout()` | Iterates from end to start, removes expired, returns min remaining |
-| `notif_show()` | Loads shared resources, evicts oldest if full, shifts stack, creates new toast at index 0, repositions existing toasts |
+| `notif_show()` | Parses metadata header, loads shared resources, evicts oldest if full, shifts stack, creates new toast at index 0 with per-toast overrides, repositions existing toasts |
 | `notif_hide()` | Destroys all toasts, frees shared resources |
 | `notif_draw()` | Iterates all toasts, calls `notif_draw_toast()` |
 | `notif_resize()` | Repositions all toasts based on new window dimensions |
@@ -165,12 +240,14 @@ This shows:
 
 ### scripts/st-notify
 
-| Line | Description |
-|------|-------------|
-| 5-6 | Parses `pid` and `msg` arguments |
-| 8-11 | Usage error if either argument missing |
-| 14 | `xdotool search --pid "$pid"` to find the X window ID for the given PID |
-| 22 | `xprop -id "$wid" -f _ST_NOTIFY 8u -set _ST_NOTIFY "$msg"` to set the property as a UTF-8 string |
+| Section | Description |
+|---------|-------------|
+| `usage()` | Prints help with all options and examples |
+| Option parsing loop | Parses `--timeout/-t`, `--border/-b`, `--background/-bg`, `--foreground/-fg`, `--textsize/-ts`, `--help/-h`; builds metadata string with `\x1f` delimiters |
+| Positional args | Parses `pid` and `msg` after options |
+| Window lookup | `xdotool search --pid "$pid"` to find the X window ID |
+| Property value build | If options present: prepends `metadata\x1e` to message; otherwise plain message |
+| Property set | `xprop -id "$wid" -f _ST_NOTIFY 8u -set _ST_NOTIFY "$val"` |
 
 ### tests/test_notif.c
 
@@ -189,6 +266,13 @@ This shows:
 | `notif_max_evicts_oldest` | At max capacity, oldest toast evicted |
 | `notif_multiline_height` | Multi-line message gets correct line count and height |
 | `notif_expired_middle_reposition` | Middle toast expired, remaining repositioned |
+| `notif_no_metadata_plain_msg` | Plain message without metadata header (backward compatible) |
+| `notif_custom_timeout` | Custom timeout parsed; respects per-toast expiry |
+| `notif_custom_colors_pflags` | Custom fg/bg/border colors set pflags correctly |
+| `notif_custom_textsize_font` | Custom textsize opens per-toast font (2 fonts total) |
+| `notif_pertost_resources_freed` | Per-toast font and colors freed on hide |
+| `notif_multiple_opts_combined` | Multiple options combined in one notification |
+| `notif_timeout_only_no_flags` | Timeout-only metadata sets no color/font flags |
 
 ## Flow
 
@@ -205,8 +289,10 @@ st's X event loop (run() in x.c)
     → notif_load_shared() loads font/colors if first toast
     → If at max capacity, notif_remove_toast(count-1) evicts oldest
     → Shifts existing toasts down by one index
+    → notif_parse_opts() extracts per-toast overrides from metadata header (if any)
+    → Copies message body (after metadata) into toast
     → Parses message into lines (splits on '\n')
-    → Measures widest line, calculates toast dimensions
+    → Measures widest line using per-toast font (or shared), calculates toast dimensions
     → Creates X window, pixmap, XftDraw, GC at top-right position
     → Records show_time, marks active
     → Repositions all existing toasts (pushed down)
@@ -222,7 +308,7 @@ run() main loop iteration:
   → notif_active() returns 1 (count > 0)
   → notif_check_timeout(&now):
     → Iterates toasts from end to start
-    → For each: computes remaining = notif_display_ms - elapsed
+    → For each: computes remaining = toast_timeout() - elapsed (per-toast or default)
     → If remaining <= 0: notif_remove_toast(i)
       → Destroys toast's X resources
       → Shifts array, repositions remaining toasts
@@ -260,6 +346,13 @@ ConfigureNotify event
 | `Pixmap` (double buffer) | `XCreatePixmap` in `notif_show()` | `XFreePixmap` in `notif_destroy_toast()` |
 | `XftDraw` | `XftDrawCreate` in `notif_show()` | `XftDrawDestroy` in `notif_destroy_toast()` |
 | `GC` | `XCreateGC` in `notif_show()` | `XFreeGC` in `notif_destroy_toast()` |
+
+### Per-toast override resources (only when options are specified)
+
+| Resource | Created by | Destroyed by |
+|----------|-----------|--------------|
+| `XftFont` (custom textsize) | `notif_open_font_at_size()` in `notif_parse_opts()` | `XftFontClose` in `notif_destroy_toast()` (if `NOTIF_PF_FONT` set) |
+| `XftColor` fg/bg/border | `XftColorAllocName` in `notif_parse_opts()` | `XftColorFree` in `notif_destroy_toast()` (if `NOTIF_PF_FG`/`BG`/`BORDER` set) |
 
 Each toast window is created with `override_redirect = True` so the window manager does not manage it. The `CWColormap` flag is passed explicitly to avoid `BadMatch` errors.
 
