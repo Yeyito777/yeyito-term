@@ -1962,6 +1962,28 @@ kpress(XEvent *ev)
 		 * Zsh will send vim-mode;exit when it leaves vicmd mode. */
 	}
 
+	/* Ctrl+number row: type special chars in shell, F-key seqs in alt screen */
+	if (!tisaltscreen() && (e->state & ControlMask)) {
+		const char *insert = NULL;
+		switch (ksym) {
+		case XK_1: insert = "\xe2\x86\x90"; break; /* ← (F14) */
+		case XK_2: insert = "\xe2\x80\xa2"; break; /* • (F15) */
+		case XK_3: insert = "\xe2\x86\x92"; break; /* → (F16) */
+		case XK_4: insert = "<F17>"; break;
+		case XK_5: insert = "<F18>"; break;
+		case XK_6: insert = "<F19>"; break;
+		case XK_7: insert = "<F20>"; break;
+		case XK_8: insert = "<F21>"; break;
+		case XK_9: insert = "\xe2\x80\xa6"; break; /* … (F22) */
+		case XK_0: insert = "\xe2\x80\x93"; break; /* – (F23) */
+		case XK_minus: insert = "\xe2\x80\x94"; break; /* — (F24) */
+		}
+		if (insert) {
+			ttywrite(insert, strlen(insert), 1);
+			return;
+		}
+	}
+
 	/* 1. shortcuts */
 	for (bp = shortcuts; bp < shortcuts + LEN(shortcuts); bp++) {
 		if (ksym == bp->keysym && match(bp->mod, e->state)) {

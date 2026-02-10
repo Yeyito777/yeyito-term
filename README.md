@@ -94,3 +94,32 @@ ssh() {
   return $ret
 }
 ```
+
+## Ctrl+Number Row (Function Keys)
+
+Ctrl+1 through Ctrl+- are mapped to F14-F24 escape sequences. Behavior depends on context:
+
+| Key | Nav Mode | Shell (insert mode) | Alt Screen (neovim etc.) |
+|-----|----------|---------------------|--------------------------|
+| Ctrl+1 | 0% screen | ← | F14 |
+| Ctrl+2 | 10% screen | • | F15 |
+| Ctrl+3 | 20% screen | → | F16 |
+| Ctrl+4 | 30% screen | \<F17\> | F17 |
+| Ctrl+5 | 40% screen | \<F18\> | F18 |
+| Ctrl+6 | 50% screen | \<F19\> | F19 |
+| Ctrl+7 | 60% screen | \<F20\> | F20 |
+| Ctrl+8 | 70% screen | \<F21\> | F21 |
+| Ctrl+9 | 80% screen | … | F22 |
+| Ctrl+0 | 90% screen | – | F23 |
+| Ctrl+- | 100% screen | — | F24 |
+
+In alt screen programs like neovim, the F-key sequences can be bound. Example neovim config:
+
+```lua
+vim.keymap.set("i", "<F14>", "←", { desc = "Insert left arrow" })
+vim.keymap.set("i", "<F15>", "•", { desc = "Insert bullet point" })
+vim.keymap.set("i", "<F16>", "→", { desc = "Insert right arrow" })
+vim.keymap.set("i", "<F22>", "…", { desc = "Insert ellipsis" })
+vim.keymap.set("i", "<F23>", "–", { desc = "Insert en dash" })
+vim.keymap.set("i", "<F24>", "—", { desc = "Insert em dash" })
+```
