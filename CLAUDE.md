@@ -3,6 +3,15 @@ This fork coordinates with zsh through .zshrc to be able to do a lot of its oper
 You can check the zsh config required for many of the features in this terminal to work in: README.md.
 Make sure to modify the required zsh config in README.md if you make a change that needs a change in it.
 
+## REFERENCE DOCS
+
+| When user mentions... | Read this first |
+|-----------------------|-----------------|
+| **line highlight**, cursor line, curline, nav highlight | `reference/line-highlight.md` |
+| **forced nav mode**, Shift+Escape, TUI navigation, alt screen nav | `reference/forced-nav-mode.md` |
+| **debug mode**, `-d` flag, prompt overlay, prompt highlight | `reference/debug-mode.md` |
+| **Ctrl+number**, function keys, F14-F24, screen percentage, Unicode insert | `reference/function-keys.md` |
+
 ## CODE ORGANIZATION
 - st.c/st.h - Core terminal functionality
 - x.c - X11 windowing
