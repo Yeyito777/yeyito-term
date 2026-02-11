@@ -3071,7 +3071,7 @@ TEST(vimnav_open_brace_jumps_to_prev_prompt)
 
 	ASSERT_EQ(1, handled);
 	ASSERT_EQ(10, vimnav.y);  /* Jumped to "$ echo hello" */
-	ASSERT_EQ(0, vimnav.x);
+	ASSERT_EQ(3, vimnav.x);  /* savedx preserved */
 
 	vimnav_exit();
 	mock_term_free();
@@ -3130,7 +3130,7 @@ TEST(vimnav_open_brace_from_prompt_to_prev_prompt)
 
 	ASSERT_EQ(1, handled);
 	ASSERT_EQ(3, vimnav.y);  /* Jumped to "$ first" */
-	ASSERT_EQ(0, vimnav.x);
+	ASSERT_EQ(3, vimnav.x);  /* savedx preserved */
 
 	vimnav_exit();
 	mock_term_free();
@@ -3182,7 +3182,7 @@ TEST(vimnav_open_brace_from_current_prompt)
 	int handled = vimnav_handle_key('{', 0);
 	ASSERT_EQ(1, handled);
 	ASSERT_EQ(10, vimnav.y);  /* Jumped to "$ old-cmd" */
-	ASSERT_EQ(0, vimnav.x);
+	ASSERT_EQ(2, vimnav.x);  /* savedx preserved from entry */
 
 	vimnav_exit();
 	mock_term_free();
@@ -3213,7 +3213,7 @@ TEST(vimnav_close_brace_jumps_to_next_prompt)
 
 	ASSERT_EQ(1, handled);
 	ASSERT_EQ(8, vimnav.y);  /* Jumped to "$ second" */
-	ASSERT_EQ(0, vimnav.x);
+	ASSERT_EQ(2, vimnav.x);  /* savedx preserved */
 
 	vimnav_exit();
 	mock_term_free();
@@ -3242,6 +3242,134 @@ TEST(vimnav_close_brace_no_next_prompt_goes_to_current)
 
 	ASSERT_EQ(1, handled);
 	ASSERT_EQ(20, vimnav.y);  /* Jumped to current prompt */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Regression: { should not match percentage values in command output as prompts.
+ * df -l output lines like "9% /" contain "% " which was falsely detected as a prompt. */
+TEST(vimnav_open_brace_ignores_percent_in_output)
+{
+	mock_term_init(24, 80);
+	mock_set_line(2, "[user@host dir]% df -l");
+	mock_set_line(3, "Filesystem     1K-blocks     Used Available Use% Mounted on");
+	mock_set_line(4, "/dev/sda1 959786032 77396696 833561128   9% /");
+	mock_set_line(5, "tmpfs    16384676    55572  16329104   1% /dev/shm");
+	mock_set_line(6, "/dev/sda2    523248   127700    395548  25% /boot");
+	mock_set_line(10, "[user@host dir]% ls");
+	mock_set_line(11, "file1.txt");
+	mock_set_line(20, "[user@host dir]% prompt");
+
+	term.c.x = 5;
+	term.c.y = 20;
+	term.scr = 0;
+	vimnav.zsh_cursor = 0;
+
+	vimnav_enter();
+	vimnav.y = 11;  /* On "file1.txt" output line */
+	vimnav.x = 3;
+	vimnav.savedx = 3;
+
+	int handled = vimnav_handle_key('{', 0);
+
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(10, vimnav.y);  /* Should jump to "% ls", NOT to df output lines */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Regression: } should not match percentage values in command output as prompts. */
+TEST(vimnav_close_brace_ignores_percent_in_output)
+{
+	mock_term_init(24, 80);
+	mock_set_line(2, "[user@host dir]% df -l");
+	mock_set_line(3, "Filesystem     1K-blocks     Used Available Use% Mounted on");
+	mock_set_line(4, "/dev/sda1 959786032 77396696 833561128   9% /");
+	mock_set_line(5, "tmpfs    16384676    55572  16329104   1% /dev/shm");
+	mock_set_line(6, "/dev/sda2    523248   127700    395548  25% /boot");
+	mock_set_line(10, "[user@host dir]% ls");
+	mock_set_line(11, "file1.txt");
+	mock_set_line(20, "[user@host dir]% prompt");
+
+	term.c.x = 5;
+	term.c.y = 20;
+	term.scr = 0;
+	vimnav.zsh_cursor = 0;
+
+	vimnav_enter();
+	vimnav.y = 2;  /* On "% df -l" prompt line */
+	vimnav.x = 0;
+	vimnav.savedx = 0;
+
+	int handled = vimnav_handle_key('}', 0);
+
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(10, vimnav.y);  /* Should jump to "% ls", NOT to df output lines */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Regression: { and } should preserve the cursor column (savedx). */
+TEST(vimnav_prompt_jump_preserves_savedx)
+{
+	mock_term_init(24, 80);
+	mock_set_line(3, "$ first-command");
+	mock_set_line(4, "output line here");
+	mock_set_line(8, "$ second-command");
+	mock_set_line(9, "more output");
+	mock_set_line(20, "% prompt");
+
+	term.c.x = 5;
+	term.c.y = 20;
+	term.scr = 0;
+	vimnav.zsh_cursor = 0;
+
+	vimnav_enter();
+	vimnav.y = 4;
+	vimnav.x = 10;
+	vimnav.savedx = 10;
+
+	/* { should preserve column 10 */
+	int handled = vimnav_handle_key('{', 0);
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(3, vimnav.y);
+	ASSERT_EQ(10, vimnav.x);  /* savedx=10, line "$ first-command" has len 15, so x=10 */
+
+	/* Now } should also preserve column 10 */
+	handled = vimnav_handle_key('}', 0);
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(8, vimnav.y);
+	ASSERT_EQ(10, vimnav.x);  /* savedx=10, line "$ second-command" has len 16, so x=10 */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Regression: { clamps savedx when target line is shorter than cursor column. */
+TEST(vimnav_prompt_jump_clamps_to_line_length)
+{
+	mock_term_init(24, 80);
+	mock_set_line(3, "$ ls");         /* length 4 */
+	mock_set_line(4, "a-very-long-output-line-here");
+	mock_set_line(20, "% prompt");
+
+	term.c.x = 5;
+	term.c.y = 20;
+	term.scr = 0;
+	vimnav.zsh_cursor = 0;
+
+	vimnav_enter();
+	vimnav.y = 4;
+	vimnav.x = 20;
+	vimnav.savedx = 20;
+
+	int handled = vimnav_handle_key('{', 0);
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(3, vimnav.y);
+	ASSERT_EQ(3, vimnav.x);  /* "$ ls" has len 4, so clamped to 3 (linelen-1) */
 
 	vimnav_exit();
 	mock_term_free();
@@ -3554,6 +3682,10 @@ TEST_SUITE(vimnav)
 	RUN_TEST(vimnav_open_brace_from_current_prompt);
 	RUN_TEST(vimnav_close_brace_jumps_to_next_prompt);
 	RUN_TEST(vimnav_close_brace_no_next_prompt_goes_to_current);
+	RUN_TEST(vimnav_open_brace_ignores_percent_in_output);
+	RUN_TEST(vimnav_close_brace_ignores_percent_in_output);
+	RUN_TEST(vimnav_prompt_jump_preserves_savedx);
+	RUN_TEST(vimnav_prompt_jump_clamps_to_line_length);
 
 	RUN_TEST(vimnav_ctrl_e_no_scroll_no_cursor_move);
 	RUN_TEST(vimnav_ctrl_y_no_scroll_no_cursor_move);

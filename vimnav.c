@@ -1182,15 +1182,19 @@ vimnav_move_prev_prompt(void)
 
 	/* No prompt found above. Move to top of reachable history (like gg). */
 	vimnav.y = 0;
-	vimnav.x = 0;
-	vimnav.savedx = 0;
+	{
+		int linelen = tlinelen(vimnav.y);
+		vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
+	}
 	tfulldirt();
 	goto handoff;
 
 found:
 	vimnav.y = y;
-	vimnav.x = 0;
-	vimnav.savedx = 0;
+	{
+		int linelen = tlinelen(vimnav.y);
+		vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
+	}
 	tfulldirt();
 
 handoff:
@@ -1244,8 +1248,10 @@ found:
 	}
 
 	vimnav.y = y;
-	vimnav.x = 0;
-	vimnav.savedx = 0;
+	{
+		int linelen = tlinelen(vimnav.y);
+		vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
+	}
 
 	/* If we landed in the current prompt space, sync to zsh cursor */
 	if (vimnav_is_prompt_space(vimnav.y))
@@ -1446,15 +1452,19 @@ vimnav_has_main_prompt(int screen_y)
 {
 	/* Check if this line has a main prompt (not a continuation prompt).
 	 * Main prompts typically have '% ' or '$ ' or '# ' at the start or after path.
-	 * Continuation prompts are just '> ' at the start. */
+	 * Continuation prompts are just '> ' at the start.
+	 * For '%', require it to be preceded by ']' or at position 0 to avoid
+	 * false positives from command output (e.g. "25% /" in df output). */
 	Line line = TLINE(screen_y);
 	int linelen = tlinelen(screen_y);
 
 	for (int i = 0; i < linelen && i + 1 < term.col; i++) {
 		Rune c = line[i].u;
 		Rune next = line[i + 1].u;
-		/* Main prompt delimiters (not >) */
-		if ((c == '%' || c == '$' || c == '#') && next == ' ') {
+		if (c == '%' && next == ' ' && (i == 0 || line[i - 1].u == ']')) {
+			return 1;
+		}
+		if ((c == '$' || c == '#') && next == ' ') {
 			return 1;
 		}
 	}
