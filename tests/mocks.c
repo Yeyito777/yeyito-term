@@ -245,7 +245,7 @@ selected(int x, int y)
 char *
 getsel(void)
 {
-	/* Return a simple string for testing */
+	/* Return a string matching real getsel() trailing newline behavior */
 	static char buf[256];
 	int y, x, len;
 
@@ -256,12 +256,15 @@ getsel(void)
 	for (y = sel.ob.y; y <= sel.oe.y && len < 255; y++) {
 		int startx = (y == sel.ob.y) ? sel.ob.x : 0;
 		int endx = (y == sel.oe.y) ? sel.oe.x : tlinelen(y) - 1;
+		int linelen = tlinelen(y);
 
-		for (x = startx; x <= endx && len < 255; x++) {
+		for (x = startx; x <= endx && x < linelen && len < 255; x++) {
 			if (term.line[y][x].u)
 				buf[len++] = term.line[y][x].u;
 		}
-		if (y < sel.oe.y && len < 255)
+		/* Match real getsel(): add \n if not last line, or if
+		 * selection extends past content (e.g. SNAP_LINE) */
+		if ((y < sel.oe.y || endx >= linelen) && len < 255)
 			buf[len++] = '\n';
 	}
 	buf[len] = '\0';

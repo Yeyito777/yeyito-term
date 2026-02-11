@@ -3711,6 +3711,109 @@ TEST(prompt_range_scrolled_mid_screen)
 	mock_term_free();
 }
 
+/* === Yank trailing newline tests === */
+
+/* Test: yy on history line does NOT include trailing newline */
+TEST(vimnav_yy_history_no_trailing_newline)
+{
+	mock_term_init(24, 80);
+	mock_set_line(9, "hello world");
+	mock_set_line(23, "% prompt");
+
+	term.c.x = 5;
+	term.c.y = 23;
+	term.scr = 0;
+	vimnav.zsh_cursor = 0;
+
+	vimnav_enter();
+
+	/* Move cursor to history line (not prompt) */
+	vimnav.x = 0;
+	vimnav.y = 9;
+
+	/* Single 'y' in normal mode with no selection calls vimnav_yank_line() */
+	mock_reset();
+	vimnav_handle_key('y', 0);
+
+	/* Should have yanked without trailing newline */
+	ASSERT(mock_state.xsetsel_calls > 0);
+	ASSERT_STR_EQ("hello world", mock_state.last_xsetsel);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: V+y on single line does NOT include trailing newline */
+TEST(vimnav_Vy_single_line_no_trailing_newline)
+{
+	mock_term_init(24, 80);
+	mock_set_line(9, "single line text");
+	mock_set_line(23, "% prompt");
+
+	term.c.x = 5;
+	term.c.y = 23;
+	term.scr = 0;
+	vimnav.zsh_cursor = 0;
+
+	vimnav_enter();
+
+	/* Move cursor to history line */
+	vimnav.x = 0;
+	vimnav.y = 9;
+
+	/* Press V to enter visual line, then y to yank */
+	mock_reset();
+	vimnav_handle_key('V', 1);  /* 1 = ShiftMask */
+	vimnav_handle_key('y', 0);
+
+	/* Should have yanked without trailing newline */
+	ASSERT(mock_state.xsetsel_calls > 0);
+	ASSERT_STR_EQ("single line text", mock_state.last_xsetsel);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: V+jy on multiple lines DOES keep newlines */
+TEST(vimnav_Vjy_multi_line_keeps_newlines)
+{
+	mock_term_init(24, 80);
+	mock_set_line(9, "first line");
+	mock_set_line(10, "second line");
+	mock_set_line(23, "% prompt");
+
+	term.c.x = 5;
+	term.c.y = 23;
+	term.scr = 0;
+	vimnav.zsh_cursor = 0;
+
+	vimnav_enter();
+
+	/* Move cursor to history line */
+	vimnav.x = 0;
+	vimnav.y = 9;
+
+	/* V, j, y to yank two lines */
+	mock_reset();
+	vimnav_handle_key('V', 1);  /* 1 = ShiftMask */
+	vimnav_handle_key('j', 0);
+	vimnav_handle_key('y', 0);
+
+	/* Multi-line should keep newlines */
+	ASSERT(mock_state.xsetsel_calls > 0);
+	ASSERT_STR_EQ("first line\nsecond line\n", mock_state.last_xsetsel);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+TEST_SUITE(yank_newline)
+{
+	RUN_TEST(vimnav_yy_history_no_trailing_newline);
+	RUN_TEST(vimnav_Vy_single_line_no_trailing_newline);
+	RUN_TEST(vimnav_Vjy_multi_line_keeps_newlines);
+}
+
 TEST_SUITE(prompt_range)
 {
 	RUN_TEST(prompt_range_at_bottom);
@@ -3729,6 +3832,7 @@ main(void)
 	printf("========================================\n");
 
 	RUN_SUITE(vimnav);
+	RUN_SUITE(yank_newline);
 	RUN_SUITE(prompt_range);
 
 	return test_summary();

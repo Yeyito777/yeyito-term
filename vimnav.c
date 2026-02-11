@@ -1,4 +1,5 @@
 /* See LICENSE for license details. */
+#include <string.h>
 #include <wchar.h>
 #include <wctype.h>
 
@@ -1395,11 +1396,25 @@ vimnav_paste_done(void)
 	}
 }
 
+/* Strip trailing newline from single-line text (character-wise copy) */
+static void
+yank_strip_trailing_newline(char *text)
+{
+	size_t len;
+
+	if (!text)
+		return;
+	len = strlen(text);
+	if (len > 0 && text[len - 1] == '\n' && !memchr(text, '\n', len - 1))
+		text[len - 1] = '\0';
+}
+
 static void
 vimnav_yank_selection(void)
 {
 	char *text = getsel();
 	if (text) {
+		yank_strip_trailing_newline(text);
 		xsetsel(text);
 		xclipcopy();
 	}
@@ -1517,6 +1532,7 @@ vimnav_yank_line(void)
 
 	char *text = getsel();
 	if (text) {
+		yank_strip_trailing_newline(text);
 		xsetsel(text);
 		xclipcopy();
 	}
