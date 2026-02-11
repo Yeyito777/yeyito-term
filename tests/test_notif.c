@@ -722,6 +722,429 @@ TEST(notif_timeout_only_no_flags)
 	notif_hide();
 }
 
+/* --- Timing-focused tests --- */
+
+/* Helper: set a toast's show_time to exactly `ms_ago` milliseconds in the past */
+static void
+set_elapsed_ms(NotifToast *t, struct timespec *now, int ms_ago)
+{
+	long sec = ms_ago / 1000;
+	long ns = (ms_ago % 1000) * 1000000L;
+
+	t->show_time.tv_sec = now->tv_sec - sec;
+	t->show_time.tv_nsec = now->tv_nsec - ns;
+	if (t->show_time.tv_nsec < 0) {
+		t->show_time.tv_sec--;
+		t->show_time.tv_nsec += 1000000000L;
+	}
+}
+
+/* Test: toast at 1ms before default timeout stays alive */
+TEST(notif_timeout_1ms_before_default_stays)
+{
+	struct timespec now;
+	int remaining;
+	init_mock_xwindow();
+
+	notif_show("early check");
+	clock_gettime(CLOCK_MONOTONIC, &now);
+
+	/* 4999ms elapsed out of 5000ms default timeout */
+	set_elapsed_ms(&notif.toasts[0], &now, 4999);
+
+	remaining = notif_check_timeout(&now);
+	ASSERT_EQ(1, notif.count);
+	ASSERT(remaining > 0);
+
+	notif_hide();
+}
+
+/* Test: toast at 1ms after default timeout is removed */
+TEST(notif_timeout_1ms_after_default_removed)
+{
+	struct timespec now;
+	int remaining;
+	init_mock_xwindow();
+
+	notif_show("late check");
+	clock_gettime(CLOCK_MONOTONIC, &now);
+
+	/* 5001ms elapsed out of 5000ms default timeout */
+	set_elapsed_ms(&notif.toasts[0], &now, 5001);
+
+	remaining = notif_check_timeout(&now);
+	ASSERT_EQ(0, notif.count);
+	ASSERT(remaining < 0);
+}
+
+/* Test: toast at exactly the default timeout boundary is removed */
+TEST(notif_timeout_exact_boundary_removed)
+{
+	struct timespec now;
+	int remaining;
+	init_mock_xwindow();
+
+	notif_show("exact boundary");
+	clock_gettime(CLOCK_MONOTONIC, &now);
+
+	/* Exactly 5000ms elapsed = 5000ms timeout */
+	set_elapsed_ms(&notif.toasts[0], &now, 5000);
+
+	remaining = notif_check_timeout(&now);
+	ASSERT_EQ(0, notif.count);
+	ASSERT(remaining < 0);
+}
+
+/* Test: custom timeout at 1ms before stays alive */
+TEST(notif_custom_timeout_1ms_before_stays)
+{
+	struct timespec now;
+	int remaining;
+	init_mock_xwindow();
+
+	notif_show("t=3000\x1f" "\x1e" "custom timing");
+	clock_gettime(CLOCK_MONOTONIC, &now);
+
+	/* 2999ms elapsed out of 3000ms custom timeout */
+	set_elapsed_ms(&notif.toasts[0], &now, 2999);
+
+	remaining = notif_check_timeout(&now);
+	ASSERT_EQ(1, notif.count);
+	ASSERT(remaining > 0);
+
+	notif_hide();
+}
+
+/* Test: custom timeout at 1ms after is removed */
+TEST(notif_custom_timeout_1ms_after_removed)
+{
+	struct timespec now;
+	int remaining;
+	init_mock_xwindow();
+
+	notif_show("t=3000\x1f" "\x1e" "custom timing");
+	clock_gettime(CLOCK_MONOTONIC, &now);
+
+	/* 3001ms elapsed out of 3000ms custom timeout */
+	set_elapsed_ms(&notif.toasts[0], &now, 3001);
+
+	remaining = notif_check_timeout(&now);
+	ASSERT_EQ(0, notif.count);
+	ASSERT(remaining < 0);
+}
+
+/* Test: custom timeout at exact boundary is removed */
+TEST(notif_custom_timeout_exact_boundary)
+{
+	struct timespec now;
+	int remaining;
+	init_mock_xwindow();
+
+	notif_show("t=2000\x1f" "\x1e" "exact custom");
+	clock_gettime(CLOCK_MONOTONIC, &now);
+
+	/* Exactly 2000ms elapsed = 2000ms custom timeout */
+	set_elapsed_ms(&notif.toasts[0], &now, 2000);
+
+	remaining = notif_check_timeout(&now);
+	ASSERT_EQ(0, notif.count);
+}
+
+/* Test: toast at half its timeout has correct remaining time */
+TEST(notif_timeout_remaining_value_accuracy)
+{
+	struct timespec now;
+	int remaining;
+	init_mock_xwindow();
+
+	notif_show("t=4000\x1f" "\x1e" "measure remaining");
+	clock_gettime(CLOCK_MONOTONIC, &now);
+
+	/* 1000ms elapsed out of 4000ms custom timeout */
+	set_elapsed_ms(&notif.toasts[0], &now, 1000);
+
+	remaining = notif_check_timeout(&now);
+	ASSERT_EQ(1, notif.count);
+	ASSERT_EQ(3000, remaining);
+
+	notif_hide();
+}
+
+/* Test: mixed default and custom timeouts expire independently */
+TEST(notif_mixed_timeouts_independent)
+{
+	struct timespec now;
+	int remaining;
+	init_mock_xwindow();
+
+	/* Toast A: default 5000ms timeout (shown first, ends up at index 1) */
+	notif_show("default timeout");
+	/* Toast B: custom 2000ms timeout (shown second, at index 0) */
+	notif_show("t=2000\x1f" "\x1e" "short timeout");
+
+	ASSERT_EQ(2, notif.count);
+	ASSERT_STR_EQ("short timeout", notif.toasts[0].msg);
+	ASSERT_STR_EQ("default timeout", notif.toasts[1].msg);
+
+	clock_gettime(CLOCK_MONOTONIC, &now);
+
+	/* Set both to 2500ms elapsed:
+	 * Toast B (2000ms timeout) should expire
+	 * Toast A (5000ms timeout) should survive */
+	set_elapsed_ms(&notif.toasts[0], &now, 2500);
+	set_elapsed_ms(&notif.toasts[1], &now, 2500);
+
+	remaining = notif_check_timeout(&now);
+
+	ASSERT_EQ(1, notif.count);
+	/* The surviving toast should be the default timeout one */
+	ASSERT_STR_EQ("default timeout", notif.toasts[0].msg);
+	/* Remaining should be ~2500ms */
+	ASSERT_EQ(2500, remaining);
+
+	notif_hide();
+}
+
+/* Test: short custom timeout doesn't kill long custom timeout */
+TEST(notif_two_custom_timeouts_independent)
+{
+	struct timespec now;
+	int remaining;
+	init_mock_xwindow();
+
+	/* Long timeout at index 1 */
+	notif_show("t=10000\x1f" "\x1e" "long one");
+	/* Short timeout at index 0 */
+	notif_show("t=1000\x1f" "\x1e" "short one");
+
+	ASSERT_EQ(2, notif.count);
+
+	clock_gettime(CLOCK_MONOTONIC, &now);
+
+	/* 1500ms elapsed: short (1000ms) expired, long (10000ms) alive */
+	set_elapsed_ms(&notif.toasts[0], &now, 1500);
+	set_elapsed_ms(&notif.toasts[1], &now, 1500);
+
+	remaining = notif_check_timeout(&now);
+
+	ASSERT_EQ(1, notif.count);
+	ASSERT_STR_EQ("long one", notif.toasts[0].msg);
+	ASSERT_EQ(8500, remaining);
+
+	notif_hide();
+}
+
+/* Test: default timeout toast not affected by custom-timeout neighbor */
+TEST(notif_default_unaffected_by_custom_neighbor)
+{
+	struct timespec now;
+	int remaining;
+	init_mock_xwindow();
+
+	/* Default timeout (5000ms) at index 1 */
+	notif_show("uses default");
+	/* Custom 500ms timeout at index 0 */
+	notif_show("t=500\x1f" "\x1e" "quick flash");
+
+	ASSERT_EQ(2, notif.count);
+
+	clock_gettime(CLOCK_MONOTONIC, &now);
+
+	/* 600ms elapsed: custom (500ms) expired, default (5000ms) alive */
+	set_elapsed_ms(&notif.toasts[0], &now, 600);
+	set_elapsed_ms(&notif.toasts[1], &now, 600);
+
+	remaining = notif_check_timeout(&now);
+
+	ASSERT_EQ(1, notif.count);
+	ASSERT_STR_EQ("uses default", notif.toasts[0].msg);
+	ASSERT_EQ(4400, remaining);
+
+	notif_hide();
+}
+
+/* Test: three toasts, middle expires first (different custom timeouts) */
+TEST(notif_three_toasts_middle_expires_first)
+{
+	struct timespec now;
+	int remaining;
+	init_mock_xwindow();
+
+	/* Index 2: 5000ms default */
+	notif_show("oldest");
+	/* Index 1: 1000ms custom */
+	notif_show("t=1000\x1f" "\x1e" "middle short");
+	/* Index 0: 8000ms custom */
+	notif_show("t=8000\x1f" "\x1e" "newest long");
+
+	ASSERT_EQ(3, notif.count);
+
+	clock_gettime(CLOCK_MONOTONIC, &now);
+
+	/* 1500ms elapsed: only the middle (1000ms) should expire */
+	set_elapsed_ms(&notif.toasts[0], &now, 1500);
+	set_elapsed_ms(&notif.toasts[1], &now, 1500);
+	set_elapsed_ms(&notif.toasts[2], &now, 1500);
+
+	remaining = notif_check_timeout(&now);
+
+	ASSERT_EQ(2, notif.count);
+	ASSERT_STR_EQ("newest long", notif.toasts[0].msg);
+	ASSERT_STR_EQ("oldest", notif.toasts[1].msg);
+	/* Min remaining: oldest has 3500ms, newest has 6500ms => 3500 */
+	ASSERT_EQ(3500, remaining);
+
+	notif_hide();
+}
+
+/* Test: all three toasts expire when all past their timeouts */
+TEST(notif_all_three_expire)
+{
+	struct timespec now;
+	int remaining;
+	init_mock_xwindow();
+
+	notif_show("t=1000\x1f" "\x1e" "a");
+	notif_show("t=2000\x1f" "\x1e" "b");
+	notif_show("t=3000\x1f" "\x1e" "c");
+
+	ASSERT_EQ(3, notif.count);
+
+	clock_gettime(CLOCK_MONOTONIC, &now);
+
+	/* 3500ms elapsed: all three should expire */
+	set_elapsed_ms(&notif.toasts[0], &now, 3500);
+	set_elapsed_ms(&notif.toasts[1], &now, 3500);
+	set_elapsed_ms(&notif.toasts[2], &now, 3500);
+
+	remaining = notif_check_timeout(&now);
+
+	ASSERT_EQ(0, notif.count);
+	ASSERT(remaining < 0);
+}
+
+/* Test: successive timeout checks work correctly (simulated loop iterations) */
+TEST(notif_successive_timeout_checks)
+{
+	struct timespec now;
+	int remaining;
+	init_mock_xwindow();
+
+	/* "first" shown first -> ends up at index 1 after second show */
+	notif_show("t=2000\x1f" "\x1e" "first");
+	/* "second" shown second -> at index 0 */
+	notif_show("t=4000\x1f" "\x1e" "second");
+
+	ASSERT_EQ(2, notif.count);
+	/* Verify ordering: newest at index 0 */
+	ASSERT_STR_EQ("second", notif.toasts[0].msg);
+	ASSERT_STR_EQ("first", notif.toasts[1].msg);
+
+	clock_gettime(CLOCK_MONOTONIC, &now);
+
+	/* Iteration 1: 1000ms elapsed, both alive */
+	set_elapsed_ms(&notif.toasts[0], &now, 1000);
+	set_elapsed_ms(&notif.toasts[1], &now, 1000);
+	remaining = notif_check_timeout(&now);
+	ASSERT_EQ(2, notif.count);
+	ASSERT_EQ(1000, remaining);  /* min(3000, 1000) = 1000 */
+
+	/* Iteration 2: 2500ms elapsed, "first" (2000ms, index 1) expired */
+	set_elapsed_ms(&notif.toasts[0], &now, 2500);
+	set_elapsed_ms(&notif.toasts[1], &now, 2500);
+	remaining = notif_check_timeout(&now);
+	ASSERT_EQ(1, notif.count);
+	ASSERT_STR_EQ("second", notif.toasts[0].msg);
+	ASSERT_EQ(1500, remaining);  /* 4000 - 2500 */
+
+	/* Iteration 3: 4500ms elapsed, "second" (4000ms) also expired */
+	set_elapsed_ms(&notif.toasts[0], &now, 4500);
+	remaining = notif_check_timeout(&now);
+	ASSERT_EQ(0, notif.count);
+	ASSERT(remaining < 0);
+}
+
+/* Test: very short custom timeout (100ms) works */
+TEST(notif_very_short_timeout)
+{
+	struct timespec now;
+	int remaining;
+	init_mock_xwindow();
+
+	notif_show("t=100\x1f" "\x1e" "flash");
+	clock_gettime(CLOCK_MONOTONIC, &now);
+
+	/* 50ms elapsed - should be alive */
+	set_elapsed_ms(&notif.toasts[0], &now, 50);
+	remaining = notif_check_timeout(&now);
+	ASSERT_EQ(1, notif.count);
+	ASSERT_EQ(50, remaining);
+
+	/* 101ms elapsed - should be gone */
+	set_elapsed_ms(&notif.toasts[0], &now, 101);
+	remaining = notif_check_timeout(&now);
+	ASSERT_EQ(0, notif.count);
+}
+
+/* Test: very long custom timeout (60s) works */
+TEST(notif_very_long_timeout)
+{
+	struct timespec now;
+	int remaining;
+	init_mock_xwindow();
+
+	notif_show("t=60000\x1f" "\x1e" "long notification");
+	clock_gettime(CLOCK_MONOTONIC, &now);
+
+	/* 30 seconds elapsed - should be alive with 30s remaining */
+	set_elapsed_ms(&notif.toasts[0], &now, 30000);
+	remaining = notif_check_timeout(&now);
+	ASSERT_EQ(1, notif.count);
+	ASSERT_EQ(30000, remaining);
+
+	/* 59999ms elapsed - still alive, 1ms remaining */
+	set_elapsed_ms(&notif.toasts[0], &now, 59999);
+	remaining = notif_check_timeout(&now);
+	ASSERT_EQ(1, notif.count);
+	ASSERT_EQ(1, remaining);
+
+	/* 60001ms elapsed - expired */
+	set_elapsed_ms(&notif.toasts[0], &now, 60001);
+	remaining = notif_check_timeout(&now);
+	ASSERT_EQ(0, notif.count);
+}
+
+/* Test: toast_timeout accessor returns correct value */
+TEST(notif_toast_timeout_accessor)
+{
+	init_mock_xwindow();
+
+	/* Default timeout */
+	notif_show("plain");
+	ASSERT_EQ(notif_display_ms, toast_timeout(&notif.toasts[0]));
+	ASSERT_EQ(0, notif.toasts[0].timeout_ms);
+	notif_hide();
+
+	/* Custom timeout */
+	init_mock_xwindow();
+	notif_show("t=7777\x1f" "\x1e" "custom");
+	ASSERT_EQ(7777, toast_timeout(&notif.toasts[0]));
+	ASSERT_EQ(7777, notif.toasts[0].timeout_ms);
+	notif_hide();
+}
+
+/* Test: zero or negative custom timeout falls back to default */
+TEST(notif_zero_timeout_uses_default)
+{
+	init_mock_xwindow();
+
+	notif_show("t=0\x1f" "\x1e" "zero timeout");
+	/* timeout_ms <= 0 should use notif_display_ms */
+	ASSERT_EQ(notif_display_ms, toast_timeout(&notif.toasts[0]));
+
+	notif_hide();
+}
+
 /* Test suite */
 TEST_SUITE(notif)
 {
@@ -745,6 +1168,23 @@ TEST_SUITE(notif)
 	RUN_TEST(notif_pertost_resources_freed);
 	RUN_TEST(notif_multiple_opts_combined);
 	RUN_TEST(notif_timeout_only_no_flags);
+	RUN_TEST(notif_timeout_1ms_before_default_stays);
+	RUN_TEST(notif_timeout_1ms_after_default_removed);
+	RUN_TEST(notif_timeout_exact_boundary_removed);
+	RUN_TEST(notif_custom_timeout_1ms_before_stays);
+	RUN_TEST(notif_custom_timeout_1ms_after_removed);
+	RUN_TEST(notif_custom_timeout_exact_boundary);
+	RUN_TEST(notif_timeout_remaining_value_accuracy);
+	RUN_TEST(notif_mixed_timeouts_independent);
+	RUN_TEST(notif_two_custom_timeouts_independent);
+	RUN_TEST(notif_default_unaffected_by_custom_neighbor);
+	RUN_TEST(notif_three_toasts_middle_expires_first);
+	RUN_TEST(notif_all_three_expire);
+	RUN_TEST(notif_successive_timeout_checks);
+	RUN_TEST(notif_very_short_timeout);
+	RUN_TEST(notif_very_long_timeout);
+	RUN_TEST(notif_toast_timeout_accessor);
+	RUN_TEST(notif_zero_timeout_uses_default);
 }
 
 int
