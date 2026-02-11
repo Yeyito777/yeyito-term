@@ -213,6 +213,7 @@ static Shortcut shortcuts[] = {
 	{ TERMMOD,              XK_Num_Lock,    numlock,        {.i =  0} },
 	{ ShiftMask,            XK_Page_Up,     kscrollup,      {.i = -1} },
 	{ ShiftMask,            XK_Page_Down,   kscrolldown,    {.i = -1} },
+	{ XK_NO_MOD,            XK_Home,        ttysend,        {.s = "Consider what I just told you and tell me your thoughts. I need to know what you think: am I correct, incorrect? Is there something I'm missing? Anything not ironed out? Or is everything largely ok? Talk to me."} },
 };
 
 /*
