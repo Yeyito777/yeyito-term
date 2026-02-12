@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -184,10 +185,37 @@ persist_save_generic(void)
 	fclose(f);
 }
 
+static void
+persist_sweep_orphans(const char *stdir)
+{
+	DIR *d;
+	struct dirent *ent;
+	char path[PATH_MAX];
+	pid_t pid;
+
+	d = opendir(stdir);
+	if (!d)
+		return;
+	while ((ent = readdir(d))) {
+		if (strncmp(ent->d_name, "st-", 3) != 0)
+			continue;
+		pid = atoi(ent->d_name + 3);
+		if (pid <= 0)
+			continue;
+		/* kill(pid, 0) checks if process exists */
+		if (kill(pid, 0) == -1 && errno == ESRCH) {
+			snprintf(path, sizeof(path), "%s/%s", stdir, ent->d_name);
+			rmdir_recursive(path);
+		}
+	}
+	closedir(d);
+}
+
 void
 persist_init(pid_t pid)
 {
 	const char *home;
+	char stdir[PATH_MAX];
 	char logpath[PATH_MAX];
 	int logfd;
 
@@ -195,8 +223,11 @@ persist_init(pid_t pid)
 	if (!home)
 		home = "/tmp";
 
+	snprintf(stdir, sizeof(stdir), "%s/.runtime/st", home);
+	persist_sweep_orphans(stdir);
+
 	snprintf(persistdir, sizeof(persistdir),
-			"%s/.runtime/st/st-%d", home, (int)pid);
+			"%s/st-%d", stdir, (int)pid);
 	mkdirp(persistdir);
 
 	/* Redirect stderr to log.log */
