@@ -20,6 +20,7 @@ char *argv0;
 #include "arg.h"
 #include "st.h"
 #include "win.h"
+#include "persist.h"
 
 /* types used in config.h */
 typedef struct {
@@ -255,6 +256,7 @@ static char *opt_io    = NULL;
 static char *opt_line  = NULL;
 static char *opt_name  = NULL;
 static char *opt_title = NULL;
+static char *opt_fromsave = NULL;
 
 static uint buttons; /* bit field of pressed buttons */
 
@@ -1706,6 +1708,16 @@ xsetcwd(char *cwd)
 			PropModeReplace, (uchar *)cwd, strlen(cwd));
 }
 
+void
+xsetdwmsaveargv(const char *argv)
+{
+	Atom prop = XInternAtom(xw.dpy, "_DWM_SAVE_ARGV", False);
+	Atom utf8 = XInternAtom(xw.dpy, "UTF8_STRING", False);
+
+	XChangeProperty(xw.dpy, xw.win, prop, utf8, 8,
+			PropModeReplace, (const uchar *)argv, strlen(argv));
+}
+
 int
 xstartdraw(void)
 {
@@ -2097,7 +2109,9 @@ cmessage(XEvent *e)
 		}
 	} else if (e->xclient.data.l[0] == xw.wmdeletewin) {
 		ttyhangup();
-		exit(0);
+		persist_save();
+		persist_cleanup();
+		_exit(0);
 	}
 }
 
@@ -2110,6 +2124,14 @@ resize(XEvent *e)
 	cresize(e->xconfigure.width, e->xconfigure.height);
 	sshind_resize();
 	notif_resize();
+}
+
+static void
+sigterm(int sig)
+{
+	(void)sig;
+	persist_save();
+	_exit(0);
 }
 
 void
@@ -2141,6 +2163,7 @@ run(void)
 	ttyfd = ttynew(opt_line, shell, opt_io, opt_cmd);
 	cresize(w, h);
 
+	struct timespec lastpersist = {0};
 	for (timeout = -1, drawing = 0, lastblink = (struct timespec){0};;) {
 		FD_ZERO(&rfd);
 		FD_SET(ttyfd, &rfd);
@@ -2217,6 +2240,18 @@ run(void)
 			}
 		}
 
+		if (persist_active()) {
+			double persist_remain = persistinterval
+					- TIMEDIFF(now, lastpersist);
+			if (persist_remain <= 0) {
+				persist_save();
+				lastpersist = now;
+				persist_remain = persistinterval;
+			}
+			if (timeout < 0 || persist_remain < timeout)
+				timeout = persist_remain;
+		}
+
 		draw();
 		XFlush(xw.dpy);
 		drawing = 0;
@@ -2229,6 +2264,7 @@ usage(void)
 	die("usage: %s [-adiv] [-c class] [-f font] [-g geometry]"
 	    " [-n name] [-o file]\n"
 	    "          [-T title] [-t title] [-w windowid]"
+	    " [--from-save dir]"
 	    " [[-e] command [args ...]]\n"
 	    "       %s [-adiv] [-c class] [-f font] [-g geometry]"
 	    " [-n name] [-o file]\n"
@@ -2242,6 +2278,21 @@ main(int argc, char *argv[])
 	xw.l = xw.t = 0;
 	xw.isfixed = False;
 	xsetcursor(cursorshape);
+
+	/* Parse --from-save before ARGBEGIN (arg.h doesn't support long opts) */
+	{
+		int i;
+		for (i = 1; i < argc; i++) {
+			if (!strcmp("--from-save", argv[i]) && i + 1 < argc) {
+				opt_fromsave = argv[i + 1];
+				/* Shift remaining args to hide --from-save */
+				memmove(&argv[i], &argv[i + 2],
+						(argc - i - 2 + 1) * sizeof(char *));
+				argc -= 2;
+				break;
+			}
+		}
+	}
 
 	ARGBEGIN {
 	case 'a':
@@ -2302,8 +2353,13 @@ run:
 	cols = MAX(cols, 1);
 	rows = MAX(rows, 1);
 	tnew(cols, rows);
+	if (opt_fromsave)
+		persist_restore(opt_fromsave);
 	xinit(cols, rows);
 	xsetenv();
+	persist_init(getpid());
+	persist_register();
+	signal(SIGTERM, sigterm);
 	selinit();
 	run();
 

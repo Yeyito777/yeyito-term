@@ -65,6 +65,12 @@ static double maxlatency = 33;
 static unsigned int blinktimeout = 800;
 
 /*
+ * persist save interval in milliseconds.
+ * terminal state (scrollback, CWD) is saved to disk at this interval.
+ */
+static double persistinterval = 30000;
+
+/*
  * thickness of underline and bar cursors
  */
 static unsigned int cursorthickness = 2;

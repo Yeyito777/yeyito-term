@@ -4,7 +4,7 @@
 
 include config.mk
 
-SRC = st.c x.c vimnav.c sshind.c notif.c
+SRC = st.c x.c vimnav.c sshind.c notif.c persist.c
 OBJ = $(SRC:.c=.o)
 
 all: st
@@ -15,11 +15,12 @@ config.h:
 .c.o:
 	$(CC) $(STCFLAGS) -c $<
 
-st.o: config.h st.h win.h vimnav.h
-x.o: arg.h config.h st.h win.h sshind.h notif.h
+st.o: config.h st.h win.h vimnav.h persist.h
+x.o: arg.h config.h st.h win.h sshind.h notif.h persist.h
 vimnav.o: st.h vimnav.h
 sshind.o: sshind.h
 notif.o: sshind.h notif.h
+persist.o: st.h persist.h
 
 $(OBJ): config.h config.mk
 
@@ -34,7 +35,7 @@ clean:
 dist: clean
 	mkdir -p st-$(VERSION)
 	cp -R FAQ LEGACY TODO LICENSE Makefile README config.mk\
-		config.def.h st.info st.1 arg.h st.h win.h vimnav.h sshind.h notif.h $(SRC)\
+		config.def.h st.info st.1 arg.h st.h win.h vimnav.h sshind.h notif.h persist.h $(SRC)\
 		st-$(VERSION)
 	tar -cf - st-$(VERSION) | gzip > st-$(VERSION).tar.gz
 	rm -rf st-$(VERSION)
@@ -100,15 +101,26 @@ tests/test_notif.o: tests/test_notif.c tests/test.h sshind.h notif.h notif.c
 test_notif: tests/test_notif.o
 	$(CC) -o tests/test_notif tests/test_notif.o
 
-test: test_vimnav test_sshind test_scrollback test_cwd test_notif
+# persist tests (separate compilation — test provides Term + mocks, persist.c links in)
+tests/test_persist.o: tests/test_persist.c tests/test.h st.h persist.h
+	$(CC) $(TESTFLAGS) -c tests/test_persist.c -o tests/test_persist.o
+
+tests/persist.o: persist.c st.h persist.h
+	$(CC) $(TESTFLAGS) -c persist.c -o tests/persist.o
+
+test_persist: tests/test_persist.o tests/persist.o
+	$(CC) -o tests/test_persist tests/test_persist.o tests/persist.o
+
+test: test_vimnav test_sshind test_scrollback test_cwd test_notif test_persist
 	@echo "Running tests..."
 	@./tests/test_vimnav
 	@./tests/test_sshind
 	@./tests/test_scrollback
 	@./tests/test_cwd
 	@./tests/test_notif
+	@./tests/test_persist
 
 clean-tests:
-	rm -f tests/*.o tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif
+	rm -f tests/*.o tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist
 
 .PHONY: all clean dist install uninstall test clean-tests

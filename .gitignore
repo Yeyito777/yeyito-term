@@ -5,3 +5,4 @@ tests/test_sshind
 tests/test_scrollback
 tests/test_cwd
 tests/test_notif
+tests/test_persist

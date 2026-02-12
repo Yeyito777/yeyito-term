@@ -18,6 +18,7 @@
 #include <wchar.h>
 
 #include "st.h"
+#include "persist.h"
 #include "win.h"
 #include "vimnav.h"
 
@@ -143,6 +144,7 @@ typedef struct {
 	int icharset; /* selected charset for sequence */
 	int *tabs;
 	Rune lastc;   /* last printed char outside of sequence, 0 if control */
+	int histn;    /* number of valid history lines (at end for ABI compat) */
 } Term;
 
 /* CSI Escape sequence structs */
@@ -683,6 +685,7 @@ die(const char *errstr, ...)
 	va_start(ap, errstr);
 	vfprintf(stderr, errstr, ap);
 	va_end(ap);
+	persist_save();
 	exit(1);
 }
 
@@ -734,6 +737,9 @@ execsh(char *cmd, char **args)
 	signal(SIGTERM, SIG_DFL);
 	signal(SIGALRM, SIG_DFL);
 
+	if (persist_get_cwd()[0])
+		chdir(persist_get_cwd());
+
 	execvp(prog, args);
 	_exit(1);
 }
@@ -749,6 +755,10 @@ sigchld(int a)
 
 	if (pid != p)
 		return;
+
+	/* Shell exited — save and cleanup persist dir */
+	persist_save();
+	persist_cleanup();
 
 	if (WIFEXITED(stat) && WEXITSTATUS(stat))
 		die("child exited with status %d\n", WEXITSTATUS(stat));
@@ -855,6 +865,8 @@ ttyread(void)
 
 	switch (ret) {
 	case 0:
+		persist_save();
+		persist_cleanup();
 		exit(0);
 	case -1:
 		die("couldn't read from shell: %s\n", strerror(errno));
@@ -1166,6 +1178,8 @@ tscrollup(int orig, int n, int copyhist)
 		temp = term.hist[term.histi];
 		term.hist[term.histi] = term.line[orig];
 		term.line[orig] = temp;
+		if (term.histn < HISTSIZE)
+			term.histn++;
 	}
 
 	if (term.scr > 0 && term.scr < HISTSIZE)
@@ -2122,6 +2136,7 @@ strhandle(void)
 					fprintf(stderr, "OSC 779: cwd=%s\n",
 						strescseq.args[1]);
 				xsetcwd(strescseq.args[1]);
+				persist_set_cwd(strescseq.args[1]);
 			}
 			return;
 		}
