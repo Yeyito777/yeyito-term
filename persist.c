@@ -266,7 +266,7 @@ persist_save(void)
 }
 
 void
-persist_restore(const char *dir)
+persist_restore(const char *dir, int *out_col, int *out_row)
 {
 	char path[PATH_MAX];
 	FILE *f;
@@ -317,6 +317,12 @@ persist_restore(const char *dir)
 	/* Resize terminal to saved dimensions */
 	if (hdr.col != term.col || hdr.row != term.row)
 		tresize(hdr.col, hdr.row);
+
+	/* Report restored dimensions so xinit can size the window correctly */
+	if (out_col)
+		*out_col = hdr.col;
+	if (out_row)
+		*out_row = hdr.row;
 
 	/* Read history lines into term.hist[0..histn-1] */
 	histn = hdr.histn;

@@ -2353,8 +2353,9 @@ run:
 	cols = MAX(cols, 1);
 	rows = MAX(rows, 1);
 	tnew(cols, rows);
-	if (opt_fromsave)
-		persist_restore(opt_fromsave);
+	if (opt_fromsave) {
+		persist_restore(opt_fromsave, &cols, &rows);
+	}
 	xinit(cols, rows);
 	xsetenv();
 	persist_init(getpid());

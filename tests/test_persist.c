@@ -303,7 +303,7 @@ TEST(full_roundtrip)
 	persist_set_cwd(NULL);
 
 	/* Restore */
-	persist_restore(restoredir);
+	persist_restore(restoredir, NULL, NULL);
 
 	/* Verify CWD */
 	ASSERT_STR_EQ("/home/test/project", persist_get_cwd());
@@ -355,7 +355,7 @@ TEST(empty_history_roundtrip)
 	cleanup_term();
 	setup_term(10, 3);
 
-	persist_restore(restoredir);
+	persist_restore(restoredir, NULL, NULL);
 
 	ASSERT_EQ('A', (int)term.line[0][0].u);
 	ASSERT_EQ(100, (int)term.line[0][0].fg);
@@ -396,7 +396,7 @@ TEST(cursor_y_restored)
 	term.c.y = 0;
 	term.c.x = 0;
 
-	persist_restore(restoredir);
+	persist_restore(restoredir, NULL, NULL);
 
 	ASSERT_EQ(3, term.c.y);
 	ASSERT_EQ(0, term.c.x);
@@ -424,7 +424,7 @@ TEST(bad_magic_skipped)
 	fprintf(f, "BADMAGIC");
 	fclose(f);
 
-	persist_restore(dir);
+	persist_restore(dir, NULL, NULL);
 	ASSERT_EQ(0, term.histn);
 
 	cleanup_term();

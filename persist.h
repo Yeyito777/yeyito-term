@@ -8,7 +8,7 @@
 void persist_init(pid_t pid);
 void persist_register(void);
 void persist_save(void);
-void persist_restore(const char *dir);
+void persist_restore(const char *dir, int *out_col, int *out_row);
 void persist_cleanup(void);
 int persist_active(void);
 void persist_set_cwd(const char *cwd);

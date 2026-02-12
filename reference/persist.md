@@ -131,13 +131,13 @@ main() → tnew(default cols, rows)
        │   ├── restore term.c.y from cursor_y, set term.c.x = 0
        │   ├── tfulldirt()
        │   └── rmdir_recursive(dir)   # consume the save directory
-       → xinit() → xsetenv()
+       → xinit(restored cols, rows)    # window sized to saved dimensions
        → persist_init(getpid())       # NEW runtime dir (new PID)
        → persist_register()           # register new DWM argv
        → run()                        # shell spawns with chdir(persist_get_cwd())
 ```
 
-On restore, `persist_restore()` deletes the consumed save directory after reading it.
+On restore, `persist_restore()` deletes the consumed save directory after reading it. The restored dimensions are passed back to `main()` via `out_col`/`out_row` so `xinit()` creates the X window at the correct size. Without this, `xinit` would use the default config dimensions, causing `cresize()` in `run()` to shrink/grow the terminal and lose screen content (tresize's slide logic frees top lines without pushing them to history).
 
 ## Exit behavior
 
@@ -158,7 +158,7 @@ On restore, `persist_restore()` deletes the consumed save directory after readin
 void persist_init(pid_t pid);          // mkdir runtime dir, redirect stderr, set initialized
 void persist_register(void);           // XChangeProperty _DWM_SAVE_ARGV
 void persist_save(void);               // write scrollback + generic data files
-void persist_restore(const char *dir); // read saved state, populate term buffers, rm dir
+void persist_restore(const char *dir, int *out_col, int *out_row); // read saved state, populate term buffers, output saved dims, rm dir
 void persist_cleanup(void);            // rm -rf runtime dir
 int  persist_active(void);             // whether persist_init() was called
 void persist_set_cwd(const char *cwd); // store CWD in memory (NULL clears)
@@ -174,4 +174,4 @@ const char *persist_get_dir(void);     // return runtime dir path
 
 ## Testing
 
-`make test_persist` — 7 tests covering CWD tracking, full save/restore roundtrip, empty history, bad magic rejection, and DWM registration. The test compiles `persist.c` separately into `tests/persist.o` and links with `tests/test_persist.o` (which provides its own Term definition and mock functions).
+`make test_persist` — 8 tests covering CWD tracking, full save/restore roundtrip (including cursor_y), empty history, cursor_y restore, bad magic rejection, and DWM registration. The test compiles `persist.c` separately into `tests/persist.o` and links with `tests/test_persist.o` (which provides its own Term definition and mock functions).
