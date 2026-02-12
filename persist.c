@@ -182,6 +182,7 @@ persist_save_generic(void)
 	}
 	if (persist_cwd_buf[0])
 		fprintf(f, "cwd=%s\n", persist_cwd_buf);
+	fprintf(f, "cursor_y=%d\n", term.c.y);
 	fclose(f);
 }
 
@@ -272,6 +273,7 @@ persist_restore(const char *dir)
 	char line[PATH_MAX + 16];
 	PersistHeader hdr;
 	int i, histn, rows;
+	int cursor_y = -1;
 
 	/* Read generic data */
 	snprintf(path, sizeof(path), "%s/generic-data.save", dir);
@@ -281,6 +283,8 @@ persist_restore(const char *dir)
 			line[strcspn(line, "\n")] = '\0';
 			if (strncmp(line, "cwd=", 4) == 0)
 				persist_set_cwd(line + 4);
+			else if (strncmp(line, "cursor_y=", 9) == 0)
+				cursor_y = atoi(line + 9);
 		}
 		fclose(f);
 	}
@@ -345,6 +349,13 @@ persist_restore(const char *dir)
 	}
 
 	fclose(f);
+
+	/* Restore cursor row so the new shell prompt overwrites the old one */
+	if (cursor_y >= 0 && cursor_y < term.row) {
+		term.c.y = cursor_y;
+		term.c.x = 0;
+	}
+
 	tfulldirt();
 
 cleanup:

@@ -66,9 +66,10 @@ Glyph layout (from st.h): `{ Rune u, ushort mode, uint32_t fg, uint32_t bg }`.
 
 ```
 cwd=/home/yeyito/some/project
+cursor_y=23
 ```
 
-v1 only stores CWD. Future versions add more fields — the parser skips unknown keys.
+The parser skips unknown keys, so new fields are forward-compatible.
 
 ### log.log
 
@@ -127,6 +128,7 @@ main() → tnew(default cols, rows)
        │   ├── copy history lines → term.hist[0..histn-1]
        │   ├── copy screen lines → term.line[]
        │   ├── set term.histi, term.histn, term.scr = 0
+       │   ├── restore term.c.y from cursor_y, set term.c.x = 0
        │   ├── tfulldirt()
        │   └── rmdir_recursive(dir)   # consume the save directory
        → xinit() → xsetenv()

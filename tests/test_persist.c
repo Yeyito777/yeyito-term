@@ -251,6 +251,8 @@ TEST(full_roundtrip)
 
 	/* Set up state */
 	persist_set_cwd("/home/test/project");
+	term.c.y = 2;
+	term.c.x = 5;
 	term.histn = 2;
 	term.histi = 1;
 	term.hist[0][0].u = 'X';
@@ -317,6 +319,10 @@ TEST(full_roundtrip)
 	ASSERT_EQ('$', (int)term.line[0][0].u);
 	ASSERT_EQ(256, (int)term.line[0][0].fg);
 
+	/* Verify cursor position */
+	ASSERT_EQ(2, term.c.y);
+	ASSERT_EQ(0, term.c.x);
+
 	persist_cleanup();
 	cleanup_term();
 	cleanup_testdir();
@@ -356,6 +362,45 @@ TEST(empty_history_roundtrip)
 	ASSERT_EQ('B', (int)term.line[1][0].u);
 	ASSERT_EQ(200, (int)term.line[1][0].fg);
 	ASSERT_EQ(0, term.histn);
+
+	persist_cleanup();
+	cleanup_term();
+	cleanup_testdir();
+}
+
+TEST(cursor_y_restored)
+{
+	char restoredir[PATH_MAX];
+
+	setup_term(10, 5);
+
+	/* Cursor at row 3 (like an idle prompt mid-screen) */
+	term.c.y = 3;
+	term.c.x = 7;
+	term.line[3][0].u = '$';
+
+	setup_testdir();
+	persist_init(99997);
+	persist_save();
+
+	snprintf(restoredir, sizeof(restoredir), "%s/restore", testdir);
+	{
+		char cmd[PATH_MAX * 2 + 16];
+		snprintf(cmd, sizeof(cmd), "cp -r '%s' '%s'",
+				persist_get_dir(), restoredir);
+		system(cmd);
+	}
+
+	cleanup_term();
+	setup_term(10, 5);
+	term.c.y = 0;
+	term.c.x = 0;
+
+	persist_restore(restoredir);
+
+	ASSERT_EQ(3, term.c.y);
+	ASSERT_EQ(0, term.c.x);
+	ASSERT_EQ('$', (int)term.line[3][0].u);
 
 	persist_cleanup();
 	cleanup_term();
@@ -414,6 +459,7 @@ TEST_SUITE(save_restore)
 {
 	RUN_TEST(full_roundtrip);
 	RUN_TEST(empty_history_roundtrip);
+	RUN_TEST(cursor_y_restored);
 	RUN_TEST(bad_magic_skipped);
 }
 
