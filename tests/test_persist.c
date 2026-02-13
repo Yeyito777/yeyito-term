@@ -624,6 +624,86 @@ TEST(altcmd_used_when_no_save_cmd)
 	cleanup_testdir();
 }
 
+/* === Ephemeral flag tests === */
+
+TEST(ephemeral_set_and_get)
+{
+	persist_set_ephemeral(0);
+	ASSERT_EQ(0, persist_is_ephemeral());
+	persist_set_ephemeral(1);
+	ASSERT_EQ(1, persist_is_ephemeral());
+	persist_set_ephemeral(0);
+}
+
+TEST(ephemeral_saved_and_restored)
+{
+	char restoredir[PATH_MAX];
+
+	setup_term(8, 3);
+	persist_set_ephemeral(1);
+	persist_set_save_cmd("agent --resume abc-123");
+
+	setup_testdir();
+	persist_init(99970);
+	persist_save();
+
+	snprintf(restoredir, sizeof(restoredir), "%s/restore", testdir);
+	{
+		char cmd[PATH_MAX * 2 + 16];
+		snprintf(cmd, sizeof(cmd), "cp -r '%s' '%s'",
+				persist_get_dir(), restoredir);
+		system(cmd);
+	}
+
+	/* Reset */
+	cleanup_term();
+	setup_term(8, 3);
+	persist_set_ephemeral(0);
+	persist_set_save_cmd(NULL);
+	persist_set_altcmd(NULL);
+
+	persist_restore(restoredir, NULL, NULL);
+	ASSERT_EQ(1, persist_is_ephemeral());
+	ASSERT_STR_EQ("agent --resume abc-123", persist_get_altcmd());
+
+	persist_set_ephemeral(0);
+	persist_set_altcmd(NULL);
+	persist_cleanup();
+	cleanup_term();
+	cleanup_testdir();
+}
+
+TEST(non_ephemeral_not_saved)
+{
+	char restoredir[PATH_MAX];
+
+	setup_term(8, 3);
+	persist_set_ephemeral(0);
+
+	setup_testdir();
+	persist_init(99969);
+	persist_save();
+
+	snprintf(restoredir, sizeof(restoredir), "%s/restore", testdir);
+	{
+		char cmd[PATH_MAX * 2 + 16];
+		snprintf(cmd, sizeof(cmd), "cp -r '%s' '%s'",
+				persist_get_dir(), restoredir);
+		system(cmd);
+	}
+
+	/* Reset */
+	cleanup_term();
+	setup_term(8, 3);
+
+	persist_restore(restoredir, NULL, NULL);
+	ASSERT_EQ(0, persist_is_ephemeral());
+
+	persist_cleanup();
+	cleanup_term();
+	cleanup_testdir();
+}
+
 TEST(altcmd_not_saved_without_altscreen)
 {
 	char restoredir[PATH_MAX];
@@ -691,6 +771,13 @@ TEST_SUITE(save_cmd)
 	RUN_TEST(altcmd_used_when_no_save_cmd);
 }
 
+TEST_SUITE(ephemeral)
+{
+	RUN_TEST(ephemeral_set_and_get);
+	RUN_TEST(ephemeral_saved_and_restored);
+	RUN_TEST(non_ephemeral_not_saved);
+}
+
 TEST_SUITE(integration)
 {
 	RUN_TEST(register_sets_dwm_argv);
@@ -706,6 +793,7 @@ main(void)
 	RUN_SUITE(save_restore);
 	RUN_SUITE(altcmd);
 	RUN_SUITE(save_cmd);
+	RUN_SUITE(ephemeral);
 	RUN_SUITE(integration);
 
 	return test_summary();

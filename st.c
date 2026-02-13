@@ -693,6 +693,7 @@ void
 execsh(char *cmd, char **args)
 {
 	char *sh, *prog, *arg;
+	char *eph_args[4];
 	const struct passwd *pw;
 
 	errno = 0;
@@ -709,6 +710,13 @@ execsh(char *cmd, char **args)
 	if (args) {
 		prog = args[0];
 		arg = NULL;
+	} else if (persist_is_ephemeral() && persist_get_altcmd()[0]) {
+		prog = sh;
+		eph_args[0] = sh;
+		eph_args[1] = "-ic";
+		eph_args[2] = (char *)persist_get_altcmd();
+		eph_args[3] = NULL;
+		args = eph_args;
 	} else if (scroll) {
 		prog = scroll;
 		arg = utmp ? utmp : sh;

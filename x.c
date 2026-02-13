@@ -2178,8 +2178,8 @@ run(void)
 	ttyfd = ttynew(opt_line, shell, opt_io, opt_cmd);
 	cresize(w, h);
 
-	/* Re-execute altscreen command from save */
-	if (persist_get_altcmd()[0]) {
+	/* Re-execute altscreen command from save (skip if ephemeral — execsh handles it) */
+	if (persist_get_altcmd()[0] && !persist_is_ephemeral()) {
 		if (debug_mode)
 			fprintf(stderr, "[persist] re-executing altcmd: %s\n",
 					persist_get_altcmd());
@@ -2377,8 +2377,10 @@ main(int argc, char *argv[])
 	} ARGEND;
 
 run:
-	if (argc > 0) /* eat all remaining arguments */
+	if (argc > 0) { /* eat all remaining arguments */
 		opt_cmd = argv;
+		persist_set_ephemeral(1);
+	}
 
 	if (!opt_title)
 		opt_title = (opt_line || !opt_cmd) ? "st" : opt_cmd[0];

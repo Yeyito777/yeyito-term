@@ -71,9 +71,12 @@ Glyph layout (from st.h): `{ Rune u, ushort mode, uint32_t fg, uint32_t bg }`.
 cwd=/home/yeyito/some/project
 cursor_y=23
 altcmd=htop
+ephemeral=1
 ```
 
-`altcmd` is only written when `MODE_ALTSCREEN` is active during save (i.e., a fullscreen program like htop, nvim is running). On restore, the command is sent to the shell's pty as if the user typed it.
+`altcmd` is only written when `MODE_ALTSCREEN` is active during save (i.e., a fullscreen program like htop, nvim is running), or when `_ST_SAVE_CMD` overrides it (always saved regardless of altscreen). On restore, the command is sent to the shell's pty as if the user typed it — unless `ephemeral=1` is set, in which case `execsh()` launches the shell with `-ic <altcmd>` instead (see Ephemeral mode below).
+
+`ephemeral=1` is written when st was launched with `-e` (e.g., `st -e zsh -ic agent`). On restore, this causes the shell to be launched with the altcmd as a `-c` argument rather than typed into an interactive shell. When the command exits, the shell exits, and st closes — preserving the original ephemeral behavior.
 
 The parser skips unknown keys, so new fields are forward-compatible.
 
@@ -134,7 +137,7 @@ main() → tnew() → xinit() → xsetenv()
 
 ```
 main() → tnew(default cols, rows)
-       → persist_restore(dir)         # read generic-data → set CWD
+       → persist_restore(dir)         # read generic-data → set CWD, altcmd, ephemeral
        │   ├── read scrollback header, validate magic/version
        │   ├── tresize() if saved dimensions differ
        │   ├── copy history lines → term.hist[0..histn-1]
@@ -147,6 +150,8 @@ main() → tnew(default cols, rows)
        → persist_init(getpid())       # NEW runtime dir (new PID)
        → persist_register()           # register new DWM argv
        → run()                        # shell spawns with chdir(persist_get_cwd())
+       │                              # if ephemeral: execsh launches shell -ic <altcmd>
+       │                              # if not ephemeral: altcmd typed into interactive shell
 ```
 
 On restore, `persist_restore()` deletes the consumed save directory after reading it. The restored dimensions are passed back to `main()` via `out_col`/`out_row` so `xinit()` creates the X window at the correct size. Without this, `xinit` would use the default config dimensions, causing `cresize()` in `run()` to shrink/grow the terminal and lose screen content (tresize's slide logic frees top lines without pushing them to history).
@@ -177,6 +182,8 @@ void persist_set_cwd(const char *cwd);    // store CWD in memory (NULL clears)
 const char *persist_get_cwd(void);        // retrieve stored CWD (empty string if unset)
 void persist_set_altcmd(const char *cmd); // store altscreen command (NULL clears), set via OSC 780
 const char *persist_get_altcmd(void);     // retrieve stored command (empty string if unset)
+void persist_set_ephemeral(int val);      // mark terminal as ephemeral (launched with -e)
+int  persist_is_ephemeral(void);          // whether terminal was launched with -e
 const char *persist_get_dir(void);        // return runtime dir path
 const char *persist_find_orphan(void);    // scan ~/.runtime/st/ for first orphan dir, return path or NULL
 ```
@@ -189,4 +196,4 @@ const char *persist_find_orphan(void);    // scan ~/.runtime/st/ for first orpha
 
 ## Testing
 
-`make test_persist` — 12 tests covering CWD tracking, altcmd tracking (set/get, save with altscreen, no save without altscreen), full save/restore roundtrip (including cursor_y), empty history, cursor_y restore, bad magic rejection, and DWM registration. The test compiles `persist.c` separately into `tests/persist.o` and links with `tests/test_persist.o` (which provides its own Term definition and mock functions).
+`make test_persist` — 20 tests covering CWD tracking, altcmd tracking (set/get, save with altscreen, no save without altscreen), save_cmd override, ephemeral flag (set/get, save/restore roundtrip, non-ephemeral not saved), full save/restore roundtrip (including cursor_y), empty history, cursor_y restore, bad magic rejection, and DWM registration. The test compiles `persist.c` separately into `tests/persist.o` and links with `tests/test_persist.o` (which provides its own Term definition and mock functions).

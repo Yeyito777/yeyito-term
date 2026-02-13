@@ -17,6 +17,8 @@ void persist_set_altcmd(const char *cmd);
 const char *persist_get_altcmd(void);
 void persist_set_save_cmd(const char *cmd);
 const char *persist_get_save_cmd(void);
+void persist_set_ephemeral(int val);
+int persist_is_ephemeral(void);
 const char *persist_get_dir(void);
 const char *persist_find_orphan(void);
 

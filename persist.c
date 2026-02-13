@@ -79,6 +79,7 @@ static char persistdir[PATH_MAX];
 static char persist_cwd_buf[PATH_MAX];
 static char persist_altcmd_buf[PATH_MAX];
 static char persist_save_cmd_buf[PATH_MAX];
+static int persist_ephemeral;
 static int initialized;
 
 static void
@@ -189,6 +190,8 @@ persist_save_generic(void)
 		fprintf(f, "altcmd=%s\n", persist_save_cmd_buf);
 	else if (IS_SET(MODE_ALTSCREEN) && persist_altcmd_buf[0])
 		fprintf(f, "altcmd=%s\n", persist_altcmd_buf);
+	if (persist_ephemeral)
+		fprintf(f, "ephemeral=1\n");
 	fclose(f);
 }
 
@@ -295,6 +298,10 @@ persist_restore(const char *dir, int *out_col, int *out_row)
 				persist_set_altcmd(line + 7);
 				fprintf(stderr, "[persist] restore: altcmd=%s\n",
 						line + 7);
+			} else if (strncmp(line, "ephemeral=", 10) == 0) {
+				persist_set_ephemeral(atoi(line + 10));
+				fprintf(stderr, "[persist] restore: ephemeral=%d\n",
+						persist_ephemeral);
 			}
 		}
 		fclose(f);
@@ -439,6 +446,18 @@ const char *
 persist_get_save_cmd(void)
 {
 	return persist_save_cmd_buf;
+}
+
+void
+persist_set_ephemeral(int val)
+{
+	persist_ephemeral = val;
+}
+
+int
+persist_is_ephemeral(void)
+{
+	return persist_ephemeral;
 }
 
 const char *
