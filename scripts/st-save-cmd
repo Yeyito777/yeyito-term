@@ -1,0 +1,44 @@
+#!/bin/bash
+# st-save-cmd - Tell an st terminal what command to use for persist restore
+# Usage: st-save-cmd <st-pid> "command to restore"
+#
+# Sets the _ST_SAVE_CMD X11 property on the st window. When st saves state
+# for dwm persist, it uses this command instead of the shell-reported altcmd.
+# This lets programs like Claude Code specify their own restore command
+# (e.g. "claude --resume <session-id>") without st needing to know about them.
+
+usage() {
+    cat >&2 <<'EOF'
+Usage: st-save-cmd <st-pid> "command"
+
+Sets the restore command for st's dwm persist system. When st saves
+terminal state, this command overrides the shell-reported altcmd.
+
+Examples:
+  st-save-cmd $$ "claude --resume abc123-def456"
+  st-save-cmd 12345 "nvim --headless +SessionRestore"
+EOF
+    exit 1
+}
+
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+    usage
+fi
+
+pid="$1"
+cmd="$2"
+
+if [ -z "$pid" ] || [ -z "$cmd" ]; then
+    usage
+fi
+
+# Find X window with matching _NET_WM_PID
+wid=$(xdotool search --pid "$pid" 2>/dev/null | head -1)
+
+if [ -z "$wid" ]; then
+    echo "No window found for PID $pid" >&2
+    exit 1
+fi
+
+# Set the _ST_SAVE_CMD property — st will pick this up via PropertyNotify
+xprop -id "$wid" -f _ST_SAVE_CMD 8u -set _ST_SAVE_CMD "$cmd"

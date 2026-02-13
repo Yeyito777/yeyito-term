@@ -30,7 +30,7 @@ typedef struct {
 	Window win;
 	Drawable buf;
 	void *specbuf; /* font spec buffer used for rendering */
-	Atom xembed, wmdeletewin, netwmname, netwmiconname, netwmpid, stcwd, stnotify;
+	Atom xembed, wmdeletewin, netwmname, netwmiconname, netwmpid, stcwd, stnotify, stsavecmd;
 	struct {
 		XIM xim;
 		XIC xic;

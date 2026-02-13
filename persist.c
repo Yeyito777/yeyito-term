@@ -78,6 +78,7 @@ typedef struct {
 static char persistdir[PATH_MAX];
 static char persist_cwd_buf[PATH_MAX];
 static char persist_altcmd_buf[PATH_MAX];
+static char persist_save_cmd_buf[PATH_MAX];
 static int initialized;
 
 static void
@@ -184,7 +185,9 @@ persist_save_generic(void)
 	if (persist_cwd_buf[0])
 		fprintf(f, "cwd=%s\n", persist_cwd_buf);
 	fprintf(f, "cursor_y=%d\n", term.c.y);
-	if (IS_SET(MODE_ALTSCREEN) && persist_altcmd_buf[0])
+	if (persist_save_cmd_buf[0])
+		fprintf(f, "altcmd=%s\n", persist_save_cmd_buf);
+	else if (IS_SET(MODE_ALTSCREEN) && persist_altcmd_buf[0])
 		fprintf(f, "altcmd=%s\n", persist_altcmd_buf);
 	fclose(f);
 }
@@ -420,6 +423,22 @@ const char *
 persist_get_altcmd(void)
 {
 	return persist_altcmd_buf;
+}
+
+void
+persist_set_save_cmd(const char *cmd)
+{
+	if (cmd)
+		snprintf(persist_save_cmd_buf, sizeof(persist_save_cmd_buf),
+				"%s", cmd);
+	else
+		persist_save_cmd_buf[0] = '\0';
+}
+
+const char *
+persist_get_save_cmd(void)
+{
+	return persist_save_cmd_buf;
 }
 
 const char *

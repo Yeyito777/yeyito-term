@@ -98,7 +98,7 @@ typedef struct {
 	Window win;
 	Drawable buf;
 	GlyphFontSpec *specbuf; /* font spec buffer used for rendering */
-	Atom xembed, wmdeletewin, netwmname, netwmiconname, netwmpid, stcwd, stnotify;
+	Atom xembed, wmdeletewin, netwmname, netwmiconname, netwmpid, stcwd, stnotify, stsavecmd;
 	struct {
 		XIM xim;
 		XIC xic;
@@ -532,6 +532,19 @@ propnotify(XEvent *e)
 				XInternAtom(xw.dpy, "UTF8_STRING", False),
 				&type, &format, &nitems, &rem, &data) == Success && data) {
 			notif_show((char *)data);
+			XFree(data);
+		}
+	}
+
+	if (xpev->state == PropertyNewValue && xpev->atom == xw.stsavecmd) {
+		Atom type;
+		int format;
+		unsigned long nitems, rem;
+		unsigned char *data = NULL;
+		if (XGetWindowProperty(xw.dpy, xw.win, xw.stsavecmd, 0, 256, True,
+				XInternAtom(xw.dpy, "UTF8_STRING", False),
+				&type, &format, &nitems, &rem, &data) == Success && data) {
+			persist_set_save_cmd((char *)data);
 			XFree(data);
 		}
 	}
@@ -1252,6 +1265,7 @@ xinit(int cols, int rows)
 
 	xw.stcwd = XInternAtom(xw.dpy, "_ST_CWD", False);
 	xw.stnotify = XInternAtom(xw.dpy, "_ST_NOTIFY", False);
+	xw.stsavecmd = XInternAtom(xw.dpy, "_ST_SAVE_CMD", False);
 
 	win.mode = MODE_NUMLOCK;
 	resettitle();

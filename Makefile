@@ -50,6 +50,8 @@ install: st
 	tic -sx st.info
 	cp -f scripts/st-notify $(DESTDIR)$(PREFIX)/bin/st-notify
 	chmod 755 $(DESTDIR)$(PREFIX)/bin/st-notify
+	cp -f scripts/st-save-cmd $(DESTDIR)$(PREFIX)/bin/st-save-cmd
+	chmod 755 $(DESTDIR)$(PREFIX)/bin/st-save-cmd
 	@echo Please see the README file regarding the terminfo entry of st.
 
 uninstall:

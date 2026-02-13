@@ -95,6 +95,7 @@ Used to show/hide the SSH connection indicator overlay.
 |----------|--------|-------------|
 | `_ST_CWD` | OSC 779 (zsh → st) | Shell's current working directory |
 | `_ST_NOTIFY` | External (xprop → st) | Notification message; st shows overlay popup, auto-dismisses after timeout. Property is deleted after reading. Use `scripts/st-notify <pid> "msg"` or set directly with `xprop`. |
+| `_ST_SAVE_CMD` | External (xprop → st) | Override restore command for dwm persist. When set, this command is saved as `altcmd=` instead of the OSC 780 reported command. Property is deleted after reading. Use `scripts/st-save-cmd <pid> "cmd"` or set directly with `xprop`. |
 
 ### Reserved OSC numbers
 - **777**: Nav mode / vim coordination (TAKEN)

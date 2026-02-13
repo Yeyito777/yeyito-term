@@ -500,6 +500,130 @@ TEST(altcmd_saved_when_altscreen)
 	cleanup_testdir();
 }
 
+/* === Save command override tests === */
+
+TEST(save_cmd_set_and_get)
+{
+	persist_set_save_cmd("claude --resume abc-123");
+	ASSERT_STR_EQ("claude --resume abc-123", persist_get_save_cmd());
+	persist_set_save_cmd(NULL);
+}
+
+TEST(save_cmd_null_clears)
+{
+	persist_set_save_cmd("something");
+	persist_set_save_cmd(NULL);
+	ASSERT_STR_EQ("", persist_get_save_cmd());
+}
+
+TEST(save_cmd_overrides_altcmd)
+{
+	char restoredir[PATH_MAX];
+
+	setup_term(8, 3);
+	persist_set_altcmd("claude");
+	persist_set_save_cmd("claude --resume abc-123");
+	term.mode |= MODE_ALTSCREEN;
+
+	setup_testdir();
+	persist_init(99980);
+	persist_save();
+
+	snprintf(restoredir, sizeof(restoredir), "%s/restore", testdir);
+	{
+		char cmd[PATH_MAX * 2 + 16];
+		snprintf(cmd, sizeof(cmd), "cp -r '%s' '%s'",
+				persist_get_dir(), restoredir);
+		system(cmd);
+	}
+
+	/* Reset */
+	cleanup_term();
+	setup_term(8, 3);
+	persist_set_altcmd(NULL);
+	persist_set_save_cmd(NULL);
+	term.mode = 0;
+
+	persist_restore(restoredir, NULL, NULL);
+	ASSERT_STR_EQ("claude --resume abc-123", persist_get_altcmd());
+
+	persist_set_altcmd(NULL);
+	persist_set_save_cmd(NULL);
+	persist_cleanup();
+	cleanup_term();
+	cleanup_testdir();
+}
+
+TEST(save_cmd_saved_without_altscreen)
+{
+	char restoredir[PATH_MAX];
+
+	setup_term(8, 3);
+	persist_set_save_cmd("claude --resume abc-123");
+	term.mode = 0; /* altscreen NOT set — save_cmd is explicit, always saved */
+
+	setup_testdir();
+	persist_init(99979);
+	persist_save();
+
+	snprintf(restoredir, sizeof(restoredir), "%s/restore", testdir);
+	{
+		char cmd[PATH_MAX * 2 + 16];
+		snprintf(cmd, sizeof(cmd), "cp -r '%s' '%s'",
+				persist_get_dir(), restoredir);
+		system(cmd);
+	}
+
+	/* Reset */
+	cleanup_term();
+	setup_term(8, 3);
+	persist_set_save_cmd(NULL);
+	persist_set_altcmd(NULL);
+
+	persist_restore(restoredir, NULL, NULL);
+	ASSERT_STR_EQ("claude --resume abc-123", persist_get_altcmd());
+
+	persist_set_altcmd(NULL);
+	persist_cleanup();
+	cleanup_term();
+	cleanup_testdir();
+}
+
+TEST(altcmd_used_when_no_save_cmd)
+{
+	char restoredir[PATH_MAX];
+
+	setup_term(8, 3);
+	persist_set_altcmd("htop");
+	persist_set_save_cmd(NULL); /* no save_cmd override */
+	term.mode |= MODE_ALTSCREEN;
+
+	setup_testdir();
+	persist_init(99978);
+	persist_save();
+
+	snprintf(restoredir, sizeof(restoredir), "%s/restore", testdir);
+	{
+		char cmd[PATH_MAX * 2 + 16];
+		snprintf(cmd, sizeof(cmd), "cp -r '%s' '%s'",
+				persist_get_dir(), restoredir);
+		system(cmd);
+	}
+
+	/* Reset */
+	cleanup_term();
+	setup_term(8, 3);
+	persist_set_altcmd(NULL);
+
+	persist_restore(restoredir, NULL, NULL);
+	ASSERT_STR_EQ("htop", persist_get_altcmd());
+
+	persist_set_altcmd(NULL);
+	persist_cleanup();
+	cleanup_term();
+	cleanup_testdir();
+}
+
 TEST(altcmd_not_saved_without_altscreen)
 {
 	char restoredir[PATH_MAX];
@@ -558,6 +682,15 @@ TEST_SUITE(altcmd)
 	RUN_TEST(altcmd_not_saved_without_altscreen);
 }
 
+TEST_SUITE(save_cmd)
+{
+	RUN_TEST(save_cmd_set_and_get);
+	RUN_TEST(save_cmd_null_clears);
+	RUN_TEST(save_cmd_overrides_altcmd);
+	RUN_TEST(save_cmd_saved_without_altscreen);
+	RUN_TEST(altcmd_used_when_no_save_cmd);
+}
+
 TEST_SUITE(integration)
 {
 	RUN_TEST(register_sets_dwm_argv);
@@ -572,6 +705,7 @@ main(void)
 	RUN_SUITE(cwd);
 	RUN_SUITE(save_restore);
 	RUN_SUITE(altcmd);
+	RUN_SUITE(save_cmd);
 	RUN_SUITE(integration);
 
 	return test_summary();
