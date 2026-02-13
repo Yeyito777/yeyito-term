@@ -77,6 +77,7 @@ typedef struct {
 
 static char persistdir[PATH_MAX];
 static char persist_cwd_buf[PATH_MAX];
+static char persist_altcmd_buf[PATH_MAX];
 static int initialized;
 
 static void
@@ -183,6 +184,8 @@ persist_save_generic(void)
 	if (persist_cwd_buf[0])
 		fprintf(f, "cwd=%s\n", persist_cwd_buf);
 	fprintf(f, "cursor_y=%d\n", term.c.y);
+	if (IS_SET(MODE_ALTSCREEN) && persist_altcmd_buf[0])
+		fprintf(f, "altcmd=%s\n", persist_altcmd_buf);
 	fclose(f);
 }
 
@@ -285,6 +288,11 @@ persist_restore(const char *dir, int *out_col, int *out_row)
 				persist_set_cwd(line + 4);
 			else if (strncmp(line, "cursor_y=", 9) == 0)
 				cursor_y = atoi(line + 9);
+			else if (strncmp(line, "altcmd=", 7) == 0) {
+				persist_set_altcmd(line + 7);
+				fprintf(stderr, "[persist] restore: altcmd=%s\n",
+						line + 7);
+			}
 		}
 		fclose(f);
 	}
@@ -399,8 +407,59 @@ persist_get_cwd(void)
 	return persist_cwd_buf;
 }
 
+void
+persist_set_altcmd(const char *cmd)
+{
+	if (cmd)
+		snprintf(persist_altcmd_buf, sizeof(persist_altcmd_buf), "%s", cmd);
+	else
+		persist_altcmd_buf[0] = '\0';
+}
+
+const char *
+persist_get_altcmd(void)
+{
+	return persist_altcmd_buf;
+}
+
 const char *
 persist_get_dir(void)
 {
 	return persistdir;
+}
+
+const char *
+persist_find_orphan(void)
+{
+	static char path[PATH_MAX];
+	const char *home;
+	char stdir[PATH_MAX];
+	DIR *d;
+	struct dirent *ent;
+	pid_t pid;
+
+	home = getenv("HOME");
+	if (!home)
+		home = "/tmp";
+
+	snprintf(stdir, sizeof(stdir), "%s/.runtime/st", home);
+	d = opendir(stdir);
+	if (!d)
+		return NULL;
+
+	while ((ent = readdir(d))) {
+		if (strncmp(ent->d_name, "st-", 3) != 0)
+			continue;
+		pid = atoi(ent->d_name + 3);
+		if (pid <= 0)
+			continue;
+		if (kill(pid, 0) == -1 && errno == ESRCH) {
+			snprintf(path, sizeof(path), "%s/%s",
+					stdir, ent->d_name);
+			closedir(d);
+			return path;
+		}
+	}
+	closedir(d);
+	return NULL;
 }

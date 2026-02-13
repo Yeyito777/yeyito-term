@@ -2139,6 +2139,10 @@ strhandle(void)
 				persist_set_cwd(strescseq.args[1]);
 			}
 			return;
+		case 780: /* st custom: command reporting */
+			if (narg > 1 && strescseq.args[1][0] != '\0')
+				persist_set_altcmd(strescseq.args[1]);
+			return;
 		}
 		break;
 	case 'k': /* old title set compatibility */

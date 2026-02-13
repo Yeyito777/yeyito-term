@@ -446,6 +446,93 @@ TEST(register_sets_dwm_argv)
 	cleanup_testdir();
 }
 
+/* === Altcmd tracking tests === */
+
+/* MODE_ALTSCREEN = 1 << 2 */
+#define MODE_ALTSCREEN (1 << 2)
+
+TEST(altcmd_set_and_get)
+{
+	persist_set_altcmd("htop");
+	ASSERT_STR_EQ("htop", persist_get_altcmd());
+	persist_set_altcmd(NULL);
+}
+
+TEST(altcmd_null_clears)
+{
+	persist_set_altcmd("nvim foo.txt");
+	persist_set_altcmd(NULL);
+	ASSERT_STR_EQ("", persist_get_altcmd());
+}
+
+TEST(altcmd_saved_when_altscreen)
+{
+	char restoredir[PATH_MAX];
+
+	setup_term(8, 3);
+	persist_set_altcmd("htop");
+	term.mode |= MODE_ALTSCREEN;
+
+	setup_testdir();
+	persist_init(99990);
+	persist_save();
+
+	snprintf(restoredir, sizeof(restoredir), "%s/restore", testdir);
+	{
+		char cmd[PATH_MAX * 2 + 16];
+		snprintf(cmd, sizeof(cmd), "cp -r '%s' '%s'",
+				persist_get_dir(), restoredir);
+		system(cmd);
+	}
+
+	/* Reset */
+	cleanup_term();
+	setup_term(8, 3);
+	persist_set_altcmd(NULL);
+	term.mode = 0;
+
+	persist_restore(restoredir, NULL, NULL);
+	ASSERT_STR_EQ("htop", persist_get_altcmd());
+
+	persist_set_altcmd(NULL);
+	persist_cleanup();
+	cleanup_term();
+	cleanup_testdir();
+}
+
+TEST(altcmd_not_saved_without_altscreen)
+{
+	char restoredir[PATH_MAX];
+
+	setup_term(8, 3);
+	persist_set_altcmd("htop");
+	term.mode = 0; /* altscreen NOT set */
+
+	setup_testdir();
+	persist_init(99989);
+	persist_save();
+
+	snprintf(restoredir, sizeof(restoredir), "%s/restore", testdir);
+	{
+		char cmd[PATH_MAX * 2 + 16];
+		snprintf(cmd, sizeof(cmd), "cp -r '%s' '%s'",
+				persist_get_dir(), restoredir);
+		system(cmd);
+	}
+
+	/* Reset */
+	cleanup_term();
+	setup_term(8, 3);
+	persist_set_altcmd(NULL);
+
+	persist_restore(restoredir, NULL, NULL);
+	ASSERT_STR_EQ("", persist_get_altcmd());
+
+	persist_cleanup();
+	cleanup_term();
+	cleanup_testdir();
+}
+
 /* === Test suites === */
 
 TEST_SUITE(cwd)
@@ -463,6 +550,14 @@ TEST_SUITE(save_restore)
 	RUN_TEST(bad_magic_skipped);
 }
 
+TEST_SUITE(altcmd)
+{
+	RUN_TEST(altcmd_set_and_get);
+	RUN_TEST(altcmd_null_clears);
+	RUN_TEST(altcmd_saved_when_altscreen);
+	RUN_TEST(altcmd_not_saved_without_altscreen);
+}
+
 TEST_SUITE(integration)
 {
 	RUN_TEST(register_sets_dwm_argv);
@@ -476,6 +571,7 @@ main(void)
 
 	RUN_SUITE(cwd);
 	RUN_SUITE(save_restore);
+	RUN_SUITE(altcmd);
 	RUN_SUITE(integration);
 
 	return test_summary();

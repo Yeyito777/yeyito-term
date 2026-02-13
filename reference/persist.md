@@ -19,9 +19,12 @@ Created by `persist_init()`. Deleted by `persist_cleanup()` when the shell exits
 
 ```
 st --from-save ~/.runtime/st/st-12345/
+st --from-orphan
 ```
 
-Parsed with `strcmp` before `ARGBEGIN` in `x.c` (arg.h only handles single-char flags — same pattern as dwm's `--persist`). The `--from-save` arg and its value are stripped from argv via `memmove` before normal option parsing proceeds.
+`--from-save` restores from a specific save directory. `--from-orphan` scans `~/.runtime/st/` for the first `st-<pid>/` directory whose PID no longer exists (`kill(pid, 0)` → ESRCH) and restores from it. If no orphan is found, the terminal starts normally and prints a message. Useful for testing persistence without restarting dwm — kill a terminal, then `st --from-orphan` to adopt its saved state.
+
+Both are parsed with `strcmp` before `ARGBEGIN` in `x.c` (arg.h only handles single-char flags — same pattern as dwm's `--persist`). The args are stripped from argv via `memmove` before normal option parsing proceeds.
 
 ## DWM registration
 
@@ -67,7 +70,10 @@ Glyph layout (from st.h): `{ Rune u, ushort mode, uint32_t fg, uint32_t bg }`.
 ```
 cwd=/home/yeyito/some/project
 cursor_y=23
+altcmd=htop
 ```
+
+`altcmd` is only written when `MODE_ALTSCREEN` is active during save (i.e., a fullscreen program like htop, nvim is running). On restore, the command is sent to the shell's pty as if the user typed it.
 
 The parser skips unknown keys, so new fields are forward-compatible.
 
@@ -86,6 +92,12 @@ The circular buffer `term.hist[HISTSIZE]` (HISTSIZE = 32768) has no built-in cou
 ## CWD tracking
 
 The shell reports CWD via OSC 779. Previously this only set the `_ST_CWD` X11 property. Now the OSC 779 handler also calls `persist_set_cwd()`, which stores the path in a static `PATH_MAX` buffer inside `persist.c`. On restore, CWD is read from `generic-data.save` and `execsh()` calls `chdir()` before `execvp()`.
+
+## Altscreen command tracking
+
+The shell reports the current command via OSC 780 (sent from zsh's `preexec` hook: `printf '\033]780;%s\007' "$1"`). The OSC 780 handler in `strhandle()` calls `persist_set_altcmd()`, which stores the command in a static `PATH_MAX` buffer in `persist.c`.
+
+On save, `persist_save_generic()` only writes `altcmd=` when `MODE_ALTSCREEN` is active — meaning a fullscreen program (htop, nvim, etc.) is currently running. On restore, the command is read from `generic-data.save` and after `ttynew()` spawns the shell, `run()` sends it to the pty via `ttywrite()` as if the user typed it.
 
 ## Periodic save timer
 
@@ -161,9 +173,12 @@ void persist_save(void);               // write scrollback + generic data files
 void persist_restore(const char *dir, int *out_col, int *out_row); // read saved state, populate term buffers, output saved dims, rm dir
 void persist_cleanup(void);            // rm -rf runtime dir
 int  persist_active(void);             // whether persist_init() was called
-void persist_set_cwd(const char *cwd); // store CWD in memory (NULL clears)
-const char *persist_get_cwd(void);     // retrieve stored CWD (empty string if unset)
-const char *persist_get_dir(void);     // return runtime dir path
+void persist_set_cwd(const char *cwd);    // store CWD in memory (NULL clears)
+const char *persist_get_cwd(void);        // retrieve stored CWD (empty string if unset)
+void persist_set_altcmd(const char *cmd); // store altscreen command (NULL clears), set via OSC 780
+const char *persist_get_altcmd(void);     // retrieve stored command (empty string if unset)
+const char *persist_get_dir(void);        // return runtime dir path
+const char *persist_find_orphan(void);    // scan ~/.runtime/st/ for first orphan dir, return path or NULL
 ```
 
 ## Suckless struct duplication
@@ -174,4 +189,4 @@ const char *persist_get_dir(void);     // return runtime dir path
 
 ## Testing
 
-`make test_persist` — 8 tests covering CWD tracking, full save/restore roundtrip (including cursor_y), empty history, cursor_y restore, bad magic rejection, and DWM registration. The test compiles `persist.c` separately into `tests/persist.o` and links with `tests/test_persist.o` (which provides its own Term definition and mock functions).
+`make test_persist` — 12 tests covering CWD tracking, altcmd tracking (set/get, save with altscreen, no save without altscreen), full save/restore roundtrip (including cursor_y), empty history, cursor_y restore, bad magic rejection, and DWM registration. The test compiles `persist.c` separately into `tests/persist.o` and links with `tests/test_persist.o` (which provides its own Term definition and mock functions).

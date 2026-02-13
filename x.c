@@ -257,6 +257,7 @@ static char *opt_line  = NULL;
 static char *opt_name  = NULL;
 static char *opt_title = NULL;
 static char *opt_fromsave = NULL;
+static int opt_fromorphan = 0;
 
 static uint buttons; /* bit field of pressed buttons */
 
@@ -2163,6 +2164,20 @@ run(void)
 	ttyfd = ttynew(opt_line, shell, opt_io, opt_cmd);
 	cresize(w, h);
 
+	/* Re-execute altscreen command from save */
+	if (persist_get_altcmd()[0]) {
+		if (debug_mode)
+			fprintf(stderr, "[persist] re-executing altcmd: %s\n",
+					persist_get_altcmd());
+		ttywrite(persist_get_altcmd(),
+				strlen(persist_get_altcmd()), 1);
+		ttywrite("\n", 1, 1);
+	} else if (opt_fromorphan && !opt_fromsave) {
+		static const char msg[] =
+			"echo 'st: no orphan save directory found'\n";
+		ttywrite(msg, sizeof(msg) - 1, 1);
+	}
+
 	struct timespec lastpersist = {0};
 	for (timeout = -1, drawing = 0, lastblink = (struct timespec){0};;) {
 		FD_ZERO(&rfd);
@@ -2279,16 +2294,22 @@ main(int argc, char *argv[])
 	xw.isfixed = False;
 	xsetcursor(cursorshape);
 
-	/* Parse --from-save before ARGBEGIN (arg.h doesn't support long opts) */
+	/* Parse long opts before ARGBEGIN (arg.h doesn't support them) */
 	{
 		int i;
 		for (i = 1; i < argc; i++) {
 			if (!strcmp("--from-save", argv[i]) && i + 1 < argc) {
 				opt_fromsave = argv[i + 1];
-				/* Shift remaining args to hide --from-save */
 				memmove(&argv[i], &argv[i + 2],
 						(argc - i - 2 + 1) * sizeof(char *));
 				argc -= 2;
+				break;
+			}
+			if (!strcmp("--from-orphan", argv[i])) {
+				opt_fromorphan = 1;
+				memmove(&argv[i], &argv[i + 1],
+						(argc - i - 1 + 1) * sizeof(char *));
+				argc -= 1;
 				break;
 			}
 		}
@@ -2353,6 +2374,11 @@ run:
 	cols = MAX(cols, 1);
 	rows = MAX(rows, 1);
 	tnew(cols, rows);
+	if (opt_fromorphan && !opt_fromsave) {
+		const char *orphan = persist_find_orphan();
+		if (orphan)
+			opt_fromsave = (char *)orphan;
+	}
 	if (opt_fromsave) {
 		persist_restore(opt_fromsave, &cols, &rows);
 	}
