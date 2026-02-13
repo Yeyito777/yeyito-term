@@ -59,11 +59,16 @@ st --from-save dir → shell starts → types "agent --resume <uuid>\n" → star
 
 ## Claude Code Agent Integration
 
-The Agent project (`~/Workspace/Agent`) has a `UserPromptSubmit` hook that automates this:
+The Agent project (`~/Workspace/Agent`) has hooks on both `UserPromptSubmit` and `SessionStart` that automate this:
 
 ### Hook: `src/hooks/save-cmd.sh`
 
-Wired in `.claude/settings.local.json`. On every user message:
+Wired in `.claude/settings.local.json` on two events:
+
+- **`UserPromptSubmit`** — fires on every user message, keeps the save command current during normal use.
+- **`SessionStart`** — fires on all sources. For `resume`/`clear`/`compact`, saves `agent --resume <session-id>`. For `startup`, saves bare `agent` (no conversation exists yet to resume).
+
+The script:
 
 1. Reads `session_id` from the hook's stdin JSON (all hooks receive `session_id` in the base envelope)
 2. Calls `st-save-cmd $AGENT_TERMINAL_PID "agent --resume $SESSION_ID"`
@@ -84,7 +89,7 @@ The zsh alias `agent='cd ... && .../start.sh'` naturally passes extra args throu
 
 ### Handling `/clear` and `/resume`
 
-These commands change the session ID within Claude Code. The hook fires on every `UserPromptSubmit` and reads the current `session_id` from the hook JSON, so the save command is always up to date after the next message.
+These commands change the session ID within Claude Code. The `SessionStart` hook fires immediately when the new session begins, updating the save command before any user message is needed. The `UserPromptSubmit` hook provides ongoing updates during normal use.
 
 ## Relevant Files
 
@@ -103,7 +108,7 @@ These commands change the session ID within Claude Code. The hook fires on every
 
 | File | What |
 |------|------|
-| `src/hooks/save-cmd.sh` | UserPromptSubmit hook — reads session_id, calls st-save-cmd |
+| `src/hooks/save-cmd.sh` | UserPromptSubmit + SessionStart hook — reads session_id, calls st-save-cmd |
 | `src/start.sh` | Accepts `--resume <id>`, forwards to claude |
 | `.claude/settings.local.json` | Hook wiring (5s timeout) |
 
