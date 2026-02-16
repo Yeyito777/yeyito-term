@@ -62,6 +62,8 @@ extern char *usedfont;
 extern double usedfontsize;
 extern int debug_mode;
 extern int tisaltscreen(void);
+extern void xsetsel(char *str);
+extern void xclipcopy(void);
 
 /* Command-line states */
 enum {
@@ -76,9 +78,10 @@ static struct {
 	XftDraw *draw;
 	GC gc;
 	XftFont *font;
-	XftColor fg, bg, err, curcolor, border;
+	XftColor fg, bg, err, curcolor, border, sel;
 	int state;
-	int cmd_mode; /* 0 = insert, 1 = normal */
+	int cmd_mode; /* 0 = insert, 1 = normal, 2 = visual */
+	int anchor;   /* visual mode anchor (byte offset) */
 	char input[CMDLINE_MAX_INPUT];
 	int input_len;
 	int cursor;   /* byte offset of cursor within input */
@@ -141,6 +144,7 @@ cmdline_load_resources(void)
 	XftColorAllocName(xw.dpy, xw.vis, xw.cmap, cmdline_err_color, &cl.err);
 	XftColorAllocName(xw.dpy, xw.vis, xw.cmap, cmdline_cursor_color, &cl.curcolor);
 	XftColorAllocName(xw.dpy, xw.vis, xw.cmap, cmdline_border_color, &cl.border);
+	XftColorAllocName(xw.dpy, xw.vis, xw.cmap, cmdline_sel_color, &cl.sel);
 
 	cl.loaded = 1;
 	return 1;
@@ -218,10 +222,41 @@ cmdline_redraw(void)
 	tx = win.cw / 2;
 
 	if (cl.state == CMDLINE_INPUT) {
+		int cheight = cl.font->ascent + cl.font->descent;
+
 		/* Draw ":" prefix */
 		XftDrawStringUtf8(cl.draw, &cl.fg, cl.font, tx, ty,
 		                  (const FcChar8 *)":", 1);
 		tx += win.cw;
+
+		/* Visual mode: draw selection highlight behind text */
+		if (cl.cmd_mode == 2 && cl.input_len > 0) {
+			int sel_start = cl.anchor < cl.cursor ? cl.anchor : cl.cursor;
+			int sel_end = cl.anchor < cl.cursor ? cl.cursor : cl.anchor;
+			int sx, ex;
+
+			/* Find end of character at sel_end for inclusive selection */
+			int sel_end_next = sel_end + 1;
+			while (sel_end_next < cl.input_len &&
+			       (cl.input[sel_end_next] & 0xC0) == 0x80)
+				sel_end_next++;
+
+			sx = tx;
+			if (sel_start > 0) {
+				XftTextExtentsUtf8(xw.dpy, cl.font,
+				                   (const FcChar8 *)cl.input,
+				                   sel_start, &extents);
+				sx += extents.xOff;
+			}
+			XftTextExtentsUtf8(xw.dpy, cl.font,
+			                   (const FcChar8 *)cl.input,
+			                   sel_end_next, &extents);
+			ex = tx + extents.xOff;
+
+			XftDrawRect(cl.draw, &cl.sel,
+			            sx, cmdline_border_top,
+			            ex - sx, cheight);
+		}
 
 		/* Draw input text */
 		if (cl.input_len > 0) {
@@ -242,12 +277,12 @@ cmdline_redraw(void)
 			/* Insert mode: thin bar cursor */
 			XftDrawRect(cl.draw, &cl.curcolor,
 			            cursor_x, cmdline_border_top,
-			            2, cl.font->ascent + cl.font->descent);
+			            2, cheight);
 		} else {
-			/* Normal mode: block cursor with inverted char */
+			/* Normal/visual mode: block cursor with inverted char */
 			XftDrawRect(cl.draw, &cl.curcolor,
 			            cursor_x, cmdline_border_top,
-			            win.cw, cl.font->ascent + cl.font->descent);
+			            win.cw, cheight);
 			if (cl.cursor < cl.input_len) {
 				int charlen = 1;
 				while (cl.cursor + charlen < cl.input_len &&
@@ -417,8 +452,8 @@ delete_at_cursor(void)
 static void
 cmdline_clamp_normal_cursor(void)
 {
-	/* In normal mode cursor sits on a char, not past end */
-	if (cl.cmd_mode && cl.input_len > 0 && cl.cursor >= cl.input_len) {
+	/* In normal/visual mode cursor sits on a char, not past end */
+	if (cl.cmd_mode >= 1 && cl.input_len > 0 && cl.cursor >= cl.input_len) {
 		cl.cursor = cl.input_len - 1;
 		while (cl.cursor > 0 &&
 		       (cl.input[cl.cursor] & 0xC0) == 0x80)
@@ -634,11 +669,174 @@ cmdline_handle_normal(unsigned long ksym, unsigned int state,
 			fprintf(stderr, "cmdline: normal -> insert (eol)\n");
 		cmdline_redraw();
 		return 1;
+	case 'v':
+		if (cl.input_len > 0) {
+			cl.cmd_mode = 2;
+			cl.anchor = cl.cursor;
+			if (debug_mode)
+				fprintf(stderr, "cmdline: normal -> visual\n");
+			cmdline_redraw();
+		}
+		return 1;
 	default:
 		break;
 	}
 
 	return 1; /* Consume all keys when cmdline active */
+}
+
+static void
+cmdline_visual_sel_range(int *start, int *end_next)
+{
+	int s = cl.anchor < cl.cursor ? cl.anchor : cl.cursor;
+	int e = cl.anchor < cl.cursor ? cl.cursor : cl.anchor;
+
+	/* end_next: byte past the last selected char (inclusive selection) */
+	e++;
+	while (e < cl.input_len && (cl.input[e] & 0xC0) == 0x80)
+		e++;
+
+	*start = s;
+	*end_next = e;
+}
+
+static void
+cmdline_visual_yank(void)
+{
+	int start, end_next;
+	char *text;
+
+	cmdline_visual_sel_range(&start, &end_next);
+	if (end_next <= start)
+		return;
+
+	text = xmalloc(end_next - start + 1);
+	memcpy(text, cl.input + start, end_next - start);
+	text[end_next - start] = '\0';
+	xsetsel(text);
+	xclipcopy();
+	if (debug_mode)
+		fprintf(stderr, "cmdline: yanked '%s'\n", text);
+
+	cl.cmd_mode = 1; /* back to normal */
+	cmdline_redraw();
+}
+
+static void
+cmdline_visual_delete(void)
+{
+	int start, end_next;
+
+	cmdline_visual_sel_range(&start, &end_next);
+	if (end_next <= start)
+		return;
+
+	memmove(cl.input + start, cl.input + end_next,
+	        cl.input_len - end_next);
+	cl.input_len -= (end_next - start);
+	cl.input[cl.input_len] = '\0';
+	cl.cursor = start;
+
+	cl.cmd_mode = 1; /* back to normal */
+	cmdline_clamp_normal_cursor();
+
+	if (debug_mode)
+		fprintf(stderr, "cmdline: visual delete, input='%s'\n", cl.input);
+	cmdline_redraw();
+}
+
+static void
+cmdline_visual_change(void)
+{
+	int start, end_next;
+
+	cmdline_visual_sel_range(&start, &end_next);
+	if (end_next <= start)
+		return;
+
+	memmove(cl.input + start, cl.input + end_next,
+	        cl.input_len - end_next);
+	cl.input_len -= (end_next - start);
+	cl.input[cl.input_len] = '\0';
+	cl.cursor = start;
+
+	cl.cmd_mode = 0; /* to insert mode */
+
+	if (debug_mode)
+		fprintf(stderr, "cmdline: visual change, input='%s'\n", cl.input);
+	cmdline_redraw();
+}
+
+static int
+cmdline_handle_visual(unsigned long ksym, unsigned int state,
+                      const char *buf, int len)
+{
+	(void)state;
+	(void)buf;
+	(void)len;
+
+	switch (ksym) {
+	case XK_Escape:
+	case 'v':
+		/* Exit visual mode back to normal */
+		cl.cmd_mode = 1;
+		if (debug_mode)
+			fprintf(stderr, "cmdline: visual -> normal\n");
+		cmdline_redraw();
+		return 1;
+	case 'h':
+	case XK_Left:
+		cursor_left();
+		cmdline_redraw();
+		return 1;
+	case 'l':
+	case XK_Right:
+		if (cl.cursor < cl.input_len) {
+			cursor_right();
+			cmdline_clamp_normal_cursor();
+			cmdline_redraw();
+		}
+		return 1;
+	case '0':
+	case XK_Home:
+		cl.cursor = 0;
+		cmdline_redraw();
+		return 1;
+	case '$':
+	case XK_End:
+		if (cl.input_len > 0)
+			cl.cursor = cl.input_len - 1;
+		cmdline_clamp_normal_cursor();
+		cmdline_redraw();
+		return 1;
+	case 'o':
+		/* Swap cursor and anchor */
+		{
+			int tmp = cl.anchor;
+			cl.anchor = cl.cursor;
+			cl.cursor = tmp;
+		}
+		if (debug_mode)
+			fprintf(stderr, "cmdline: visual swap anchor=%d cursor=%d\n",
+			        cl.anchor, cl.cursor);
+		cmdline_redraw();
+		return 1;
+	case 'y':
+		cmdline_visual_yank();
+		return 1;
+	case 'x':
+	case 'd':
+	case XK_Delete:
+		cmdline_visual_delete();
+		return 1;
+	case 'c':
+		cmdline_visual_change();
+		return 1;
+	default:
+		break;
+	}
+
+	return 1; /* Consume all keys */
 }
 
 int
@@ -664,6 +862,8 @@ cmdline_handle_key(unsigned long ksym, unsigned int state,
 
 	if (cl.cmd_mode == 0)
 		return cmdline_handle_insert(ksym, state, buf, len);
+	else if (cl.cmd_mode == 2)
+		return cmdline_handle_visual(ksym, state, buf, len);
 	else
 		return cmdline_handle_normal(ksym, state, buf, len);
 }

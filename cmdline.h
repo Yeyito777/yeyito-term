@@ -14,6 +14,7 @@ static const char *cmdline_fg_color = "#f1faee";     /* terminal foreground */
 static const char *cmdline_err_color = "#febfb8";    /* error text color */
 static const char *cmdline_cursor_color = "#48cae4"; /* cursor color */
 static const char *cmdline_border_color = "#1d3557"; /* top border */
+static const char *cmdline_sel_color = "#4f5258";    /* visual selection */
 static const int cmdline_border_top = 1;             /* top border thickness */
 
 #define CMDLINE_MAX_INPUT 256
