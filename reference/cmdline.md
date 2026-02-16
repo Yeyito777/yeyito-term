@@ -11,7 +11,7 @@ The command-line is a self-contained X11 child window that sits over the last ro
 | File | Role |
 |------|------|
 | `cmdline.h` | Configuration constants (colors, sizes) and public API declarations |
-| `cmdline.c` | Full implementation (~1500 lines): window management, rendering, modal key handling, text objects, word motions, history |
+| `cmdline.c` | Full implementation (~1600 lines): window management, rendering, modal key handling, text objects, word motions, character seek (f/F/;/,), history |
 | `x.c` | Integration: init, draw, resize, key intercept, cursor hiding |
 | `vimnav.c` | Entry point: `:` in nav mode calls `cmdline_open()` |
 | `st.h` | Public function declarations |
@@ -179,6 +179,19 @@ Three character categories for `w`/`e`/`b`: **word** (`[a-zA-Z0-9_]` via `is_wor
 
 Implementation: `char_cat()` classifies bytes into the three word categories, `char_CAT()` into the two WORD categories. Six `motion_X_pos(int pos)` functions compute the destination byte offset without modifying `cl.cursor`. The `e`/`E` functions include UTF-8 backtracking to ensure the returned position is always on a character start, not a continuation byte. All six motions also work as operator targets (see operator-pending below).
 
+### Character seek
+
+| Key | Action |
+|-----|--------|
+| f | Seek forward: waits for next key, jumps cursor to first matching character |
+| F | Seek backward: waits for next key, jumps cursor to first matching character |
+| ; | Repeat last f/F seek in the same direction |
+| , | Repeat last f/F seek in the opposite direction |
+
+State: pressing `f`/`F` sets `cl.pending_f` which causes the next printable key to be consumed as the seek target (non-printable keys cancel). On a successful seek, the target and direction are saved in `cl.last_f_char`/`cl.last_f_len`/`cl.last_f_dir` for `;`/`,` repeat.
+
+Implementation: `cmdline_seek_forward()` and `cmdline_seek_backward()` scan the input buffer byte-by-byte (skipping UTF-8 continuation bytes) using `memcmp` to match multi-byte characters. `cmdline_do_seek()` wraps both and handles the operator interaction — if `cl.pending_op` is set, it computes an inclusive range and calls `cmdline_exec_op_range()` instead of moving the cursor. All four keys (`f`/`F`/`;`/`,`) also work as operator targets (e.g., `df<char>`, `d;`).
+
 ### Editing
 
 | Key | Action |
@@ -229,6 +242,14 @@ Flow (motions):
 
 Motion semantics follow vim: `w`/`W`/`b`/`B` are exclusive (range does not include the destination character), `e`/`E` are inclusive (range includes the full character at destination, advancing past UTF-8 continuation bytes). Backward motions (`b`/`B`) compute `[dest, cursor)`. Forward motions compute `[cursor, dest)` or `[cursor, dest+charlen)` for inclusive.
 
+Flow (character seek):
+1. User presses `d` → `pending_op = 'd'`
+2. User presses `f` → `pending_f = 'f'` (pending_op retained)
+3. User presses `x` → `cmdline_do_seek("x", 1, 1)` finds match, computes inclusive range `[cursor, dest+charlen)` → `cmdline_exec_op_range('d', s, e)` deletes the range
+4. Both pending fields reset to 0
+
+`;`/`,` also work as operator targets: `d;` repeats the last seek as a delete, `c,` repeats in reverse as a change. These are handled directly in the pending_op handler via `cmdline_do_seek()`.
+
 Doubled keys (dd, cc, yy): if the second key matches `pending_op`, the operation is applied to the entire line via `cmdline_exec_op_range(op, 0, cl.input_len)`.
 
 Unknown keys after `pending_op` cancel the pending state.
@@ -246,6 +267,8 @@ The selection is defined by `cl.anchor` (fixed end) and `cl.cursor` (moving end)
 | Esc / v | Exit to normal mode |
 | h / l / Left / Right | Move cursor (extends/shrinks selection) |
 | w / W / e / E / b / B | Word motions (extends/shrinks selection) |
+| f / F | Character seek (extends/shrinks selection to match) |
+| ; / , | Repeat last f/F seek same/opposite direction |
 | 0 / $ / Home / End | Jump cursor |
 | o | Swap anchor and cursor positions |
 | y | Yank selection to clipboard, return to normal |

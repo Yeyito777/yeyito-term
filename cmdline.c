@@ -84,6 +84,10 @@ static struct {
 	int anchor;   /* visual mode anchor (byte offset) */
 	int pending_op;      /* operator-pending: 'd', 'c', 'y', or 0 */
 	int pending_textobj; /* text object prefix: 'i', 'a', or 0 */
+	int pending_f;       /* 'f' or 'F' when waiting for seek char */
+	char last_f_char[8]; /* last f/F target bytes */
+	int last_f_len;      /* byte length of last f/F target */
+	int last_f_dir;      /* 1 = forward (f), -1 = backward (F) */
 	char input[CMDLINE_MAX_INPUT];
 	int input_len;
 	int cursor;   /* byte offset of cursor within input */
@@ -324,6 +328,7 @@ cmdline_open(void)
 			cl.hist_pos = -1;
 			cl.pending_op = 0;
 			cl.pending_textobj = 0;
+			cl.pending_f = 0;
 			cmdline_redraw();
 		}
 		return;
@@ -337,6 +342,7 @@ cmdline_open(void)
 	cl.hist_pos = -1;
 	cl.pending_op = 0;
 	cl.pending_textobj = 0;
+	cl.pending_f = 0;
 
 	XMapRaised(xw.dpy, cl.win);
 	cmdline_redraw();
@@ -354,6 +360,7 @@ cmdline_close(void)
 	cl.state = CMDLINE_HIDDEN;
 	cl.pending_op = 0;
 	cl.pending_textobj = 0;
+	cl.pending_f = 0;
 	XUnmapWindow(xw.dpy, cl.win);
 
 	if (debug_mode)
@@ -859,6 +866,96 @@ motion_B_pos(int pos)
 	return pos;
 }
 
+/* Forward declaration for cmdline_do_seek */
+static void cmdline_exec_op_range(int op, int s, int e);
+
+/* ---- Character seek helpers (f/F) ---- */
+
+/* Seek forward from cursor for character ch[0..chlen-1].
+ * Returns byte offset of match, or -1 if not found. */
+static int
+cmdline_seek_forward(const char *ch, int chlen)
+{
+	int pos = cl.cursor;
+
+	/* Advance past current character */
+	pos++;
+	while (pos < cl.input_len && (cl.input[pos] & 0xC0) == 0x80)
+		pos++;
+	/* Scan forward for match */
+	while (pos + chlen <= cl.input_len) {
+		if (memcmp(cl.input + pos, ch, chlen) == 0)
+			return pos;
+		pos++;
+		while (pos < cl.input_len && (cl.input[pos] & 0xC0) == 0x80)
+			pos++;
+	}
+	return -1;
+}
+
+/* Seek backward from cursor for character ch[0..chlen-1].
+ * Returns byte offset of match, or -1 if not found. */
+static int
+cmdline_seek_backward(const char *ch, int chlen)
+{
+	int pos = cl.cursor;
+
+	if (pos <= 0)
+		return -1;
+	pos--;
+	while (pos > 0 && (cl.input[pos] & 0xC0) == 0x80)
+		pos--;
+	while (pos >= 0) {
+		if (pos + chlen <= cl.input_len &&
+		    memcmp(cl.input + pos, ch, chlen) == 0)
+			return pos;
+		if (pos == 0)
+			break;
+		pos--;
+		while (pos > 0 && (cl.input[pos] & 0xC0) == 0x80)
+			pos--;
+	}
+	return -1;
+}
+
+/* Execute a character seek. If pending_op is set, operates on the range
+ * (f/F are inclusive motions). Otherwise just moves cursor.
+ * Returns 1 if a match was found. */
+static int
+cmdline_do_seek(const char *ch, int chlen, int dir)
+{
+	int dest = (dir > 0) ? cmdline_seek_forward(ch, chlen)
+	                     : cmdline_seek_backward(ch, chlen);
+	if (dest < 0)
+		return 0;
+
+	if (cl.pending_op) {
+		int s, e;
+		if (dest > cl.cursor) {
+			s = cl.cursor;
+			/* inclusive: include char at dest */
+			e = dest + 1;
+			while (e < cl.input_len &&
+			       (cl.input[e] & 0xC0) == 0x80)
+				e++;
+		} else {
+			s = dest;
+			/* inclusive: include char at cursor */
+			e = cl.cursor + 1;
+			while (e < cl.input_len &&
+			       (cl.input[e] & 0xC0) == 0x80)
+				e++;
+		}
+		if (e > cl.input_len)
+			e = cl.input_len;
+		cmdline_exec_op_range(cl.pending_op, s, e);
+		cl.pending_op = 0;
+	} else {
+		cl.cursor = dest;
+	}
+	return 1;
+}
+
 /* Execute operator on a byte range [s, e) */
 static void
 cmdline_exec_op_range(int op, int s, int e)
@@ -1005,8 +1102,22 @@ cmdline_handle_normal(unsigned long ksym, unsigned int state,
                       const char *buf, int len)
 {
 	(void)state;
-	(void)buf;
-	(void)len;
+
+	/* Pending char seek: consume next key as target */
+	if (cl.pending_f) {
+		if (len > 0 && (unsigned char)buf[0] >= 0x20) {
+			int dir = (cl.pending_f == 'f') ? 1 : -1;
+			if (cmdline_do_seek(buf, len, dir)) {
+				memcpy(cl.last_f_char, buf, len);
+				cl.last_f_len = len;
+				cl.last_f_dir = dir;
+			}
+		}
+		cl.pending_f = 0;
+		cl.pending_op = 0;
+		cmdline_redraw();
+		return 1;
+	}
 
 	/* Pending text object: waiting for object key */
 	if (cl.pending_op && cl.pending_textobj) {
@@ -1066,6 +1177,21 @@ cmdline_handle_normal(unsigned long ksym, unsigned int state,
 				cmdline_redraw();
 				return 1;
 			}
+		}
+		/* f/F: set pending seek, keep pending_op */
+		if (ksym == 'f' || ksym == 'F') {
+			cl.pending_f = ksym;
+			return 1;
+		}
+		/* ;/, as operator targets */
+		if (ksym == ';' || ksym == ',') {
+			if (cl.last_f_len > 0) {
+				int dir = (ksym == ';') ? cl.last_f_dir : -cl.last_f_dir;
+				cmdline_do_seek(cl.last_f_char, cl.last_f_len, dir);
+			}
+			cl.pending_op = 0;
+			cmdline_redraw();
+			return 1;
 		}
 		/* Unknown key - cancel pending */
 		cl.pending_op = 0;
@@ -1238,6 +1364,27 @@ cmdline_handle_normal(unsigned long ksym, unsigned int state,
 		cl.cursor = motion_B_pos(cl.cursor);
 		cmdline_redraw();
 		return 1;
+	/* Character seek */
+	case 'f':
+		cl.pending_f = 'f';
+		return 1;
+	case 'F':
+		cl.pending_f = 'F';
+		return 1;
+	case ';':
+		if (cl.last_f_len > 0) {
+			cmdline_do_seek(cl.last_f_char, cl.last_f_len,
+			                cl.last_f_dir);
+			cmdline_redraw();
+		}
+		return 1;
+	case ',':
+		if (cl.last_f_len > 0) {
+			cmdline_do_seek(cl.last_f_char, cl.last_f_len,
+			                -cl.last_f_dir);
+			cmdline_redraw();
+		}
+		return 1;
 	default:
 		break;
 	}
@@ -1332,8 +1479,21 @@ cmdline_handle_visual(unsigned long ksym, unsigned int state,
                       const char *buf, int len)
 {
 	(void)state;
-	(void)buf;
-	(void)len;
+
+	/* Pending char seek: consume next key as target */
+	if (cl.pending_f) {
+		if (len > 0 && (unsigned char)buf[0] >= 0x20) {
+			int dir = (cl.pending_f == 'f') ? 1 : -1;
+			if (cmdline_do_seek(buf, len, dir)) {
+				memcpy(cl.last_f_char, buf, len);
+				cl.last_f_len = len;
+				cl.last_f_dir = dir;
+			}
+		}
+		cl.pending_f = 0;
+		cmdline_redraw();
+		return 1;
+	}
 
 	/* Pending text object: adjust selection */
 	if (cl.pending_textobj) {
@@ -1439,6 +1599,27 @@ cmdline_handle_visual(unsigned long ksym, unsigned int state,
 	case 'B':
 		cl.cursor = motion_B_pos(cl.cursor);
 		cmdline_redraw();
+		return 1;
+	/* Character seek */
+	case 'f':
+		cl.pending_f = 'f';
+		return 1;
+	case 'F':
+		cl.pending_f = 'F';
+		return 1;
+	case ';':
+		if (cl.last_f_len > 0) {
+			cmdline_do_seek(cl.last_f_char, cl.last_f_len,
+			                cl.last_f_dir);
+			cmdline_redraw();
+		}
+		return 1;
+	case ',':
+		if (cl.last_f_len > 0) {
+			cmdline_do_seek(cl.last_f_char, cl.last_f_len,
+			                -cl.last_f_dir);
+			cmdline_redraw();
+		}
 		return 1;
 	/* Text object selection */
 	case 'i':
