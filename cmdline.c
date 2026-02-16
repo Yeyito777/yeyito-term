@@ -82,6 +82,8 @@ static struct {
 	int state;
 	int cmd_mode; /* 0 = insert, 1 = normal, 2 = visual */
 	int anchor;   /* visual mode anchor (byte offset) */
+	int pending_op;      /* operator-pending: 'd', 'c', 'y', or 0 */
+	int pending_textobj; /* text object prefix: 'i', 'a', or 0 */
 	char input[CMDLINE_MAX_INPUT];
 	int input_len;
 	int cursor;   /* byte offset of cursor within input */
@@ -320,6 +322,8 @@ cmdline_open(void)
 			cl.input_len = 0;
 			cl.cursor = 0;
 			cl.hist_pos = -1;
+			cl.pending_op = 0;
+			cl.pending_textobj = 0;
 			cmdline_redraw();
 		}
 		return;
@@ -331,6 +335,8 @@ cmdline_open(void)
 	cl.input_len = 0;
 	cl.cursor = 0;
 	cl.hist_pos = -1;
+	cl.pending_op = 0;
+	cl.pending_textobj = 0;
 
 	XMapRaised(xw.dpy, cl.win);
 	cmdline_redraw();
@@ -346,6 +352,8 @@ cmdline_close(void)
 		return;
 
 	cl.state = CMDLINE_HIDDEN;
+	cl.pending_op = 0;
+	cl.pending_textobj = 0;
 	XUnmapWindow(xw.dpy, cl.win);
 
 	if (debug_mode)
@@ -461,6 +469,293 @@ cmdline_clamp_normal_cursor(void)
 	}
 }
 
+/* ---- Text object helpers ---- */
+
+static int
+is_word_char(unsigned char c)
+{
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+	       (c >= '0' && c <= '9') || c == '_';
+}
+
+static int
+cmdline_textobj_word(int inner, int *s, int *e)
+{
+	int pos = cl.cursor;
+	int start, end;
+	unsigned char ch;
+
+	if (pos >= cl.input_len)
+		return 0;
+
+	ch = (unsigned char)cl.input[pos];
+	if (is_word_char(ch)) {
+		start = pos;
+		while (start > 0 && is_word_char((unsigned char)cl.input[start - 1]))
+			start--;
+		end = pos;
+		while (end < cl.input_len && is_word_char((unsigned char)cl.input[end]))
+			end++;
+	} else if (ch == ' ' || ch == '\t') {
+		start = pos;
+		while (start > 0 && (cl.input[start - 1] == ' ' || cl.input[start - 1] == '\t'))
+			start--;
+		end = pos;
+		while (end < cl.input_len && (cl.input[end] == ' ' || cl.input[end] == '\t'))
+			end++;
+	} else {
+		start = pos;
+		while (start > 0 && !is_word_char((unsigned char)cl.input[start - 1]) &&
+		       cl.input[start - 1] != ' ' && cl.input[start - 1] != '\t')
+			start--;
+		end = pos;
+		while (end < cl.input_len && !is_word_char((unsigned char)cl.input[end]) &&
+		       cl.input[end] != ' ' && cl.input[end] != '\t')
+			end++;
+	}
+
+	if (!inner) {
+		if (end < cl.input_len && (cl.input[end] == ' ' || cl.input[end] == '\t')) {
+			while (end < cl.input_len && (cl.input[end] == ' ' || cl.input[end] == '\t'))
+				end++;
+		} else {
+			while (start > 0 && (cl.input[start - 1] == ' ' || cl.input[start - 1] == '\t'))
+				start--;
+		}
+	}
+
+	*s = start;
+	*e = end;
+	return 1;
+}
+
+static int
+cmdline_textobj_WORD(int inner, int *s, int *e)
+{
+	int pos = cl.cursor;
+	int start, end;
+
+	if (pos >= cl.input_len)
+		return 0;
+
+	if (cl.input[pos] == ' ' || cl.input[pos] == '\t') {
+		start = pos;
+		while (start > 0 && (cl.input[start - 1] == ' ' || cl.input[start - 1] == '\t'))
+			start--;
+		end = pos;
+		while (end < cl.input_len && (cl.input[end] == ' ' || cl.input[end] == '\t'))
+			end++;
+	} else {
+		start = pos;
+		while (start > 0 && cl.input[start - 1] != ' ' && cl.input[start - 1] != '\t')
+			start--;
+		end = pos;
+		while (end < cl.input_len && cl.input[end] != ' ' && cl.input[end] != '\t')
+			end++;
+	}
+
+	if (!inner) {
+		if (end < cl.input_len && (cl.input[end] == ' ' || cl.input[end] == '\t')) {
+			while (end < cl.input_len && (cl.input[end] == ' ' || cl.input[end] == '\t'))
+				end++;
+		} else {
+			while (start > 0 && (cl.input[start - 1] == ' ' || cl.input[start - 1] == '\t'))
+				start--;
+		}
+	}
+
+	*s = start;
+	*e = end;
+	return 1;
+}
+
+static int
+cmdline_textobj_quote(int inner, char q, int *s, int *e)
+{
+	int i, left = -1, right = -1;
+
+	/* Try to find enclosing pair around cursor */
+	for (i = cl.cursor; i >= 0; i--) {
+		if (cl.input[i] == q) {
+			int j, jstart = (i == cl.cursor) ? cl.cursor + 1 : cl.cursor;
+			for (j = jstart; j < cl.input_len; j++) {
+				if (cl.input[j] == q) {
+					left = i;
+					right = j;
+					goto found;
+				}
+			}
+		}
+	}
+
+	/* Forward search: find first pair ahead of cursor */
+	for (i = cl.cursor; i < cl.input_len; i++) {
+		if (cl.input[i] == q) {
+			int j;
+			for (j = i + 1; j < cl.input_len; j++) {
+				if (cl.input[j] == q) {
+					left = i;
+					right = j;
+					goto found;
+				}
+			}
+			break; /* Only one quote ahead, no pair */
+		}
+	}
+	return 0;
+
+found:
+	if (inner) {
+		*s = left + 1;
+		*e = right;
+	} else {
+		*s = left;
+		*e = right + 1;
+	}
+	return 1;
+}
+
+static int
+cmdline_textobj_bracket(int inner, char open, char close, int *s, int *e)
+{
+	int i, depth, left = -1, right = -1;
+
+	/* Try to find enclosing pair around cursor */
+	depth = 0;
+	for (i = cl.cursor; i >= 0; i--) {
+		if (cl.input[i] == close && i < cl.cursor)
+			depth++;
+		if (cl.input[i] == open) {
+			if (depth == 0) { left = i; break; }
+			depth--;
+		}
+	}
+
+	if (left >= 0) {
+		/* Found opening to the left, find matching close */
+		depth = 0;
+		for (i = left + 1; i < cl.input_len; i++) {
+			if (cl.input[i] == open)
+				depth++;
+			if (cl.input[i] == close) {
+				if (depth == 0) { right = i; break; }
+				depth--;
+			}
+		}
+		if (right >= 0)
+			goto found;
+	}
+
+	/* Forward search: find first opening bracket ahead of cursor */
+	left = -1;
+	right = -1;
+	for (i = cl.cursor; i < cl.input_len; i++) {
+		if (cl.input[i] == open) {
+			left = i;
+			break;
+		}
+	}
+	if (left < 0)
+		return 0;
+
+	depth = 0;
+	for (i = left + 1; i < cl.input_len; i++) {
+		if (cl.input[i] == open)
+			depth++;
+		if (cl.input[i] == close) {
+			if (depth == 0) { right = i; break; }
+			depth--;
+		}
+	}
+	if (right < 0)
+		return 0;
+
+found:
+	if (inner) {
+		*s = left + 1;
+		*e = right;
+	} else {
+		*s = left;
+		*e = right + 1;
+	}
+	return 1;
+}
+
+/* Unified text object dispatcher. Returns byte range [s, e) on success. */
+static int
+cmdline_find_textobj(int ia, unsigned long key, int *s, int *e)
+{
+	int inner = (ia == 'i');
+
+	switch (key) {
+	case 'w':
+		return cmdline_textobj_word(inner, s, e);
+	case 'W':
+		return cmdline_textobj_WORD(inner, s, e);
+	case '"':
+		return cmdline_textobj_quote(inner, '"', s, e);
+	case '\'':
+		return cmdline_textobj_quote(inner, '\'', s, e);
+	case '`':
+		return cmdline_textobj_quote(inner, '`', s, e);
+	case '(':
+	case ')':
+	case 'b':
+		return cmdline_textobj_bracket(inner, '(', ')', s, e);
+	case '{':
+	case '}':
+	case 'B':
+		return cmdline_textobj_bracket(inner, '{', '}', s, e);
+	case '[':
+	case ']':
+		return cmdline_textobj_bracket(inner, '[', ']', s, e);
+	case '<':
+	case '>':
+		return cmdline_textobj_bracket(inner, '<', '>', s, e);
+	default:
+		return 0;
+	}
+}
+
+/* Execute operator on a byte range [s, e) */
+static void
+cmdline_exec_op_range(int op, int s, int e)
+{
+	if (e <= s)
+		return;
+
+	switch (op) {
+	case 'y': {
+		char *text = xmalloc(e - s + 1);
+		memcpy(text, cl.input + s, e - s);
+		text[e - s] = '\0';
+		xsetsel(text);
+		xclipcopy();
+		if (debug_mode)
+			fprintf(stderr, "cmdline: op yank '%s'\n", text);
+		break;
+	}
+	case 'd':
+		memmove(cl.input + s, cl.input + e, cl.input_len - e);
+		cl.input_len -= (e - s);
+		cl.input[cl.input_len] = '\0';
+		cl.cursor = s;
+		cmdline_clamp_normal_cursor();
+		if (debug_mode)
+			fprintf(stderr, "cmdline: op delete, input='%s'\n", cl.input);
+		break;
+	case 'c':
+		memmove(cl.input + s, cl.input + e, cl.input_len - e);
+		cl.input_len -= (e - s);
+		cl.input[cl.input_len] = '\0';
+		cl.cursor = s;
+		cl.cmd_mode = 0; /* insert mode */
+		if (debug_mode)
+			fprintf(stderr, "cmdline: op change, input='%s'\n", cl.input);
+		break;
+	}
+}
+
 static int
 cmdline_handle_insert(unsigned long ksym, unsigned int state,
                       const char *buf, int len)
@@ -571,6 +866,35 @@ cmdline_handle_normal(unsigned long ksym, unsigned int state,
 	(void)buf;
 	(void)len;
 
+	/* Pending text object: waiting for object key */
+	if (cl.pending_op && cl.pending_textobj) {
+		int s, e;
+		if (cmdline_find_textobj(cl.pending_textobj, ksym, &s, &e))
+			cmdline_exec_op_range(cl.pending_op, s, e);
+		cl.pending_op = 0;
+		cl.pending_textobj = 0;
+		cmdline_redraw();
+		return 1;
+	}
+
+	/* Pending operator: waiting for i/a or doubled key */
+	if (cl.pending_op) {
+		if (ksym == 'i' || ksym == 'a') {
+			cl.pending_textobj = ksym;
+			return 1;
+		}
+		if ((int)ksym == cl.pending_op) {
+			/* dd/cc/yy - operate on whole line */
+			cmdline_exec_op_range(cl.pending_op, 0, cl.input_len);
+			cl.pending_op = 0;
+			cmdline_redraw();
+			return 1;
+		}
+		/* Unknown key - cancel pending */
+		cl.pending_op = 0;
+		return 1;
+	}
+
 	switch (ksym) {
 	case XK_Return:
 	case XK_KP_Enter:
@@ -641,6 +965,36 @@ cmdline_handle_normal(unsigned long ksym, unsigned int state,
 		cmdline_clamp_normal_cursor();
 		cmdline_redraw();
 		return 1;
+	/* Operator-pending keys */
+	case 'd':
+		cl.pending_op = 'd';
+		return 1;
+	case 'c':
+		cl.pending_op = 'c';
+		return 1;
+	case 'y':
+		cl.pending_op = 'y';
+		return 1;
+	/* Shift+D: delete from cursor to end */
+	case 'D':
+		if (cl.input_len > 0) {
+			cl.input_len = cl.cursor;
+			cl.input[cl.input_len] = '\0';
+			cmdline_clamp_normal_cursor();
+			if (debug_mode)
+				fprintf(stderr, "cmdline: D, input='%s'\n", cl.input);
+			cmdline_redraw();
+		}
+		return 1;
+	/* Shift+C: change from cursor to end */
+	case 'C':
+		cl.input_len = cl.cursor;
+		cl.input[cl.input_len] = '\0';
+		cl.cmd_mode = 0;
+		if (debug_mode)
+			fprintf(stderr, "cmdline: C, input='%s'\n", cl.input);
+		cmdline_redraw();
+		return 1;
 	case 'i':
 		cl.cmd_mode = 0;
 		if (debug_mode)
@@ -682,7 +1036,7 @@ cmdline_handle_normal(unsigned long ksym, unsigned int state,
 		break;
 	}
 
-	return 1; /* Consume all keys when cmdline active */
+	return 1;
 }
 
 static void
@@ -775,6 +1129,25 @@ cmdline_handle_visual(unsigned long ksym, unsigned int state,
 	(void)buf;
 	(void)len;
 
+	/* Pending text object: adjust selection */
+	if (cl.pending_textobj) {
+		int s, e;
+		if (cmdline_find_textobj(cl.pending_textobj, ksym, &s, &e) && e > s) {
+			cl.anchor = s;
+			/* cursor on last char (inclusive) */
+			cl.cursor = e - 1;
+			while (cl.cursor > s &&
+			       (cl.input[cl.cursor] & 0xC0) == 0x80)
+				cl.cursor--;
+			if (debug_mode)
+				fprintf(stderr, "cmdline: visual textobj anchor=%d cursor=%d\n",
+				        cl.anchor, cl.cursor);
+		}
+		cl.pending_textobj = 0;
+		cmdline_redraw();
+		return 1;
+	}
+
 	switch (ksym) {
 	case XK_Escape:
 	case 'v':
@@ -832,6 +1205,13 @@ cmdline_handle_visual(unsigned long ksym, unsigned int state,
 	case 'c':
 		cmdline_visual_change();
 		return 1;
+	/* Text object selection */
+	case 'i':
+		cl.pending_textobj = 'i';
+		return 1;
+	case 'a':
+		cl.pending_textobj = 'a';
+		return 1;
 	default:
 		break;
 	}
@@ -843,6 +1223,10 @@ int
 cmdline_handle_key(unsigned long ksym, unsigned int state,
                    const char *buf, int len)
 {
+	/* Ignore bare modifier keys (Shift, Ctrl, etc.) */
+	if (IsModifierKey(ksym))
+		return 1;
+
 	/* Shift+Escape: close from any state */
 	if (ksym == XK_Escape && (state & ShiftMask)) {
 		cmdline_close();
