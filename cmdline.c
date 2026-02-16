@@ -11,6 +11,7 @@
 #include <X11/keysym.h>
 
 #include "cmdline.h"
+#include "notif.h"
 #include "vimnav.h"
 
 typedef XftDraw *Draw;
@@ -483,6 +484,140 @@ cmdline_hist_load(int pos)
 	cl.hist_pos = pos;
 }
 
+/* Parse and execute :notify command.
+ * Syntax: notify [-t ms] [-bg col] [-fg col] [-b col] [-ts sz] <msg>
+ * <msg> is unquoted (single word) or "quoted with spaces" (\" for inner quotes).
+ * Unquoted message takes rest of line. Returns 1 on success, 0 on error. */
+static int
+cmdline_exec_notify(const char *args)
+{
+	char meta[512];
+	char msg[512];
+	char wire[1024];
+	int mlen = 0;
+	const char *p = args;
+
+	/* Skip leading whitespace */
+	while (*p == ' ' || *p == '\t')
+		p++;
+
+	if (*p == '\0') {
+		snprintf(cl.errmsg, sizeof(cl.errmsg), "notify: missing message");
+		return 0;
+	}
+
+	/* Parse options */
+	while (*p == '-') {
+		const char *start = p;
+		char key[8];
+		char val[64];
+		int vi = 0;
+
+		p++; /* skip '-' */
+
+		/* Match known flag names (multi-char before single-char) */
+		if (strncmp(p, "bg", 2) == 0 && (p[2] == ' ' || p[2] == '\t')) {
+			strcpy(key, "bg");
+			p += 2;
+		} else if (strncmp(p, "fg", 2) == 0 && (p[2] == ' ' || p[2] == '\t')) {
+			strcpy(key, "fg");
+			p += 2;
+		} else if (strncmp(p, "ts", 2) == 0 && (p[2] == ' ' || p[2] == '\t')) {
+			strcpy(key, "ts");
+			p += 2;
+		} else if (*p == 't' && (p[1] == ' ' || p[1] == '\t')) {
+			strcpy(key, "t");
+			p += 1;
+		} else if (*p == 'b' && (p[1] == ' ' || p[1] == '\t')) {
+			strcpy(key, "b");
+			p += 1;
+		} else {
+			/* Not a recognized flag — rest is the message */
+			p = start;
+			break;
+		}
+
+		/* Skip whitespace before value */
+		while (*p == ' ' || *p == '\t')
+			p++;
+
+		/* Parse value (quoted or unquoted) */
+		if (*p == '"') {
+			p++;
+			while (*p && *p != '"' && vi < (int)sizeof(val) - 1) {
+				if (*p == '\\' && p[1] == '"') {
+					val[vi++] = '"';
+					p += 2;
+				} else {
+					val[vi++] = *p++;
+				}
+			}
+			if (*p == '"')
+				p++;
+		} else {
+			while (*p && *p != ' ' && *p != '\t' && vi < (int)sizeof(val) - 1)
+				val[vi++] = *p++;
+		}
+		val[vi] = '\0';
+
+		if (vi == 0) {
+			snprintf(cl.errmsg, sizeof(cl.errmsg),
+			         "notify: missing value for -%s", key);
+			return 0;
+		}
+
+		/* Append to metadata (wire protocol: key=val\x1f separated) */
+		if (mlen > 0)
+			meta[mlen++] = '\x1f';
+		mlen += snprintf(meta + mlen, sizeof(meta) - mlen,
+		                 "%s=%s", key, val);
+
+		/* Skip whitespace before next option or message */
+		while (*p == ' ' || *p == '\t')
+			p++;
+	}
+
+	/* Parse message */
+	if (*p == '\0') {
+		snprintf(cl.errmsg, sizeof(cl.errmsg), "notify: missing message");
+		return 0;
+	}
+
+	if (*p == '"') {
+		int mi = 0;
+		p++;
+		while (*p && mi < (int)sizeof(msg) - 1) {
+			if (*p == '\\' && p[1] == '"') {
+				msg[mi++] = '"';
+				p += 2;
+			} else if (*p == '"') {
+				break;
+			} else {
+				msg[mi++] = *p++;
+			}
+		}
+		msg[mi] = '\0';
+	} else {
+		/* Unquoted: rest of input is the message */
+		strncpy(msg, p, sizeof(msg) - 1);
+		msg[sizeof(msg) - 1] = '\0';
+	}
+
+	if (msg[0] == '\0') {
+		snprintf(cl.errmsg, sizeof(cl.errmsg), "notify: empty message");
+		return 0;
+	}
+
+	/* Build wire protocol string: metadata\x1emessage (or just message) */
+	if (mlen > 0)
+		snprintf(wire, sizeof(wire), "%s\x1e%s", meta, msg);
+	else
+		snprintf(wire, sizeof(wire), "%s", msg);
+
+	notif_show(wire);
+	return 1;
+}
+
 static void
 cmdline_execute(void)
 {
@@ -508,6 +643,18 @@ cmdline_execute(void)
 	if (strcmp(cl.input, "noh") == 0) {
 		search_noh();
 		cmdline_close();
+		return;
+	}
+
+	/* :notify command */
+	if (strncmp(cl.input, "notify", 6) == 0 &&
+	    (cl.input[6] == ' ' || cl.input[6] == '\0')) {
+		if (cmdline_exec_notify(cl.input + 6)) {
+			cmdline_close();
+		} else {
+			cl.state = CMDLINE_ERROR;
+			cmdline_redraw();
+		}
 		return;
 	}
 
