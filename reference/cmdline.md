@@ -1,6 +1,6 @@
-# Command-line mode — vim-like `:` command interface
+# Command-line mode — vim-like `:`, `/`, `?` command and search interface
 
-st provides a vim-like command-line overlay activated by pressing `:` while in nav mode. It implements three editing modes (insert, normal, visual), operator-pending text objects, command history, and clipboard integration. The overlay is an X11 child window drawn at the bottom of the terminal, following the same pattern as sshind.c and notif.c.
+st provides a vim-like command-line overlay activated by pressing `:`, `/`, or `?` while in nav mode. It implements three editing modes (insert, normal, visual), operator-pending text objects, command history, clipboard integration, and live incremental regex search through scrollback history. The overlay is an X11 child window drawn at the bottom of the terminal, following the same pattern as sshind.c and notif.c.
 
 ## Architecture
 
@@ -11,11 +11,13 @@ The command-line is a self-contained X11 child window that sits over the last ro
 | File | Role |
 |------|------|
 | `cmdline.h` | Configuration constants (colors, sizes) and public API declarations |
-| `cmdline.c` | Full implementation (~1600 lines): window management, rendering, modal key handling, text objects, word motions, character seek (f/F/;/,), history |
-| `x.c` | Integration: init, draw, resize, key intercept, cursor hiding |
-| `vimnav.c` | Entry point: `:` in nav mode calls `cmdline_open()` |
+| `cmdline.c` | Full implementation (~1600 lines): window management, rendering, modal key handling, text objects, word motions, character seek (f/F/;/,), history, search dispatch |
+| `x.c` | Integration: init, draw, resize, key intercept, cursor hiding, search highlight rendering |
+| `vimnav.c` | Entry point: `:` in nav mode calls `cmdline_open()`, `/`/`?` call `cmdline_open_search()`, `n`/`N` call `search_next()` |
+| `search.c` | Regex search module (~350 lines): pattern compilation, match finding, highlight state, scroll centering, n/N navigation |
+| `search.h` | Search configuration (search_match_bg color index) |
 | `st.h` | Public function declarations |
-| `tests/mocks.c` | `cmdline_open()` stub for test linking |
+| `tests/mocks.c` | `cmdline_open()`/`cmdline_open_search()` and search stubs for test linking |
 
 ### Struct redeclaration pattern
 
@@ -77,12 +79,24 @@ enum {
 Stored in `cl.state`. Transitions:
 
 ```
-HIDDEN --[cmdline_open]--> INPUT
-INPUT  --[execute, no match]--> ERROR
+HIDDEN --[cmdline_open]--> INPUT (prefix ':')
+HIDDEN --[cmdline_open_search(1)]--> INPUT (prefix '/')
+HIDDEN --[cmdline_open_search(0)]--> INPUT (prefix '?')
+INPUT  --[execute ':' command, no match]--> ERROR
+INPUT  --[execute '/'/'?' search]--> HIDDEN (search active)
 INPUT  --[Shift+Esc / backspace on empty]--> HIDDEN
+INPUT  --[Esc in search mode]--> HIDDEN (search cancelled, position restored)
 ERROR  --[any key]--> HIDDEN
 ERROR  --[':' from vimnav]--> INPUT (reopen in same window)
 ```
+
+### Prefix field (`cl.prefix`)
+
+The command-line supports three prefixes: `:` (command), `/` (forward search), `?` (backward search). The prefix is set when opening and displayed as the first character instead of a hardcoded `:`. It determines how the input is dispatched on Enter:
+
+- **`:`** — command mode: checks for known commands (currently `:noh`), otherwise shows error
+- **`/`** — forward search: search is already active from live matching, just close
+- **`?`** — backward search: same as `/` but in reverse direction
 
 ### Editing modes (`cl.cmd_mode`)
 
@@ -136,14 +150,14 @@ Entry: opening cmdline, or `i`/`a`/`I`/`A`/`c`/`C` from normal mode.
 
 | Key | Action |
 |-----|--------|
-| Esc | Switch to normal mode, cursor moves back one (vim behavior) |
+| Esc | In `:` mode: switch to normal mode, cursor moves back one (vim behavior). In `/`/`?` mode: cancel search, restore cursor position, close cmdline |
 | Enter | Execute command |
 | Left/Right | UTF-8-aware cursor movement |
 | Up/Down | History navigation (older/newer) |
 | Home/End | Jump to start/end |
 | Delete | Delete character at cursor |
-| Backspace | Delete character before cursor; if input is empty, close cmdline |
-| Printable chars | Insert at cursor position (supports UTF-8 multibyte) |
+| Backspace | Delete character before cursor; if input is empty, close cmdline (cancels search if in search mode) |
+| Printable chars | Insert at cursor position (supports UTF-8 multibyte); triggers live search in `/`/`?` mode |
 
 ### Character insertion
 
@@ -444,20 +458,46 @@ This is used in `cursor_left()`, `cursor_right()`, `delete_at_cursor()`, `cmdlin
 | Location | Code | Purpose |
 |----------|------|---------|
 | Line 70 | `#include "cmdline.h"` | Header |
+| Line 71 | `#include "search.h"` | Search header (for `search_match_bg`) |
+| `xdrawline()` | `search_matched(x, y1)` → `ATTR_MATCH` | Add match flag per-glyph during rendering |
+| `xdrawglyphfontspecs()` | `ATTR_MATCH` color handling | Swap fg/bg for search highlights |
 | `xdrawcursor()` | `if (... \|\| cmdline_active()) return;` | Hide main terminal cursor while cmdline is active |
+| `xdrawcursor()` | `search_matched(ox, oy)` → `ATTR_MATCH` | Preserve highlight when cursor moves off a match |
 | `kpress()` | `if (cmdline_active()) { cmdline_handle_key(...); return; }` | Intercept all keys before vimnav/shortcuts/tty |
 | `run()` | `cmdline_init()` | Create child window after `cresize()` |
 | `expose()` | `cmdline_draw()` | Redraw on expose events |
 | `resize()` | `cmdline_resize()` | Recompute geometry on terminal resize |
 
+## Integration points in st.c
+
+| Location | Code | Purpose |
+|----------|------|---------|
+| `drawregion()` | `search_invalidate_cache()` | Reset per-line match cache at start of each draw cycle |
+
 ## Integration with vimnav.c
 
 ```c
-extern void cmdline_open(void);
-
 // In vimnav_handle_key():
 case ':':
     cmdline_open();
+    break;
+case '/':
+    cmdline_open_search(1);
+    break;
+case '?':
+    cmdline_open_search(0);
+    break;
+case 'n':
+    if (search_has_pattern())
+        search_next(1);
+    else if (vimnav.mode != VIMNAV_VISUAL && vimnav.mode != VIMNAV_VISUAL_LINE)
+        handled = 0;
+    break;
+case 'N':
+    if (search_has_pattern())
+        search_next(-1);
+    else if (vimnav.mode != VIMNAV_VISUAL && vimnav.mode != VIMNAV_VISUAL_LINE)
+        handled = 0;
     break;
 ```
 
@@ -487,6 +527,16 @@ static const int cmdline_border_top = 1;              // border thickness (px)
 #define CMDLINE_HIST_MAX  64     // max history entries
 ```
 
+## Configuration (config.h / search.h)
+
+```c
+// In colorname[] array at index 264:
+"#fce094",  /* 264 → search match highlight bg */
+
+// In config.h:
+unsigned int search_match_bg = 264;
+```
+
 Colors follow the st fork's theme (same palette as the terminal and other overlays).
 
 ## Debug mode
@@ -507,13 +557,140 @@ When `debug_mode` is set (st's `-d` flag), cmdline logs to stderr (which is redi
 
 ## Command execution
 
-Currently a stub — all commands show `"Not a terminal command: '<input>'"` as an error. The infrastructure is in place for a command dispatch table: `cmdline_execute()` receives the input string after saving to history. This is step 1 of the broader `?`/`/` search navigation feature, where the command-line will eventually handle search commands.
+`cmdline_execute()` dispatches based on `cl.prefix`:
+
+### `:` commands
+
+| Command | Action |
+|---------|--------|
+| `noh` | Hide search highlights (keeps pattern compiled so `n`/`N` can resume) |
+| anything else | Shows `"Not a terminal command: '<input>'"` error |
+
+### `/` and `?` search
+
+When prefix is `/` or `?`, Enter simply closes the cmdline — the search is already active from live incremental matching during typing. The vimnav cursor stays at the current match position.
+
+## Search integration (`/`, `?`, `n`, `N`)
+
+### Overview
+
+The cmdline provides the input UI for vim-style regex search. A separate `search.c` module handles pattern compilation, match finding, highlighting, and navigation. The two modules communicate through a clean API.
+
+### Opening search
+
+`cmdline_open_search(int forward)` is called from vimnav.c when the user presses `/` (forward=1) or `?` (forward=0). It:
+
+1. Saves the current vimnav cursor position (`vimnav.x`, `vimnav.y`) and scroll offset (`term.scr`) in `cl.search_vim_x`, `cl.search_vim_y`, `cl.search_scr`
+2. Opens the cmdline with prefix `/` or `?`
+
+### Live incremental search
+
+After every keypress that modifies input (character insertion, deletion, backspace), `cmdline_live_search()` is called if the prefix is `/` or `?`. It:
+
+1. Restores the saved vimnav position and scroll (so each search starts from the original position, not from the last match)
+2. If input is non-empty: calls `search_execute(cl.input, direction)` which compiles the regex, finds the first match, scrolls to center it, and moves the vimnav cursor
+3. If input is empty: calls `search_clear()` and restores the saved position
+
+This gives real-time feedback as the user types, matching nvim's incremental search behavior.
+
+### Cancelling search (Escape)
+
+Pressing Escape in insert mode while in search mode (`/` or `?` prefix):
+1. Calls `search_clear()` to remove highlights and free the regex
+2. Restores the saved vimnav position and scroll offset
+3. Closes the cmdline
+
+This is also the behavior for backspace-on-empty and Shift+Escape in search mode.
+
+### Confirming search (Enter)
+
+Enter closes the cmdline, leaving the search active and the vimnav cursor at the matched position. Highlights remain visible. The compiled regex is retained for `n`/`N` navigation.
+
+### n/N navigation (vimnav.c)
+
+In vimnav normal mode:
+
+| Key | Action |
+|-----|--------|
+| `n` | `search_next(1)` — next match in original search direction |
+| `N` | `search_next(-1)` — next match in opposite direction |
+
+These keys check `search_has_pattern()` (not `search_active()`) so they work even after `:noh` has hidden highlights. Pressing `n`/`N` after `:noh` reactivates highlights and resumes navigation.
+
+In visual/visual-line mode, `n`/`N` are consumed (return handled=1) to prevent leaking to the terminal, but they still navigate if a pattern exists.
+
+### :noh vs search_clear
+
+- **`:noh`** calls `search_noh()`: sets `sr.active = 0` but keeps the compiled regex. Highlights disappear, but `n`/`N` can resume.
+- **Escape during search** calls `search_clear()`: frees the regex, clears the pattern entirely. The search is fully cancelled.
+- **New `/`/`?` search** calls `search_clear()` implicitly (via `search_execute()`) before compiling the new pattern.
+
+### search.c module
+
+Static state:
+
+```c
+static struct {
+    char pattern[256];
+    regex_t regex;
+    int compiled;      // regex compiled successfully
+    int active;        // highlights visible
+    int direction;     // 1=forward (/), -1=backward (?)
+    int cache_y;       // screen y of cached line (-1 = invalid)
+    struct { int start, end; } cache_ranges[64];
+    int cache_count;
+} sr;
+```
+
+Key functions:
+
+| Function | Purpose |
+|----------|---------|
+| `search_execute(pattern, dir)` | Compile regex (REG_EXTENDED), find first match from vimnav cursor, scroll to center, move cursor |
+| `search_next(dir)` | Find next match in `sr.direction * dir`, reactivate highlights if hidden |
+| `search_clear()` | Free regex, clear all state, `tfulldirt()` |
+| `search_noh()` | Hide highlights only (keep compiled regex) |
+| `search_active()` | Return `sr.active` (are highlights visible?) |
+| `search_has_pattern()` | Return `sr.compiled` (is a regex ready for n/N?) |
+| `search_matched(x, y)` | Check if glyph at (x,y) is in a match. Caches regex results per-line |
+| `search_invalidate_cache()` | Reset per-line cache (called at start of each draw cycle from `drawregion()`) |
+
+### Rendering (x.c)
+
+Search highlights use the same transient-attribute pattern as `ATTR_SELECTED`:
+
+1. **`xdrawline()`**: for each glyph, calls `search_matched(x, y)` and sets `ATTR_MATCH` flag (1 << 12) if matched
+2. **`xdrawglyphfontspecs()`**: if `ATTR_MATCH` is set, swaps fg to the original bg and sets bg to `dc.col[search_match_bg]` (#fce094 at index 264)
+3. **`xdrawcursor()`**: when restoring the old cursor glyph, checks `search_matched(ox, oy)` and adds `ATTR_MATCH` so the highlight is preserved after the cursor moves away
+
+`ATTR_MATCH` is never stored on actual glyph data — it's computed per-frame during rendering. This avoids modifying the scrollback buffer and makes `:noh` instant (just flip `sr.active` + redraw).
+
+### Scroll centering
+
+When a match is found, `scroll_to_absline()` centers it on screen:
+
+```c
+int new_scr = term.row / 2 - absline + term.histn;
+if (new_scr < 0) new_scr = 0;            // match already visible near bottom
+if (new_scr > term.histn) new_scr = term.histn;  // match deep in history
+term.scr = new_scr;
+```
+
+### Coordinate system
+
+"absline" = `term.histn - term.scr + screen_y`. Maps screen coordinates to a stable position in the history+screen buffer:
+- 0 = oldest history line
+- `term.histn - 1` = most recent history line
+- `term.histn` to `term.histn + term.row - 1` = current screen lines
+
+Used to compute scroll targets and scan for matches across the full buffer with wrapping.
 
 ## Public API (st.h / cmdline.h)
 
 ```c
 void cmdline_init(void);       // create X11 child window, load font/colors
-void cmdline_open(void);       // map window, reset to insert mode
+void cmdline_open(void);       // map window with ':' prefix, reset to insert mode
+void cmdline_open_search(int forward);  // map window with '/' or '?' prefix, save vimnav position
 void cmdline_close(void);      // unmap window, reset state
 int  cmdline_handle_key(unsigned long ksym, unsigned int state,
                         const char *buf, int len);  // process keypress, return 1 if consumed
@@ -522,21 +699,46 @@ void cmdline_resize(void);     // recompute geometry (called from resize)
 int  cmdline_active(void);     // return 1 if state != HIDDEN
 ```
 
+### Search API (st.h / search.h)
+
+```c
+void search_execute(const char *pattern, int direction);  // compile regex, find first match, scroll
+void search_next(int direction);       // find next match (reactivates after :noh)
+void search_clear(void);              // free regex, clear all state
+void search_noh(void);                // hide highlights only, keep pattern
+int  search_active(void);             // are highlights visible?
+int  search_has_pattern(void);        // is a regex compiled (for n/N)?
+int  search_matched(int x, int y);    // is glyph at (x,y) in a match?
+void search_invalidate_cache(void);   // reset per-line cache
+```
+
 ## Build
 
 ```makefile
-SRC = st.c x.c vimnav.c sshind.c notif.c persist.c cmdline.c
+SRC = st.c x.c vimnav.c sshind.c notif.c persist.c cmdline.c search.c
 
-x.o: arg.h config.h st.h win.h sshind.h notif.h persist.h cmdline.h
+x.o: arg.h config.h st.h win.h sshind.h notif.h persist.h cmdline.h search.h
 cmdline.o: cmdline.h vimnav.h
+search.o: search.h st.h vimnav.h
 ```
 
-`cmdline.o` depends on `vimnav.h` for the `vimnav` struct (needed to check `vimnav.forced` in `cmdline_open()`).
+`cmdline.o` depends on `vimnav.h` for the `vimnav` struct (needed to check `vimnav.forced` in `cmdline_open()` and to save/restore vimnav position during search). `search.o` depends on `vimnav.h` for cursor positioning via `goto_match()`.
 
-## Test stub
+## Test stubs
 
-`tests/mocks.c` provides a `cmdline_open()` stub so that `vimnav.c` (which calls `cmdline_open()`) can link in the test binary without pulling in X11 dependencies:
+`tests/mocks.c` provides stubs so that `vimnav.c` and other modules can link in test binaries without pulling in X11 dependencies:
 
 ```c
-void cmdline_open(void) { /* Stub for cmdline open */ }
+void cmdline_open(void) { }
+void cmdline_open_search(int forward) { (void)forward; }
+void search_execute(const char *p, int d) { (void)p; (void)d; }
+void search_next(int d) { (void)d; }
+void search_clear(void) { }
+void search_noh(void) { }
+int search_active(void) { return 0; }
+int search_has_pattern(void) { return 0; }
+int search_matched(int x, int y) { (void)x; (void)y; return 0; }
+void search_invalidate_cache(void) { }
 ```
+
+`tests/test_search.c` is a self-contained test file that `#include`s `search.c` directly (same pattern as other test files). It provides its own `Term_search term` and mock `tfulldirt()`/`utf8encode()`. 13 tests cover: inactive default state, basic forward/backward search, regex patterns, cache invalidation, cursor movement, scroll centering, empty pattern, and multiple matches per line.
