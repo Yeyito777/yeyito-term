@@ -717,6 +717,148 @@ cmdline_find_textobj(int ia, unsigned long key, int *s, int *e)
 	}
 }
 
+/* ---- Word motion helpers ---- */
+
+/* Character category: 0=whitespace, 1=word, 2=other */
+static int
+char_cat(unsigned char c)
+{
+	if (c == ' ' || c == '\t')
+		return 0;
+	if (is_word_char(c))
+		return 1;
+	return 2;
+}
+
+/* WORD category: 0=whitespace, 1=non-whitespace */
+static int
+char_CAT(unsigned char c)
+{
+	return (c != ' ' && c != '\t') ? 1 : 0;
+}
+
+/* w motion: forward to start of next word. Returns new byte offset. */
+static int
+motion_w_pos(int pos)
+{
+	int cat;
+
+	if (pos >= cl.input_len)
+		return pos;
+	cat = char_cat((unsigned char)cl.input[pos]);
+	while (pos < cl.input_len &&
+	       char_cat((unsigned char)cl.input[pos]) == cat)
+		pos++;
+	while (pos < cl.input_len &&
+	       char_cat((unsigned char)cl.input[pos]) == 0)
+		pos++;
+	return pos;
+}
+
+/* W motion: forward to start of next WORD. */
+static int
+motion_W_pos(int pos)
+{
+	int cat;
+
+	if (pos >= cl.input_len)
+		return pos;
+	cat = char_CAT((unsigned char)cl.input[pos]);
+	while (pos < cl.input_len &&
+	       char_CAT((unsigned char)cl.input[pos]) == cat)
+		pos++;
+	while (pos < cl.input_len &&
+	       char_CAT((unsigned char)cl.input[pos]) == 0)
+		pos++;
+	return pos;
+}
+
+/* e motion: forward to end of word. */
+static int
+motion_e_pos(int pos)
+{
+	int cat, orig = pos;
+
+	if (pos >= cl.input_len - 1)
+		return pos;
+	pos++;
+	while (pos < cl.input_len &&
+	       char_cat((unsigned char)cl.input[pos]) == 0)
+		pos++;
+	if (pos >= cl.input_len)
+		return orig;
+	cat = char_cat((unsigned char)cl.input[pos]);
+	while (pos + 1 < cl.input_len &&
+	       char_cat((unsigned char)cl.input[pos + 1]) == cat)
+		pos++;
+	/* Back up to start of UTF-8 character */
+	while (pos > 0 && (cl.input[pos] & 0xC0) == 0x80)
+		pos--;
+	return pos;
+}
+
+/* E motion: forward to end of WORD. */
+static int
+motion_E_pos(int pos)
+{
+	int cat, orig = pos;
+
+	if (pos >= cl.input_len - 1)
+		return pos;
+	pos++;
+	while (pos < cl.input_len &&
+	       char_CAT((unsigned char)cl.input[pos]) == 0)
+		pos++;
+	if (pos >= cl.input_len)
+		return orig;
+	cat = char_CAT((unsigned char)cl.input[pos]);
+	while (pos + 1 < cl.input_len &&
+	       char_CAT((unsigned char)cl.input[pos + 1]) == cat)
+		pos++;
+	/* Back up to start of UTF-8 character */
+	while (pos > 0 && (cl.input[pos] & 0xC0) == 0x80)
+		pos--;
+	return pos;
+}
+
+/* b motion: backward to start of word. */
+static int
+motion_b_pos(int pos)
+{
+	int cat;
+
+	if (pos <= 0)
+		return 0;
+	pos--;
+	while (pos > 0 &&
+	       char_cat((unsigned char)cl.input[pos]) == 0)
+		pos--;
+	cat = char_cat((unsigned char)cl.input[pos]);
+	while (pos > 0 &&
+	       char_cat((unsigned char)cl.input[pos - 1]) == cat)
+		pos--;
+	return pos;
+}
+
+/* B motion: backward to start of WORD. */
+static int
+motion_B_pos(int pos)
+{
+	int cat;
+
+	if (pos <= 0)
+		return 0;
+	pos--;
+	while (pos > 0 &&
+	       char_CAT((unsigned char)cl.input[pos]) == 0)
+		pos--;
+	cat = char_CAT((unsigned char)cl.input[pos]);
+	while (pos > 0 &&
+	       char_CAT((unsigned char)cl.input[pos - 1]) == cat)
+		pos--;
+	return pos;
+}
+
 /* Execute operator on a byte range [s, e) */
 static void
 cmdline_exec_op_range(int op, int s, int e)
@@ -890,6 +1032,41 @@ cmdline_handle_normal(unsigned long ksym, unsigned int state,
 			cmdline_redraw();
 			return 1;
 		}
+		/* Motion as operator target (dw, cb, ye, etc.) */
+		{
+			int dest = -1, s, e;
+			switch (ksym) {
+			case 'w': dest = motion_w_pos(cl.cursor); break;
+			case 'W': dest = motion_W_pos(cl.cursor); break;
+			case 'e': dest = motion_e_pos(cl.cursor); break;
+			case 'E': dest = motion_E_pos(cl.cursor); break;
+			case 'b': dest = motion_b_pos(cl.cursor); break;
+			case 'B': dest = motion_B_pos(cl.cursor); break;
+			}
+			if (dest >= 0 && dest != cl.cursor) {
+				if (dest > cl.cursor) {
+					s = cl.cursor;
+					/* e/E are inclusive */
+					if (ksym == 'e' || ksym == 'E') {
+						e = dest + 1;
+						while (e < cl.input_len &&
+						       (cl.input[e] & 0xC0) == 0x80)
+							e++;
+					} else {
+						e = dest;
+					}
+				} else {
+					s = dest;
+					e = cl.cursor;
+				}
+				if (e > cl.input_len)
+					e = cl.input_len;
+				cmdline_exec_op_range(cl.pending_op, s, e);
+				cl.pending_op = 0;
+				cmdline_redraw();
+				return 1;
+			}
+		}
 		/* Unknown key - cancel pending */
 		cl.pending_op = 0;
 		return 1;
@@ -1031,6 +1208,35 @@ cmdline_handle_normal(unsigned long ksym, unsigned int state,
 				fprintf(stderr, "cmdline: normal -> visual\n");
 			cmdline_redraw();
 		}
+		return 1;
+	/* Word motions */
+	case 'w':
+		cl.cursor = motion_w_pos(cl.cursor);
+		cmdline_clamp_normal_cursor();
+		cmdline_redraw();
+		return 1;
+	case 'W':
+		cl.cursor = motion_W_pos(cl.cursor);
+		cmdline_clamp_normal_cursor();
+		cmdline_redraw();
+		return 1;
+	case 'e':
+		cl.cursor = motion_e_pos(cl.cursor);
+		cmdline_clamp_normal_cursor();
+		cmdline_redraw();
+		return 1;
+	case 'E':
+		cl.cursor = motion_E_pos(cl.cursor);
+		cmdline_clamp_normal_cursor();
+		cmdline_redraw();
+		return 1;
+	case 'b':
+		cl.cursor = motion_b_pos(cl.cursor);
+		cmdline_redraw();
+		return 1;
+	case 'B':
+		cl.cursor = motion_B_pos(cl.cursor);
+		cmdline_redraw();
 		return 1;
 	default:
 		break;
@@ -1204,6 +1410,35 @@ cmdline_handle_visual(unsigned long ksym, unsigned int state,
 		return 1;
 	case 'c':
 		cmdline_visual_change();
+		return 1;
+	/* Word motions */
+	case 'w':
+		cl.cursor = motion_w_pos(cl.cursor);
+		cmdline_clamp_normal_cursor();
+		cmdline_redraw();
+		return 1;
+	case 'W':
+		cl.cursor = motion_W_pos(cl.cursor);
+		cmdline_clamp_normal_cursor();
+		cmdline_redraw();
+		return 1;
+	case 'e':
+		cl.cursor = motion_e_pos(cl.cursor);
+		cmdline_clamp_normal_cursor();
+		cmdline_redraw();
+		return 1;
+	case 'E':
+		cl.cursor = motion_E_pos(cl.cursor);
+		cmdline_clamp_normal_cursor();
+		cmdline_redraw();
+		return 1;
+	case 'b':
+		cl.cursor = motion_b_pos(cl.cursor);
+		cmdline_redraw();
+		return 1;
+	case 'B':
+		cl.cursor = motion_B_pos(cl.cursor);
+		cmdline_redraw();
 		return 1;
 	/* Text object selection */
 	case 'i':

@@ -11,7 +11,7 @@ The command-line is a self-contained X11 child window that sits over the last ro
 | File | Role |
 |------|------|
 | `cmdline.h` | Configuration constants (colors, sizes) and public API declarations |
-| `cmdline.c` | Full implementation (~1300 lines): window management, rendering, modal key handling, text objects, history |
+| `cmdline.c` | Full implementation (~1500 lines): window management, rendering, modal key handling, text objects, word motions, history |
 | `x.c` | Integration: init, draw, resize, key intercept, cursor hiding |
 | `vimnav.c` | Entry point: `:` in nav mode calls `cmdline_open()` |
 | `st.h` | Public function declarations |
@@ -164,6 +164,21 @@ Entry: pressing Esc in insert mode.
 | k / Up | History: load older entry |
 | j / Down | History: load newer entry |
 
+### Word motions
+
+| Key | Action |
+|-----|--------|
+| w | Forward to start of next word |
+| W | Forward to start of next WORD |
+| e | Forward to end of current/next word |
+| E | Forward to end of current/next WORD |
+| b | Backward to start of current/previous word |
+| B | Backward to start of current/previous WORD |
+
+Three character categories for `w`/`e`/`b`: **word** (`[a-zA-Z0-9_]` via `is_word_char()`), **whitespace** (space/tab), and **other** (everything else). `W`/`E`/`B` use two categories: whitespace vs non-whitespace.
+
+Implementation: `char_cat()` classifies bytes into the three word categories, `char_CAT()` into the two WORD categories. Six `motion_X_pos(int pos)` functions compute the destination byte offset without modifying `cl.cursor`. The `e`/`E` functions include UTF-8 backtracking to ensure the returned position is always on a character start, not a continuation byte. All six motions also work as operator targets (see operator-pending below).
+
 ### Editing
 
 | Key | Action |
@@ -196,16 +211,23 @@ cl.pending_op      = 0       (idle)
                    = 'c'     (change pending)
                    = 'y'     (yank pending)
 
-cl.pending_textobj = 0       (waiting for i/a or doubled key)
+cl.pending_textobj = 0       (waiting for i/a, motion, or doubled key)
                    = 'i'     (inner text object pending)
                    = 'a'     (around text object pending)
 ```
 
-Flow:
+Flow (text objects):
 1. User presses `d` → `pending_op = 'd'`
 2. User presses `i` → `pending_textobj = 'i'`
 3. User presses `w` → `cmdline_find_textobj('i', 'w', &s, &e)` finds word boundaries → `cmdline_exec_op_range('d', s, e)` deletes the range
 4. Both pending fields reset to 0
+
+Flow (motions):
+1. User presses `d` → `pending_op = 'd'`
+2. User presses `w` → `motion_w_pos(cl.cursor)` computes destination → range `[cursor, dest)` → `cmdline_exec_op_range('d', cursor, dest)` deletes the range
+3. `pending_op` resets to 0
+
+Motion semantics follow vim: `w`/`W`/`b`/`B` are exclusive (range does not include the destination character), `e`/`E` are inclusive (range includes the full character at destination, advancing past UTF-8 continuation bytes). Backward motions (`b`/`B`) compute `[dest, cursor)`. Forward motions compute `[cursor, dest)` or `[cursor, dest+charlen)` for inclusive.
 
 Doubled keys (dd, cc, yy): if the second key matches `pending_op`, the operation is applied to the entire line via `cmdline_exec_op_range(op, 0, cl.input_len)`.
 
@@ -223,6 +245,7 @@ The selection is defined by `cl.anchor` (fixed end) and `cl.cursor` (moving end)
 |-----|--------|
 | Esc / v | Exit to normal mode |
 | h / l / Left / Right | Move cursor (extends/shrinks selection) |
+| w / W / e / E / b / B | Word motions (extends/shrinks selection) |
 | 0 / $ / Home / End | Jump cursor |
 | o | Swap anchor and cursor positions |
 | y | Yank selection to clipboard, return to normal |
