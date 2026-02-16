@@ -138,6 +138,15 @@ void notif_resize(void);
 int notif_active(void);
 int notif_check_timeout(struct timespec *now);
 
+/* Command-line mode */
+void cmdline_init(void);
+void cmdline_open(void);
+void cmdline_close(void);
+int cmdline_handle_key(unsigned long, unsigned int, const char *, int);
+void cmdline_draw(void);
+void cmdline_resize(void);
+int cmdline_active(void);
+
 size_t utf8encode(Rune, char *);
 
 void *xmalloc(size_t);

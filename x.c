@@ -67,6 +67,7 @@ static void ttysend(const Arg *);
 #include "sshind.h"
 #include "notif.h"
 #include "vimnav.h"
+#include "cmdline.h"
 
 /* XEMBED messages */
 #define XEMBED_FOCUS_IN  4
@@ -1586,7 +1587,7 @@ xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 		og.mode |= ATTR_SELECTED;
 	xdrawglyph(og, ox, oy);
 
-	if (IS_SET(MODE_HIDE) && !vimnav.forced)
+	if ((IS_SET(MODE_HIDE) && !vimnav.forced) || cmdline_active())
 		return;
 
 	/*
@@ -1821,6 +1822,7 @@ expose(XEvent *ev)
 	redraw();
 	sshind_draw();
 	notif_draw();
+	cmdline_draw();
 }
 
 void
@@ -1974,6 +1976,12 @@ kpress(XEvent *ev)
 			return;
 	} else {
 		len = XLookupString(e, buf, sizeof buf, &ksym, NULL);
+	}
+
+	/* Command-line mode: intercept all keys */
+	if (cmdline_active()) {
+		cmdline_handle_key(ksym, e->state, buf, len);
+		return;
 	}
 
 	if (ksym == XK_Shift_R && rightshiftseq && *rightshiftseq) {
@@ -2139,6 +2147,7 @@ resize(XEvent *e)
 	cresize(e->xconfigure.width, e->xconfigure.height);
 	sshind_resize();
 	notif_resize();
+	cmdline_resize();
 }
 
 static void
@@ -2177,6 +2186,9 @@ run(void)
 
 	ttyfd = ttynew(opt_line, shell, opt_io, opt_cmd);
 	cresize(w, h);
+
+	/* Initialize command-line child window (needs geometry from cresize) */
+	cmdline_init();
 
 	/* Re-execute altscreen command from save (skip if ephemeral — execsh handles it) */
 	if (persist_get_altcmd()[0] && !persist_is_ephemeral()) {

@@ -95,6 +95,9 @@ extern void xsetsel(char *str);
 extern void xclipcopy(void);
 extern void clippaste(const Arg *);
 
+/* Extern declarations for cmdline.c */
+extern void cmdline_open(void);
+
 /* Globals - exported via vimnav.h */
 VimNav vimnav = { .mode = VIMNAV_INACTIVE };
 static int vimnav_paste_strip_newlines = 0;
@@ -1841,6 +1844,11 @@ vimnav_handle_key(ulong ksym, uint state)
 		break;
 	case '}':
 		vimnav_move_next_prompt();
+		break;
+
+	/* Command-line mode */
+	case ':':
+		cmdline_open();
 		break;
 
 	/* Find character on line (f/F) */

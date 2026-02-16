@@ -4,7 +4,7 @@
 
 include config.mk
 
-SRC = st.c x.c vimnav.c sshind.c notif.c persist.c
+SRC = st.c x.c vimnav.c sshind.c notif.c persist.c cmdline.c
 OBJ = $(SRC:.c=.o)
 
 all: st
@@ -16,11 +16,12 @@ config.h:
 	$(CC) $(STCFLAGS) -c $<
 
 st.o: config.h st.h win.h vimnav.h persist.h
-x.o: arg.h config.h st.h win.h sshind.h notif.h persist.h
+x.o: arg.h config.h st.h win.h sshind.h notif.h persist.h cmdline.h
 vimnav.o: st.h vimnav.h
 sshind.o: sshind.h
 notif.o: sshind.h notif.h
 persist.o: st.h persist.h
+cmdline.o: cmdline.h vimnav.h
 
 $(OBJ): config.h config.mk
 
@@ -35,7 +36,7 @@ clean:
 dist: clean
 	mkdir -p st-$(VERSION)
 	cp -R FAQ LEGACY TODO LICENSE Makefile README config.mk\
-		config.def.h st.info st.1 arg.h st.h win.h vimnav.h sshind.h notif.h persist.h $(SRC)\
+		config.def.h st.info st.1 arg.h st.h win.h vimnav.h sshind.h notif.h persist.h cmdline.h $(SRC)\
 		st-$(VERSION)
 	tar -cf - st-$(VERSION) | gzip > st-$(VERSION).tar.gz
 	rm -rf st-$(VERSION)

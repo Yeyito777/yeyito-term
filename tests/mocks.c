@@ -445,3 +445,10 @@ selscroll(int orig, int n)
 	(void)n;
 	/* Stub for selection scroll */
 }
+
+/* cmdline stub */
+void
+cmdline_open(void)
+{
+	/* Stub for cmdline open */
+}
