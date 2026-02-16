@@ -506,7 +506,7 @@ cmdline_execute(void)
 
 	/* Command mode: : */
 	if (strcmp(cl.input, "noh") == 0) {
-		search_clear();
+		search_noh();
 		cmdline_close();
 		return;
 	}

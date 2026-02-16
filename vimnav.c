@@ -1859,13 +1859,13 @@ vimnav_handle_key(ulong ksym, uint state)
 		cmdline_open_search(0);
 		break;
 	case 'n':
-		if (search_active())
+		if (search_has_pattern())
 			search_next(1);
 		else if (vimnav.mode != VIMNAV_VISUAL && vimnav.mode != VIMNAV_VISUAL_LINE)
 			handled = 0;
 		break;
 	case 'N':
-		if (search_active())
+		if (search_has_pattern())
 			search_next(-1);
 		else if (vimnav.mode != VIMNAV_VISUAL && vimnav.mode != VIMNAV_VISUAL_LINE)
 			handled = 0;

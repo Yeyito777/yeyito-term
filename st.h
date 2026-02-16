@@ -153,7 +153,9 @@ int cmdline_active(void);
 void search_execute(const char *pattern, int direction);
 void search_next(int direction);
 void search_clear(void);
+void search_noh(void);
 int search_active(void);
+int search_has_pattern(void);
 int search_matched(int x, int y);
 void search_invalidate_cache(void);
 

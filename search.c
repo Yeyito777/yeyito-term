@@ -194,6 +194,12 @@ search_active(void)
 	return sr.active;
 }
 
+int
+search_has_pattern(void)
+{
+	return sr.compiled;
+}
+
 void
 search_clear(void)
 {
@@ -203,6 +209,15 @@ search_clear(void)
 	}
 	sr.active = 0;
 	sr.pattern[0] = '\0';
+	sr.cache_y = -1;
+	sr.cache_count = 0;
+	tfulldirt();
+}
+
+void
+search_noh(void)
+{
+	sr.active = 0;
 	sr.cache_y = -1;
 	sr.cache_count = 0;
 	tfulldirt();
@@ -486,8 +501,11 @@ search_next(int direction)
 	int effective_dir;
 	int cursor_abs, result_abs, result_x;
 
-	if (!sr.active || !sr.compiled)
+	if (!sr.compiled)
 		return;
+
+	/* Reactivate highlights after :noh */
+	sr.active = 1;
 
 	effective_dir = sr.direction * direction;
 	cursor_abs = screen_to_abs(vimnav.y);

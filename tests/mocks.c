@@ -463,6 +463,8 @@ cmdline_open_search(int forward)
 void search_execute(const char *p, int d) { (void)p; (void)d; }
 void search_next(int d) { (void)d; }
 void search_clear(void) { }
+void search_noh(void) { }
 int search_active(void) { return 0; }
+int search_has_pattern(void) { return 0; }
 int search_matched(int x, int y) { (void)x; (void)y; return 0; }
 void search_invalidate_cache(void) { }
