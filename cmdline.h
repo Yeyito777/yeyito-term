@@ -17,6 +17,7 @@ static const char *cmdline_border_color = "#1d3557"; /* top border */
 static const int cmdline_border_top = 1;             /* top border thickness */
 
 #define CMDLINE_MAX_INPUT 256
+#define CMDLINE_HIST_MAX  64
 
 /* Public functions */
 void cmdline_init(void);
