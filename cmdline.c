@@ -65,6 +65,28 @@ extern int tisaltscreen(void);
 extern void xsetsel(char *str);
 extern void xclipcopy(void);
 
+/* Minimal Term redeclaration for term.scr access (same pattern as vimnav.c) */
+typedef struct {
+	Glyph attr; int x; int y; char state;
+} TCursor_cl;
+typedef struct {
+	int row, col, maxcol;
+	Line *line;
+	Line *alt;
+	Line hist[(1 << 15)];
+	int histi;
+	int scr;
+	int *dirty;
+	TCursor_cl c;
+	int ocx, ocy, top, bot, mode, esc;
+	char trantbl[4];
+	int charset, icharset;
+	int *tabs;
+	Rune lastc;
+	int histn;
+} Term_cl;
+extern Term_cl term;
+
 /* Command-line states */
 enum {
 	CMDLINE_HIDDEN = 0,
@@ -102,6 +124,9 @@ static struct {
 	int width, height;
 	int y;        /* y position in parent */
 	int loaded;
+	char prefix;  /* ':' for command, '/' for forward search, '?' for backward */
+	/* Saved vimnav position for search (restore on cancel) */
+	int search_vim_x, search_vim_y, search_scr;
 } cl;
 
 /* Open font at terminal's native pixel size */
@@ -230,9 +255,9 @@ cmdline_redraw(void)
 	if (cl.state == CMDLINE_INPUT) {
 		int cheight = cl.font->ascent + cl.font->descent;
 
-		/* Draw ":" prefix */
+		/* Draw prefix character (:, /, or ?) */
 		XftDrawStringUtf8(cl.draw, &cl.fg, cl.font, tx, ty,
-		                  (const FcChar8 *)":", 1);
+		                  (const FcChar8 *)&cl.prefix, 1);
 		tx += win.cw;
 
 		/* Visual mode: draw selection highlight behind text */
@@ -312,8 +337,8 @@ cmdline_redraw(void)
 	          0, 0, cl.width, cl.height, 0, 0);
 }
 
-void
-cmdline_open(void)
+static void
+cmdline_open_with_prefix(char prefix)
 {
 	if (tisaltscreen() && !vimnav.forced)
 		return;
@@ -329,6 +354,7 @@ cmdline_open(void)
 			cl.pending_op = 0;
 			cl.pending_textobj = 0;
 			cl.pending_f = 0;
+			cl.prefix = prefix;
 			cmdline_redraw();
 		}
 		return;
@@ -343,12 +369,64 @@ cmdline_open(void)
 	cl.pending_op = 0;
 	cl.pending_textobj = 0;
 	cl.pending_f = 0;
+	cl.prefix = prefix;
 
 	XMapRaised(xw.dpy, cl.win);
 	cmdline_redraw();
 
 	if (debug_mode)
-		fprintf(stderr, "cmdline: opened\n");
+		fprintf(stderr, "cmdline: opened prefix='%c'\n", prefix);
+}
+
+void
+cmdline_open(void)
+{
+	cmdline_open_with_prefix(':');
+}
+
+void
+cmdline_open_search(int forward)
+{
+	cl.search_vim_x = vimnav.x;
+	cl.search_vim_y = vimnav.y;
+	cl.search_scr = term.scr;
+	cmdline_open_with_prefix(forward ? '/' : '?');
+}
+
+static void
+cmdline_search_cancel(void)
+{
+	search_clear();
+	vimnav.ox = vimnav.x;
+	vimnav.oy = vimnav.y;
+	vimnav.x = cl.search_vim_x;
+	vimnav.y = cl.search_vim_y;
+	term.scr = cl.search_scr;
+	tfulldirt();
+}
+
+static void
+cmdline_live_search(void)
+{
+	if (cl.prefix != '/' && cl.prefix != '?')
+		return;
+	if (cl.input_len == 0) {
+		if (search_active())
+			search_clear();
+		/* Restore to original position */
+		vimnav.ox = vimnav.x;
+		vimnav.oy = vimnav.y;
+		vimnav.x = cl.search_vim_x;
+		vimnav.y = cl.search_vim_y;
+		term.scr = cl.search_scr;
+		tfulldirt();
+		return;
+	}
+	/* Reset to original position before searching */
+	vimnav.x = cl.search_vim_x;
+	vimnav.y = cl.search_vim_y;
+	term.scr = cl.search_scr;
+	search_execute(cl.input, cl.prefix == '/' ? 1 : -1);
 }
 
 void
@@ -417,9 +495,23 @@ cmdline_execute(void)
 	cmdline_hist_save(cl.input);
 
 	if (debug_mode)
-		fprintf(stderr, "cmdline: execute '%s'\n", cl.input);
+		fprintf(stderr, "cmdline: execute prefix='%c' input='%s'\n",
+		        cl.prefix, cl.input);
 
-	/* No commands implemented yet */
+	/* Search mode: / or ? — search already running live, just confirm and close */
+	if (cl.prefix == '/' || cl.prefix == '?') {
+		cmdline_close();
+		return;
+	}
+
+	/* Command mode: : */
+	if (strcmp(cl.input, "noh") == 0) {
+		search_clear();
+		cmdline_close();
+		return;
+	}
+
+	/* Unknown command */
 	snprintf(cl.errmsg, sizeof(cl.errmsg),
 	         "Not a terminal command: '%s'", cl.input);
 	cl.state = CMDLINE_ERROR;
@@ -1003,6 +1095,12 @@ cmdline_handle_insert(unsigned long ksym, unsigned int state,
 
 	switch (ksym) {
 	case XK_Escape:
+		/* In search mode, Escape cancels search (like vim) */
+		if (cl.prefix == '/' || cl.prefix == '?') {
+			cmdline_search_cancel();
+			cmdline_close();
+			return 1;
+		}
 		cl.cmd_mode = 1;
 		/* Move cursor back one like vim */
 		if (cl.cursor > 0)
@@ -1074,6 +1172,8 @@ cmdline_handle_insert(unsigned long ksym, unsigned int state,
 			cl.input[cl.input_len] = '\0';
 			cmdline_redraw();
 		} else if (cl.input_len == 0) {
+			if (cl.prefix == '/' || cl.prefix == '?')
+				cmdline_search_cancel();
 			cmdline_close();
 		}
 		return 1;
@@ -1645,6 +1745,8 @@ cmdline_handle_key(unsigned long ksym, unsigned int state,
 
 	/* Shift+Escape: close from any state */
 	if (ksym == XK_Escape && (state & ShiftMask)) {
+		if (cl.prefix == '/' || cl.prefix == '?')
+			cmdline_search_cancel();
 		cmdline_close();
 		return 1;
 	}
@@ -1660,12 +1762,19 @@ cmdline_handle_key(unsigned long ksym, unsigned int state,
 	if (cl.state != CMDLINE_INPUT)
 		return 0;
 
-	if (cl.cmd_mode == 0)
-		return cmdline_handle_insert(ksym, state, buf, len);
-	else if (cl.cmd_mode == 2)
-		return cmdline_handle_visual(ksym, state, buf, len);
-	else
-		return cmdline_handle_normal(ksym, state, buf, len);
+	{
+		int ret;
+		if (cl.cmd_mode == 0)
+			ret = cmdline_handle_insert(ksym, state, buf, len);
+		else if (cl.cmd_mode == 2)
+			ret = cmdline_handle_visual(ksym, state, buf, len);
+		else
+			ret = cmdline_handle_normal(ksym, state, buf, len);
+		/* Live search: update highlights after any keypress in search mode */
+		if (cl.state == CMDLINE_INPUT)
+			cmdline_live_search();
+		return ret;
+	}
 }
 
 void

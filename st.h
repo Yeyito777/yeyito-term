@@ -38,6 +38,7 @@ enum glyph_attribute {
 	ATTR_WIDE       = 1 << 9,
 	ATTR_WDUMMY     = 1 << 10,
 	ATTR_SELECTED   = 1 << 11,
+	ATTR_MATCH      = 1 << 12,
 	ATTR_BOLD_FAINT = ATTR_BOLD | ATTR_FAINT,
 };
 
@@ -141,11 +142,20 @@ int notif_check_timeout(struct timespec *now);
 /* Command-line mode */
 void cmdline_init(void);
 void cmdline_open(void);
+void cmdline_open_search(int forward);
 void cmdline_close(void);
 int cmdline_handle_key(unsigned long, unsigned int, const char *, int);
 void cmdline_draw(void);
 void cmdline_resize(void);
 int cmdline_active(void);
+
+/* Search */
+void search_execute(const char *pattern, int direction);
+void search_next(int direction);
+void search_clear(void);
+int search_active(void);
+int search_matched(int x, int y);
+void search_invalidate_cache(void);
 
 size_t utf8encode(Rune, char *);
 

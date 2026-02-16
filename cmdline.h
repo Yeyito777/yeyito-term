@@ -23,6 +23,7 @@ static const int cmdline_border_top = 1;             /* top border thickness */
 /* Public functions */
 void cmdline_init(void);
 void cmdline_open(void);
+void cmdline_open_search(int forward);
 void cmdline_close(void);
 int cmdline_handle_key(unsigned long ksym, unsigned int state,
                        const char *buf, int len);

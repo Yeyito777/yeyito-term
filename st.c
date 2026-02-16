@@ -2845,6 +2845,7 @@ drawregion(int x1, int y1, int x2, int y2)
 {
 	int y;
 
+	search_invalidate_cache();
 	for (y = y1; y < y2; y++) {
 		if (!term.dirty[y])
 			continue;

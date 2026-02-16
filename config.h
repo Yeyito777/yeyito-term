@@ -134,6 +134,7 @@ static const char *colorname[] = {
 	"#090d35", /* 261 → vimnav current line background */
 	"#1a1a00", /* 262 → debug prompt line bg (dark yellow tinge) */
 	"#ffe066", /* 263 → debug prompt line text (golden reflection) */
+	"#fce094", /* 264 → search match highlight bg */
 };
 
 
@@ -149,6 +150,7 @@ unsigned int selectionbg = 260;
 unsigned int vimnav_curline_bg = 261;
 unsigned int debug_prompt_bg = 262;
 unsigned int debug_prompt_fg = 263;
+unsigned int search_match_bg = 264;
 
 /*
  * Default shape of cursor

@@ -446,9 +446,23 @@ selscroll(int orig, int n)
 	/* Stub for selection scroll */
 }
 
-/* cmdline stub */
+/* cmdline stubs */
 void
 cmdline_open(void)
 {
 	/* Stub for cmdline open */
 }
+
+void
+cmdline_open_search(int forward)
+{
+	(void)forward;
+}
+
+/* search stubs */
+void search_execute(const char *p, int d) { (void)p; (void)d; }
+void search_next(int d) { (void)d; }
+void search_clear(void) { }
+int search_active(void) { return 0; }
+int search_matched(int x, int y) { (void)x; (void)y; return 0; }
+void search_invalidate_cache(void) { }

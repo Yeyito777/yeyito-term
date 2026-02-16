@@ -1851,6 +1851,26 @@ vimnav_handle_key(ulong ksym, uint state)
 		cmdline_open();
 		break;
 
+	/* Search */
+	case '/':
+		cmdline_open_search(1);
+		break;
+	case '?':
+		cmdline_open_search(0);
+		break;
+	case 'n':
+		if (search_active())
+			search_next(1);
+		else if (vimnav.mode != VIMNAV_VISUAL && vimnav.mode != VIMNAV_VISUAL_LINE)
+			handled = 0;
+		break;
+	case 'N':
+		if (search_active())
+			search_next(-1);
+		else if (vimnav.mode != VIMNAV_VISUAL && vimnav.mode != VIMNAV_VISUAL_LINE)
+			handled = 0;
+		break;
+
 	/* Find character on line (f/F) */
 	case 'f':
 	case 'F':

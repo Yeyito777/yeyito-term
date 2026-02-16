@@ -68,6 +68,7 @@ static void ttysend(const Arg *);
 #include "notif.h"
 #include "vimnav.h"
 #include "cmdline.h"
+#include "search.h"
 
 /* XEMBED messages */
 #define XEMBED_FOCUS_IN  4
@@ -1503,6 +1504,11 @@ xdrawglyphfontspecs(const XftGlyphFontSpec *specs, Glyph base, int len, int x, i
 	if (base.mode & ATTR_SELECTED)
 		bg = &dc.col[selectionbg];
 
+	if (base.mode & ATTR_MATCH) {
+		fg = bg;
+		bg = &dc.col[search_match_bg];
+	}
+
 	if ((base.mode & ATTR_BOLD_FAINT) == ATTR_FAINT) {
 		colfg.red = fg->color.red / 2;
 		colfg.green = fg->color.green / 2;
@@ -1585,6 +1591,8 @@ xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 	/* remove the old cursor */
 	if (selected(ox, oy))
 		og.mode |= ATTR_SELECTED;
+	if (search_matched(ox, oy))
+		og.mode |= ATTR_MATCH;
 	xdrawglyph(og, ox, oy);
 
 	if ((IS_SET(MODE_HIDE) && !vimnav.forced) || cmdline_active())
@@ -1755,6 +1763,8 @@ xdrawline(Line line, int x1, int y1, int x2)
 			continue;
 		if (selected(x, y1))
 			new.mode |= ATTR_SELECTED;
+		if (search_matched(x, y1))
+			new.mode |= ATTR_MATCH;
 		if (i > 0 && ATTRCMP(base, new)) {
 			xdrawglyphfontspecs(specs, base, i, ox, y1);
 			specs += i;
