@@ -3939,11 +3939,182 @@ TEST(vimnav_Vjy_multi_line_keeps_newlines)
 	mock_term_free();
 }
 
+/* Test: yy on multiline prompt yanks all lines, stripping prompt prefixes */
+TEST(vimnav_yy_multiline_prompt_yanks_all)
+{
+	mock_term_init(24, 80);
+	mock_set_line(21, "% ls -la | \\");
+	mock_set_line(22, "> grep foo | \\");
+	mock_set_line(23, "> wc -l");
+
+	term.c.x = 5;
+	term.c.y = 23;
+	term.scr = 0;
+	vimnav.zsh_cursor = 0;
+
+	vimnav_enter();
+
+	/* Cursor starts on last prompt line (term.c.y == 23) */
+	mock_reset();
+	vimnav_handle_key('y', 0);
+
+	/* Should yank all three lines with prompt prefixes stripped */
+	ASSERT(mock_state.xsetsel_calls > 0);
+	ASSERT_STR_EQ("ls -la | \\\ngrep foo | \\\nwc -l", mock_state.last_xsetsel);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: yy on single-line prompt still works as before */
+TEST(vimnav_yy_single_line_prompt)
+{
+	mock_term_init(24, 80);
+	mock_set_line(23, "% echo hello");
+
+	term.c.x = 5;
+	term.c.y = 23;
+	term.scr = 0;
+	vimnav.zsh_cursor = 0;
+
+	vimnav_enter();
+
+	mock_reset();
+	vimnav_handle_key('y', 0);
+
+	ASSERT(mock_state.xsetsel_calls > 0);
+	ASSERT_STR_EQ("echo hello", mock_state.last_xsetsel);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: yy on multiline prompt when cursor moved up to continuation line */
+TEST(vimnav_yy_multiline_prompt_cursor_on_continuation)
+{
+	mock_term_init(24, 80);
+	mock_set_line(22, "% ls -la | \\");
+	mock_set_line(23, "> grep foo");
+
+	term.c.x = 5;
+	term.c.y = 23;
+	term.scr = 0;
+	vimnav.zsh_cursor = 0;
+
+	vimnav_enter();
+
+	/* Move cursor up to the continuation line */
+	vimnav.y = 22;
+	vimnav.x = 0;
+
+	mock_reset();
+	vimnav_handle_key('y', 0);
+
+	/* Should still yank the full multiline command */
+	ASSERT(mock_state.xsetsel_calls > 0);
+	ASSERT_STR_EQ("ls -la | \\\ngrep foo", mock_state.last_xsetsel);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: yy on empty prompt yanks nothing */
+TEST(vimnav_yy_empty_prompt)
+{
+	mock_term_init(24, 80);
+	mock_set_line(23, "% ");
+
+	term.c.x = 2;
+	term.c.y = 23;
+	term.scr = 0;
+	vimnav.zsh_cursor = 0;
+
+	vimnav_enter();
+
+	mock_reset();
+	vimnav_handle_key('y', 0);
+
+	/* Nothing after prompt, nothing to yank */
+	ASSERT_EQ(0, mock_state.xsetsel_calls);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: yy on a long wrapped prompt line joins without newlines */
+TEST(vimnav_yy_wrapped_prompt_no_spurious_newlines)
+{
+	/* Simulate a 20-col terminal with a command that wraps:
+	 * Row 22: "% echo hello wor" (ATTR_WRAP on last cell)
+	 * Row 23: "ld"
+	 * term.c.y = 23 */
+	mock_term_init(24, 20);
+	mock_set_line(22, "% echo hello wor");
+	/* Mark row 22 as wrapped */
+	term.line[22][19].mode |= ATTR_WRAP;
+	mock_set_line(23, "ld");
+
+	term.c.x = 2;
+	term.c.y = 23;
+	term.scr = 0;
+	vimnav.zsh_cursor = 0;
+
+	vimnav_enter();
+
+	mock_reset();
+	vimnav_handle_key('y', 0);
+
+	/* Should join wrapped rows without newline, strip prompt only on first */
+	ASSERT(mock_state.xsetsel_calls > 0);
+	ASSERT_STR_EQ("echo hello world", mock_state.last_xsetsel);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: yy on multiline prompt with wrapping within a line */
+TEST(vimnav_yy_multiline_with_wrap)
+{
+	/* Simulate:
+	 * Row 21: "% echo hello wor" (ATTR_WRAP)
+	 * Row 22: "ld | \"             (real newline — no ATTR_WRAP)
+	 * Row 23: "> grep foo"
+	 * 20-col terminal */
+	mock_term_init(24, 20);
+	mock_set_line(21, "% echo hello wor");
+	term.line[21][19].mode |= ATTR_WRAP;
+	mock_set_line(22, "ld | \\");
+	mock_set_line(23, "> grep foo");
+
+	term.c.x = 5;
+	term.c.y = 23;
+	term.scr = 0;
+	vimnav.zsh_cursor = 0;
+
+	vimnav_enter();
+
+	mock_reset();
+	vimnav_handle_key('y', 0);
+
+	/* Row 21+22 join (wrapped), then newline, then row 23 with '> ' stripped */
+	ASSERT(mock_state.xsetsel_calls > 0);
+	ASSERT_STR_EQ("echo hello world | \\\ngrep foo", mock_state.last_xsetsel);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
 TEST_SUITE(yank_newline)
 {
 	RUN_TEST(vimnav_yy_history_no_trailing_newline);
 	RUN_TEST(vimnav_Vy_single_line_no_trailing_newline);
 	RUN_TEST(vimnav_Vjy_multi_line_keeps_newlines);
+	RUN_TEST(vimnav_yy_multiline_prompt_yanks_all);
+	RUN_TEST(vimnav_yy_single_line_prompt);
+	RUN_TEST(vimnav_yy_multiline_prompt_cursor_on_continuation);
+	RUN_TEST(vimnav_yy_empty_prompt);
+	RUN_TEST(vimnav_yy_wrapped_prompt_no_spurious_newlines);
+	RUN_TEST(vimnav_yy_multiline_with_wrap);
 }
 
 TEST_SUITE(prompt_range)

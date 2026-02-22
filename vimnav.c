@@ -1,4 +1,5 @@
 /* See LICENSE for license details. */
+#include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
 #include <wctype.h>
@@ -1516,41 +1517,86 @@ vimnav_is_prompt_space(int y)
 	return (y >= prompt_start && y <= prompt_end_y);
 }
 
+static char *
+vimnav_build_prompt_text(int start_y, int end_y)
+{
+	/* Build text from prompt lines, stripping the prompt prefix on each.
+	 * For multiline commands this strips '% ', '> ', etc. from each line
+	 * so the yanked text is just the command. Wrapped rows (ATTR_WRAP) are
+	 * joined without newlines and their content is taken raw (no prompt
+	 * stripping, since they're overflow from the previous row). */
+	char *buf, *ptr;
+	int y, x, start_x, linelen, wrapped;
+	Line line;
+
+	buf = xmalloc((term.col + 1) * (end_y - start_y + 1) * 4);
+	ptr = buf;
+	wrapped = 0;
+
+	for (y = start_y; y <= end_y; y++) {
+		/* Only strip prompt prefix on real line starts, not wrapped rows */
+		start_x = wrapped ? 0 : vimnav_find_prompt_end(y);
+		linelen = tlinelen(y);
+
+		if (start_x < linelen) {
+			line = TLINE(y);
+			for (x = start_x; x < linelen; x++) {
+				if (line[x].mode & ATTR_WDUMMY)
+					continue;
+				ptr += utf8encode(line[x].u, ptr);
+			}
+		}
+
+		/* ATTR_WRAP on the last cell means this row wraps to the next */
+		wrapped = TLINE(y)[term.col - 1].mode & ATTR_WRAP;
+
+		/* Add newline between real lines, not wrapped continuations */
+		if (y < end_y && !wrapped)
+			*ptr++ = '\n';
+	}
+	*ptr = '\0';
+
+	return buf;
+}
+
 static void
 vimnav_yank_line(void)
 {
 	int screen_y = vimnav_screen_y();
 
-	/* On prompt line, only yank the command input (after prompt) */
-	if (term.scr == 0 && vimnav.y == term.c.y) {
-		int start_x = vimnav_find_prompt_end(screen_y);
-		int linelen = tlinelen(screen_y);
+	/* Check if cursor is in prompt space */
+	if (term.scr == 0 && vimnav_is_prompt_space(screen_y)) {
+		int prompt_start_y = vimnav_find_prompt_start_y();
+		int prompt_end_y = term.c.y;  /* term.scr == 0 */
+		char *text;
 
-		/* If nothing after prompt, nothing to yank */
-		if (start_x >= linelen) {
-			return;
+		/* Build text from all prompt lines, stripping prompt prefixes */
+		text = vimnav_build_prompt_text(prompt_start_y, prompt_end_y);
+		if (text && text[0]) {
+			xsetsel(text);
+			xclipcopy();
+		} else {
+			free(text);
 		}
-
-		/* Character-level selection from prompt end to line end */
-		selstart(start_x, screen_y, 0);
-		sel.mode = SEL_READY;  /* Required for selextend to work with done=1 */
-		selextend(linelen - 1, screen_y, SEL_REGULAR, 1);
 	} else {
 		/* For non-prompt lines, use SNAP_LINE to select whole line */
+		char *text;
+
 		selstart(0, screen_y, 0);
 		sel.snap = SNAP_LINE;
 		sel.mode = SEL_READY;  /* Required for selextend to work with done=1 */
 		selextend(term.col - 1, screen_y, SEL_REGULAR, 1);
+
+		text = getsel();
+		if (text) {
+			yank_strip_trailing_newline(text);
+			xsetsel(text);
+			xclipcopy();
+		}
+
+		selclear();
 	}
 
-	char *text = getsel();
-	if (text) {
-		yank_strip_trailing_newline(text);
-		xsetsel(text);
-		xclipcopy();
-	}
-
-	selclear();
 	tfulldirt();
 }
 

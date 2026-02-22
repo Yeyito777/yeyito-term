@@ -446,6 +446,33 @@ selscroll(int orig, int n)
 	/* Stub for selection scroll */
 }
 
+size_t
+utf8encode(Rune u, char *c)
+{
+	/* Simplified: only handle ASCII for tests */
+	if (u < 0x80) {
+		c[0] = u;
+		return 1;
+	}
+	/* Basic multibyte (enough for tests) */
+	if (u < 0x800) {
+		c[0] = 0xC0 | (u >> 6);
+		c[1] = 0x80 | (u & 0x3F);
+		return 2;
+	}
+	if (u < 0x10000) {
+		c[0] = 0xE0 | (u >> 12);
+		c[1] = 0x80 | ((u >> 6) & 0x3F);
+		c[2] = 0x80 | (u & 0x3F);
+		return 3;
+	}
+	c[0] = 0xF0 | (u >> 18);
+	c[1] = 0x80 | ((u >> 12) & 0x3F);
+	c[2] = 0x80 | ((u >> 6) & 0x3F);
+	c[3] = 0x80 | (u & 0x3F);
+	return 4;
+}
+
 /* cmdline stubs */
 void
 cmdline_open(void)
