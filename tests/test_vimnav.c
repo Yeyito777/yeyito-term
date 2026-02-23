@@ -3559,6 +3559,345 @@ TEST(vimnav_ctrl_percent_scrolled_uses_full_screen)
 	mock_term_free();
 }
 
+/* === Block visual mode (Ctrl+v) tests === */
+
+/* Test: Ctrl+v enters VIMNAV_VISUAL_BLOCK mode */
+TEST(vimnav_ctrl_v_enters_block_mode)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "hello world");
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.y = 5;
+	vimnav.x = 3;
+	vimnav.savedx = 3;
+
+	mock_reset();
+	int handled = vimnav_handle_key('v', 4);  /* 4 = ControlMask */
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(4, vimnav.mode);  /* VIMNAV_VISUAL_BLOCK */
+	ASSERT(mock_state.selstart_calls > 0);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: Ctrl+v again exits block mode back to normal */
+TEST(vimnav_ctrl_v_toggles_off)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "hello world");
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.y = 5;
+	vimnav.x = 3;
+	vimnav.savedx = 3;
+
+	/* Enter block mode */
+	vimnav_handle_key('v', 4);
+	ASSERT_EQ(4, vimnav.mode);
+
+	/* Toggle off */
+	mock_reset();
+	vimnav_handle_key('v', 4);
+	ASSERT_EQ(1, vimnav.mode);  /* VIMNAV_NORMAL */
+	ASSERT(mock_state.selclear_calls > 0);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: Block selection uses SEL_RECTANGULAR type */
+TEST(vimnav_block_selection_uses_rectangular)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "hello world");
+	mock_set_line(6, "hello earth");
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.y = 5;
+	vimnav.x = 3;
+	vimnav.savedx = 3;
+
+	/* Enter block mode */
+	vimnav_handle_key('v', 4);
+
+	/* Move down */
+	mock_reset();
+	vimnav_handle_key('j', 0);
+
+	/* selextend should be called with SEL_RECTANGULAR */
+	ASSERT(mock_state.selextend_calls > 0);
+	ASSERT_EQ(SEL_RECTANGULAR, mock_state.last_selextend.type);
+
+	/* Verify rectangular selection: (3,5) is selected, (0,5) is not */
+	ASSERT_EQ(1, selected(3, 5));
+	ASSERT_EQ(1, selected(3, 6));
+	ASSERT_EQ(0, selected(0, 5));
+	ASSERT_EQ(0, selected(0, 6));
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: v switches from block to char visual */
+TEST(vimnav_v_switches_from_block_to_char)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "hello world");
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.y = 5;
+	vimnav.x = 3;
+	vimnav.savedx = 3;
+
+	/* Enter block mode */
+	vimnav_handle_key('v', 4);
+	ASSERT_EQ(4, vimnav.mode);  /* VIMNAV_VISUAL_BLOCK */
+
+	/* Press v to switch to char visual */
+	vimnav_handle_key('v', 0);
+	ASSERT_EQ(2, vimnav.mode);  /* VIMNAV_VISUAL */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: Ctrl+v switches from char visual to block */
+TEST(vimnav_ctrl_v_switches_from_char_to_block)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "hello world");
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.y = 5;
+	vimnav.x = 3;
+	vimnav.savedx = 3;
+
+	/* Enter char visual mode */
+	vimnav_handle_key('v', 0);
+	ASSERT_EQ(2, vimnav.mode);  /* VIMNAV_VISUAL */
+
+	/* Press Ctrl+v to switch to block */
+	vimnav_handle_key('v', 4);
+	ASSERT_EQ(4, vimnav.mode);  /* VIMNAV_VISUAL_BLOCK */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: V switches from block to line visual */
+TEST(vimnav_V_switches_from_block_to_line)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "hello world");
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.y = 5;
+	vimnav.x = 3;
+	vimnav.savedx = 3;
+
+	/* Enter block mode */
+	vimnav_handle_key('v', 4);
+	ASSERT_EQ(4, vimnav.mode);
+
+	/* Press V to switch to line visual */
+	vimnav_handle_key('V', 1);  /* 1 = ShiftMask */
+	ASSERT_EQ(3, vimnav.mode);  /* VIMNAV_VISUAL_LINE */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: Ctrl+v switches from line visual to block */
+TEST(vimnav_ctrl_v_switches_from_line_to_block)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "hello world");
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.y = 5;
+	vimnav.x = 3;
+	vimnav.savedx = 3;
+
+	/* Enter line visual mode */
+	vimnav_handle_key('V', 1);
+	ASSERT_EQ(3, vimnav.mode);  /* VIMNAV_VISUAL_LINE */
+
+	/* Press Ctrl+v to switch to block */
+	vimnav_handle_key('v', 4);
+	ASSERT_EQ(4, vimnav.mode);  /* VIMNAV_VISUAL_BLOCK */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: y in block mode yanks and returns to normal */
+TEST(vimnav_block_yank)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "hello world");
+	mock_set_line(6, "hello earth");
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.y = 5;
+	vimnav.x = 0;
+	vimnav.savedx = 0;
+
+	/* Enter block mode */
+	vimnav_handle_key('v', 4);
+
+	/* Move to select "hello" on two lines (cols 0-4, rows 5-6) */
+	vimnav_handle_key('j', 0);
+	vimnav.x = 4;
+	vimnav.savedx = 4;
+	vimnav_handle_key('l', 0);  /* triggers update_selection */
+
+	/* Yank - don't mock_reset() since it would clear sel state */
+	int prev_xsetsel = mock_state.xsetsel_calls;
+	vimnav_handle_key('y', 0);
+	ASSERT_EQ(1, vimnav.mode);  /* Back to VIMNAV_NORMAL */
+	ASSERT(mock_state.xsetsel_calls > prev_xsetsel);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: Escape exits block mode */
+TEST(vimnav_escape_exits_block)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "hello world");
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.y = 5;
+	vimnav.x = 3;
+	vimnav.savedx = 3;
+
+	/* Enter block mode */
+	vimnav_handle_key('v', 4);
+	ASSERT_EQ(4, vimnav.mode);
+
+	/* Press Escape */
+	mock_reset();
+	vimnav_handle_key(XK_Escape, 0);
+	ASSERT_EQ(1, vimnav.mode);  /* VIMNAV_NORMAL */
+	ASSERT(mock_state.selclear_calls > 0);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: Ctrl+v works in forced nav mode */
+TEST(vimnav_forced_block_mode)
+{
+	mock_term_init(24, 80);
+	mock_set_line(10, "hello world");
+	term.c.x = 3;
+	term.c.y = 10;
+
+	vimnav_force_enter();
+	vimnav.x = 3;
+	vimnav.savedx = 3;
+
+	int handled = vimnav_handle_key('v', 4);
+	ASSERT_EQ(1, handled);
+	ASSERT_EQ(4, vimnav.mode);  /* VIMNAV_VISUAL_BLOCK */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: unrecognized keys consumed in block mode */
+TEST(vimnav_block_consumes_unknown_keys)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "hello world");
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 0;
+
+	vimnav_enter();
+	vimnav.y = 5;
+	vimnav.x = 3;
+	vimnav.savedx = 3;
+
+	/* Enter block mode */
+	vimnav_handle_key('v', 4);
+	ASSERT_EQ(4, vimnav.mode);
+
+	/* Unrecognized keys should be consumed */
+	ASSERT_EQ(1, vimnav_handle_key('z', 0));
+	ASSERT_EQ(1, vimnav_handle_key('q', 0));
+	ASSERT_EQ(4, vimnav.mode);  /* Still in block mode */
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test: vimnav_curline_y returns -1 in block visual mode */
+TEST(vimnav_curline_y_block_mode)
+{
+	mock_term_init(24, 80);
+	mock_set_line(5, "hello world");
+
+	term.c.x = 0;
+	term.c.y = 23;
+	term.scr = 5;
+
+	vimnav_enter();
+	vimnav.y = 5;
+	vimnav.x = 3;
+	vimnav.savedx = 3;
+
+	/* In normal mode, should highlight */
+	ASSERT_EQ(5, vimnav_curline_y());
+
+	/* Enter block mode - should stop highlighting */
+	vimnav.mode = 4;  /* VIMNAV_VISUAL_BLOCK */
+	ASSERT_EQ(-1, vimnav_curline_y());
+
+	vimnav_exit();
+	mock_term_free();
+}
+
 /* Test suite */
 TEST_SUITE(vimnav)
 {
@@ -3695,6 +4034,19 @@ TEST_SUITE(vimnav)
 	RUN_TEST(vimnav_ctrl_minus_jumps_to_bottom);
 	RUN_TEST(vimnav_ctrl_percent_respects_prompt);
 	RUN_TEST(vimnav_ctrl_percent_scrolled_uses_full_screen);
+	/* Block visual mode (Ctrl+v) tests */
+	RUN_TEST(vimnav_ctrl_v_enters_block_mode);
+	RUN_TEST(vimnav_ctrl_v_toggles_off);
+	RUN_TEST(vimnav_block_selection_uses_rectangular);
+	RUN_TEST(vimnav_v_switches_from_block_to_char);
+	RUN_TEST(vimnav_ctrl_v_switches_from_char_to_block);
+	RUN_TEST(vimnav_V_switches_from_block_to_line);
+	RUN_TEST(vimnav_ctrl_v_switches_from_line_to_block);
+	RUN_TEST(vimnav_block_yank);
+	RUN_TEST(vimnav_escape_exits_block);
+	RUN_TEST(vimnav_forced_block_mode);
+	RUN_TEST(vimnav_block_consumes_unknown_keys);
+	RUN_TEST(vimnav_curline_y_block_mode);
 }
 
 /* === Prompt line range tests === */

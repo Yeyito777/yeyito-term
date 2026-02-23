@@ -25,6 +25,7 @@ enum vimnav_mode {
 	VIMNAV_NORMAL = 1,
 	VIMNAV_VISUAL = 2,
 	VIMNAV_VISUAL_LINE = 3,
+	VIMNAV_VISUAL_BLOCK = 4,
 };
 
 /* Terminal mode flags from st.c */
@@ -136,12 +137,19 @@ vimnav_sync_to_zsh_cursor(void)
 	}
 }
 
+/* Check if currently in any visual mode (char, line, or block) */
+static int
+vimnav_is_visual(void)
+{
+	return vimnav.mode >= VIMNAV_VISUAL;
+}
+
 /* Snap back to prompt line (scroll down if needed, update cursor position) */
 static void
 vimnav_snap_to_prompt(void)
 {
 	/* Clear visual mode and selection before returning to prompt */
-	if (vimnav.mode == VIMNAV_VISUAL || vimnav.mode == VIMNAV_VISUAL_LINE) {
+	if (vimnav_is_visual()) {
 		vimnav.mode = VIMNAV_NORMAL;
 		vimnav_notify_zsh_visual_end();
 		selclear();
@@ -168,7 +176,7 @@ vimnav_set_zsh_cursor(int pos)
 		vimnav.x = prompt_end + pos;
 		vimnav.savedx = vimnav.x;
 		vimnav.last_shell_x = vimnav.x;
-		if (vimnav.mode == VIMNAV_VISUAL || vimnav.mode == VIMNAV_VISUAL_LINE) {
+		if (vimnav_is_visual()) {
 			vimnav_update_selection();
 		}
 		tfulldirt();
@@ -217,7 +225,7 @@ vimnav_set_zsh_visual(int active, int anchor, int line_mode)
 		tfulldirt();
 	} else if (!active && vimnav.mode != VIMNAV_INACTIVE) {
 		/* zsh exited visual mode - clear selection */
-		if (vimnav.mode == VIMNAV_VISUAL || vimnav.mode == VIMNAV_VISUAL_LINE) {
+		if (vimnav_is_visual()) {
 			vimnav.mode = VIMNAV_NORMAL;
 		}
 		selclear();
@@ -285,6 +293,9 @@ vimnav_update_selection(void)
 		selstart(0, anchor_screen_y, 0);
 		sel.snap = SNAP_LINE;
 		selextend(term.col - 1, screen_y, SEL_REGULAR, 0);
+	} else if (vimnav.mode == VIMNAV_VISUAL_BLOCK) {
+		selstart(vimnav.anchor_x, anchor_screen_y, 0);
+		selextend(vimnav.x, screen_y, SEL_RECTANGULAR, 0);
 	}
 	tfulldirt();
 }
@@ -1361,10 +1372,14 @@ vimnav_toggle_visual_char(void)
 		selclear();
 		vimnav_sync_to_zsh_cursor();
 	} else {
+		/* Switching from another visual mode: keep anchor */
+		if (vimnav.mode != VIMNAV_VISUAL_LINE && vimnav.mode != VIMNAV_VISUAL_BLOCK) {
+			vimnav.anchor_x = vimnav.x;
+			vimnav.anchor_abs_y = vimnav_screen_y() - term.scr;
+		}
 		vimnav.mode = VIMNAV_VISUAL;
-		vimnav.anchor_x = vimnav.x;
-		vimnav.anchor_abs_y = vimnav_screen_y() - term.scr;
-		selstart(vimnav.x, vimnav_screen_y(), 0);
+		selstart(vimnav.anchor_x, vimnav.anchor_abs_y + term.scr, 0);
+		selextend(vimnav.x, vimnav_screen_y(), SEL_REGULAR, 0);
 	}
 	tfulldirt();
 }
@@ -1380,11 +1395,34 @@ vimnav_toggle_visual_line(void)
 		selclear();
 		vimnav_sync_to_zsh_cursor();
 	} else {
+		/* Switching from another visual mode: keep anchor y */
+		if (vimnav.mode != VIMNAV_VISUAL && vimnav.mode != VIMNAV_VISUAL_BLOCK)
+			vimnav.anchor_abs_y = screen_y - term.scr;
 		vimnav.mode = VIMNAV_VISUAL_LINE;
-		vimnav.anchor_abs_y = screen_y - term.scr;
-		selstart(0, screen_y, 0);
+		selstart(0, vimnav.anchor_abs_y + term.scr, 0);
 		sel.snap = SNAP_LINE;
 		selextend(term.col - 1, screen_y, SEL_REGULAR, 0);
+	}
+	tfulldirt();
+}
+
+static void
+vimnav_toggle_visual_block(void)
+{
+	if (vimnav.mode == VIMNAV_VISUAL_BLOCK) {
+		vimnav.mode = VIMNAV_NORMAL;
+		vimnav_notify_zsh_visual_end();
+		selclear();
+		vimnav_sync_to_zsh_cursor();
+	} else {
+		/* Switching from another visual mode: keep anchor */
+		if (vimnav.mode != VIMNAV_VISUAL && vimnav.mode != VIMNAV_VISUAL_LINE) {
+			vimnav.anchor_x = vimnav.x;
+			vimnav.anchor_abs_y = vimnav_screen_y() - term.scr;
+		}
+		vimnav.mode = VIMNAV_VISUAL_BLOCK;
+		selstart(vimnav.anchor_x, vimnav.anchor_abs_y + term.scr, 0);
+		selextend(vimnav.x, vimnav_screen_y(), SEL_RECTANGULAR, 0);
 	}
 	tfulldirt();
 }
@@ -1793,6 +1831,12 @@ vimnav_handle_key(ulong ksym, uint state)
 			vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
 			vimnav_update_selection();
 			return 1;
+		case 'v':
+			/* In prompt space: pass to zsh */
+			if (vimnav_is_prompt_space(vimnav.y))
+				return 0;
+			vimnav_toggle_visual_block();
+			return 1;
 		case '1': vimnav_move_screen_percent(0);   return 1;
 		case '2': vimnav_move_screen_percent(10);  return 1;
 		case '3': vimnav_move_screen_percent(20);  return 1;
@@ -1907,13 +1951,13 @@ vimnav_handle_key(ulong ksym, uint state)
 	case 'n':
 		if (search_has_pattern())
 			search_next(1);
-		else if (vimnav.mode != VIMNAV_VISUAL && vimnav.mode != VIMNAV_VISUAL_LINE)
+		else if (!vimnav_is_visual())
 			handled = 0;
 		break;
 	case 'N':
 		if (search_has_pattern())
 			search_next(-1);
-		else if (vimnav.mode != VIMNAV_VISUAL && vimnav.mode != VIMNAV_VISUAL_LINE)
+		else if (!vimnav_is_visual())
 			handled = 0;
 		break;
 
@@ -1964,7 +2008,7 @@ vimnav_handle_key(ulong ksym, uint state)
 	case 'i':
 	case 'a':
 		/* In visual mode: start text object sequence */
-		if (vimnav.mode == VIMNAV_VISUAL || vimnav.mode == VIMNAV_VISUAL_LINE) {
+		if (vimnav_is_visual()) {
 			vimnav.pending_textobj = ksym;
 			break;
 		}
@@ -2005,7 +2049,7 @@ vimnav_handle_key(ulong ksym, uint state)
 
 	/* Yank */
 	case 'y':
-		if (vimnav.mode == VIMNAV_VISUAL || vimnav.mode == VIMNAV_VISUAL_LINE) {
+		if (vimnav_is_visual()) {
 			/* In visual mode, yank selection */
 			vimnav_yank_selection();
 			vimnav.mode = VIMNAV_NORMAL;
@@ -2039,7 +2083,7 @@ vimnav_handle_key(ulong ksym, uint state)
 
 	/* Escape: clear visual selection or stay in normal mode */
 	case 0xff1b: /* XK_Escape */
-		if (vimnav.mode == VIMNAV_VISUAL || vimnav.mode == VIMNAV_VISUAL_LINE) {
+		if (vimnav_is_visual()) {
 			vimnav.mode = VIMNAV_NORMAL;
 			if (!vimnav.forced)
 				vimnav_notify_zsh_visual_end();  /* Tell zsh to exit visual mode */
@@ -2058,7 +2102,7 @@ vimnav_handle_key(ulong ksym, uint state)
 	default:
 		/* In visual mode, consume unrecognized keys to prevent them
 		 * from leaking to zsh and leaving a ghost selection */
-		if (vimnav.mode == VIMNAV_VISUAL || vimnav.mode == VIMNAV_VISUAL_LINE)
+		if (vimnav_is_visual())
 			handled = 1;
 		else
 			handled = 0;

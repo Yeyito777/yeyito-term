@@ -225,10 +225,20 @@ int
 selected(int x, int y)
 {
 	int linelen, maxcol;
+	int minx, maxx, miny, maxy;
 
 	/* Simplified selection check */
 	if (sel.mode == SEL_IDLE)
 		return 0;
+
+	if (sel.type == SEL_RECTANGULAR) {
+		/* Rectangular: normalize and check rectangle bounds */
+		minx = sel.ob.x < sel.oe.x ? sel.ob.x : sel.oe.x;
+		maxx = sel.ob.x < sel.oe.x ? sel.oe.x : sel.ob.x;
+		miny = sel.ob.y < sel.oe.y ? sel.ob.y : sel.oe.y;
+		maxy = sel.ob.y < sel.oe.y ? sel.oe.y : sel.ob.y;
+		return (y >= miny && y <= maxy && x >= minx && x <= maxx);
+	}
 
 	/* Match the real selected() logic for empty lines in vimnav mode:
 	 * Allow at least column 0 to be selected (like nvim's virtual newline) */
@@ -248,11 +258,38 @@ getsel(void)
 	/* Return a string matching real getsel() trailing newline behavior */
 	static char buf[256];
 	int y, x, len;
+	int miny, maxy, minx, maxx;
 
 	if (sel.mode == SEL_IDLE)
 		return NULL;
 
 	len = 0;
+
+	if (sel.type == SEL_RECTANGULAR) {
+		/* Rectangular: extract columns within minx..maxx for each row */
+		minx = sel.ob.x < sel.oe.x ? sel.ob.x : sel.oe.x;
+		maxx = sel.ob.x < sel.oe.x ? sel.oe.x : sel.ob.x;
+		miny = sel.ob.y < sel.oe.y ? sel.ob.y : sel.oe.y;
+		maxy = sel.ob.y < sel.oe.y ? sel.oe.y : sel.ob.y;
+
+		for (y = miny; y <= maxy && len < 255; y++) {
+			int linelen = tlinelen(y);
+			int lastx = maxx < linelen - 1 ? maxx : linelen - 1;
+			/* Strip trailing spaces within the selected column range */
+			while (lastx >= minx && term.line[y][lastx].u == ' ')
+				lastx--;
+			for (x = minx; x <= lastx && len < 255; x++) {
+				if (term.line[y][x].u)
+					buf[len++] = term.line[y][x].u;
+			}
+			/* Add newline between rows (always for rectangular) */
+			if (y < maxy && len < 255)
+				buf[len++] = '\n';
+		}
+		buf[len] = '\0';
+		return buf;
+	}
+
 	for (y = sel.ob.y; y <= sel.oe.y && len < 255; y++) {
 		int startx = (y == sel.ob.y) ? sel.ob.x : 0;
 		int endx = (y == sel.oe.y) ? sel.oe.x : tlinelen(y) - 1;
