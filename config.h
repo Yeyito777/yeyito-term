@@ -213,7 +213,7 @@ static Shortcut shortcuts[] = {
 	{ XK_ANY_MOD,           XK_Print,       printsel,       {.i =  0} },
 	{ Mod4Mask,             XK_i,           zoom,           {.f = +1} },
 	{ Mod4Mask,             XK_o,           zoom,           {.f = -1} },
-	{ Mod4Mask,             XK_p,           zoomreset,      {.f =  0} },
+	{ Mod4Mask,             XK_m,           zoomreset,      {.f =  0} },
 	{ TERMMOD,              XK_C,           clipcopy,       {.i =  0} },
 	{ TERMMOD,              XK_V,           clippaste,      {.i =  0} },
 	{ TERMMOD,              XK_Y,           selpaste,       {.i =  0} },
@@ -221,7 +221,6 @@ static Shortcut shortcuts[] = {
 	{ TERMMOD,              XK_Num_Lock,    numlock,        {.i =  0} },
 	{ ShiftMask,            XK_Page_Up,     kscrollup,      {.i = -1} },
 	{ ShiftMask,            XK_Page_Down,   kscrolldown,    {.i = -1} },
-	{ XK_NO_MOD,            XK_Home,        ttysend,        {.s = "Consider what I just told you and tell me your thoughts. I need to know what you think: am I correct, incorrect? Is there something I'm missing? Anything not ironed out? Or is everything largely ok? Talk to me."} },
 };
 
 /*
@@ -376,6 +375,7 @@ static Key key[] = {
 	{ XK_m,             ControlMask,    "\033[109;5u",   0,    0},
 	{ XK_O,             ControlMask|ShiftMask, "\033[111;6u", 0,  0},
 	{ XK_semicolon,     ControlMask,    "\033[59;5u",    0,    0},
+	{ XK_Return,        ShiftMask,      "\033[13;2u",    0,    0},
 	{ XK_Return,        Mod1Mask,       "\033\r",        0,    0},
 	{ XK_Return,        XK_ANY_MOD,     "\r",            0,    0},
 	{ XK_Insert,        ShiftMask,      "\033[4l",      -1,    0},
