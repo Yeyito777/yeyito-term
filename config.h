@@ -373,6 +373,7 @@ static Key key[] = {
 	{ XK_Right,         XK_ANY_MOD,     "\033OC",        0,   +1},
 	{ XK_ISO_Left_Tab,  ShiftMask,      "\033[Z",        0,    0},
 	{ XK_m,             ControlMask,    "\033[109;5u",   0,    0},
+	{ XK_E,             ControlMask|ShiftMask, "\033[101;6u", 0,  0},
 	{ XK_O,             ControlMask|ShiftMask, "\033[111;6u", 0,  0},
 	{ XK_semicolon,     ControlMask,    "\033[59;5u",    0,    0},
 	{ XK_Return,        ShiftMask,      "\033[13;2u",    0,    0},
