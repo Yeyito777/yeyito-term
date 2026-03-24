@@ -2128,6 +2128,15 @@ strhandle(void)
 					int line_mode = !strcmp(strescseq.args[4], "line");
 					vimnav_set_zsh_visual(1, anchor, line_mode);
 				}
+			} else if (narg >= 3 && !strcmp(strescseq.args[1], "mouseshape")) {
+				/* App-controlled mouse cursor shape:
+				 * \033]777;mouseshape;text\a     →  xterm I-beam (0)
+				 * \033]777;mouseshape;pointer\a  →  left_ptr    (1)
+				 * \033]777;mouseshape;hand\a     →  hand2       (2) */
+				int shape = 0;
+				if (!strcmp(strescseq.args[2], "pointer")) shape = 1;
+				else if (!strcmp(strescseq.args[2], "hand")) shape = 2;
+				xsetmousecursor(shape);
 			}
 			return;
 		case 778: /* st custom: SSH indicator */

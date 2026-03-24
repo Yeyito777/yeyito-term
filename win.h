@@ -39,6 +39,7 @@ int xgetcursor(void);
 int xsetcursor(int);
 void xsetmode(int, unsigned int);
 void xsetpointermotion(int);
+void xsetmousecursor(int);
 void xsetsel(char *);
 int xstartdraw(void);
 void xximspot(int, int);

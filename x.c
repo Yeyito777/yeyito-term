@@ -228,6 +228,11 @@ XWindow xw;          /* non-static for sshind.c access */
 static XSelection xsel;
 TermWindow win;      /* non-static for sshind.c access */
 
+/* Mouse cursors: text I-beam (default), pointer arrow, and hand (clickable) */
+static Cursor xcursortext;
+static Cursor xcursorpointer;
+static Cursor xcursorhand;
+
 /* Font Ring Cache */
 enum {
 	FRC_NORMAL,
@@ -1167,7 +1172,6 @@ void
 xinit(int cols, int rows)
 {
 	XGCValues gcvalues;
-	Cursor cursor;
 	Window parent, root;
 	pid_t thispid = getpid();
 	XColor xmousefg, xmousebg;
@@ -1238,8 +1242,10 @@ xinit(int cols, int rows)
 	}
 
 	/* white cursor, black outline */
-	cursor = XCreateFontCursor(xw.dpy, mouseshape);
-	XDefineCursor(xw.dpy, xw.win, cursor);
+	xcursortext = XCreateFontCursor(xw.dpy, mouseshape);
+	xcursorpointer = XCreateFontCursor(xw.dpy, mousecursorshape);
+	xcursorhand = XCreateFontCursor(xw.dpy, mousehandshape);
+	XDefineCursor(xw.dpy, xw.win, xcursortext);
 
 	if (XParseColor(xw.dpy, xw.cmap, colorname[mousefg], &xmousefg) == 0) {
 		xmousefg.red   = 0xffff;
@@ -1253,7 +1259,9 @@ xinit(int cols, int rows)
 		xmousebg.blue  = 0x0000;
 	}
 
-	XRecolorCursor(xw.dpy, cursor, &xmousefg, &xmousebg);
+	XRecolorCursor(xw.dpy, xcursortext, &xmousefg, &xmousebg);
+	XRecolorCursor(xw.dpy, xcursorpointer, &xmousefg, &xmousebg);
+	XRecolorCursor(xw.dpy, xcursorhand, &xmousefg, &xmousebg);
 
 	xw.xembed = XInternAtom(xw.dpy, "_XEMBED", False);
 	xw.wmdeletewin = XInternAtom(xw.dpy, "WM_DELETE_WINDOW", False);
@@ -1863,6 +1871,21 @@ xsetmode(int set, unsigned int flags)
 	MODBIT(win.mode, set, flags);
 	if ((win.mode & MODE_REVERSE) != (mode & MODE_REVERSE))
 		redraw();
+	if ((win.mode & MODE_MOUSE) != (mode & MODE_MOUSE))
+		XDefineCursor(xw.dpy, xw.win, IS_SET(MODE_MOUSE)
+			? xcursorpointer : xcursortext);
+}
+
+void
+xsetmousecursor(int shape)
+{
+	Cursor c;
+	switch (shape) {
+	case 1:  c = xcursorpointer; break;
+	case 2:  c = xcursorhand;    break;
+	default: c = xcursortext;    break;
+	}
+	XDefineCursor(xw.dpy, xw.win, c);
 }
 
 int
