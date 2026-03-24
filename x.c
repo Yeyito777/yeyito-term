@@ -2402,6 +2402,44 @@ run:
 	if (argc > 0) { /* eat all remaining arguments */
 		opt_cmd = argv;
 		persist_set_ephemeral(1);
+
+		/*
+		 * Save -e command for ephemeral persist restore.
+		 * preexec (OSC 780) doesn't fire for zsh -c commands,
+		 * so we capture the command from the -e args directly.
+		 *
+		 * Detect "shell -c cmd" / "shell -ic cmd" pattern and
+		 * extract the inner command, since the ephemeral restore
+		 * already wraps with "$SHELL -ic <altcmd>".
+		 * Otherwise, join all args as a shell command string.
+		 */
+		{
+			int has_cflag = 0;
+			if (argc >= 3 && argv[1][0] == '-') {
+				const char *p;
+				for (p = argv[1] + 1; *p; p++) {
+					if (*p == 'c') { has_cflag = 1; break; }
+				}
+			}
+			if (has_cflag) {
+				persist_set_altcmd(argv[2]);
+			} else {
+				char buf[PATH_MAX];
+				size_t pos = 0;
+				int i;
+				for (i = 0; i < argc && pos < sizeof(buf) - 1; i++) {
+					size_t len = strlen(argv[i]);
+					if (i > 0 && pos < sizeof(buf) - 1)
+						buf[pos++] = ' ';
+					if (pos + len > sizeof(buf) - 1)
+						len = sizeof(buf) - 1 - pos;
+					memcpy(buf + pos, argv[i], len);
+					pos += len;
+				}
+				buf[pos] = '\0';
+				persist_set_altcmd(buf);
+			}
+		}
 	}
 
 	if (!opt_title)

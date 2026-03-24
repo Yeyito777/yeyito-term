@@ -188,7 +188,8 @@ persist_save_generic(void)
 	fprintf(f, "cursor_y=%d\n", term.c.y);
 	if (persist_save_cmd_buf[0])
 		fprintf(f, "altcmd=%s\n", persist_save_cmd_buf);
-	else if (IS_SET(MODE_ALTSCREEN) && persist_altcmd_buf[0])
+	else if ((IS_SET(MODE_ALTSCREEN) || persist_ephemeral) &&
+			persist_altcmd_buf[0])
 		fprintf(f, "altcmd=%s\n", persist_altcmd_buf);
 	if (persist_ephemeral)
 		fprintf(f, "ephemeral=1\n");

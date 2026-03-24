@@ -737,6 +737,85 @@ TEST(altcmd_not_saved_without_altscreen)
 	cleanup_testdir();
 }
 
+TEST(ephemeral_altcmd_saved_without_altscreen)
+{
+	char restoredir[PATH_MAX];
+
+	/* Ephemeral terminals (st -e) should save altcmd regardless of
+	 * MODE_ALTSCREEN.  preexec/OSC 780 doesn't fire for zsh -c commands,
+	 * so the altcmd is populated from -e args at startup.  Some -e programs
+	 * may not use altscreen, but the command should still be restored. */
+	setup_term(8, 3);
+	persist_set_altcmd("cd ~/project && bun run tui/main.ts");
+	persist_set_ephemeral(1);
+	term.mode = 0; /* altscreen NOT set */
+
+	setup_testdir();
+	persist_init(99987);
+	persist_save();
+
+	snprintf(restoredir, sizeof(restoredir), "%s/restore", testdir);
+	{
+		char cmd[PATH_MAX * 2 + 16];
+		snprintf(cmd, sizeof(cmd), "cp -r '%s' '%s'",
+				persist_get_dir(), restoredir);
+		system(cmd);
+	}
+
+	/* Reset */
+	cleanup_term();
+	setup_term(8, 3);
+	persist_set_altcmd(NULL);
+	persist_set_ephemeral(0);
+
+	persist_restore(restoredir, NULL, NULL);
+	ASSERT_STR_EQ("cd ~/project && bun run tui/main.ts",
+			persist_get_altcmd());
+	ASSERT_EQ(1, persist_is_ephemeral());
+
+	persist_set_altcmd(NULL);
+	persist_set_ephemeral(0);
+	persist_cleanup();
+	cleanup_term();
+	cleanup_testdir();
+}
+
+TEST(non_ephemeral_altcmd_still_needs_altscreen)
+{
+	char restoredir[PATH_MAX];
+
+	/* Non-ephemeral terminals should still require MODE_ALTSCREEN
+	 * to save altcmd (prevents restoring commands user already quit). */
+	setup_term(8, 3);
+	persist_set_altcmd("htop");
+	persist_set_ephemeral(0);
+	term.mode = 0; /* altscreen NOT set */
+
+	setup_testdir();
+	persist_init(99986);
+	persist_save();
+
+	snprintf(restoredir, sizeof(restoredir), "%s/restore", testdir);
+	{
+		char cmd[PATH_MAX * 2 + 16];
+		snprintf(cmd, sizeof(cmd), "cp -r '%s' '%s'",
+				persist_get_dir(), restoredir);
+		system(cmd);
+	}
+
+	/* Reset */
+	cleanup_term();
+	setup_term(8, 3);
+	persist_set_altcmd(NULL);
+
+	persist_restore(restoredir, NULL, NULL);
+	ASSERT_STR_EQ("", persist_get_altcmd());
+
+	persist_cleanup();
+	cleanup_term();
+	cleanup_testdir();
+}
+
 /* === Test suites === */
 
 TEST_SUITE(cwd)
@@ -760,6 +839,8 @@ TEST_SUITE(altcmd)
 	RUN_TEST(altcmd_null_clears);
 	RUN_TEST(altcmd_saved_when_altscreen);
 	RUN_TEST(altcmd_not_saved_without_altscreen);
+	RUN_TEST(ephemeral_altcmd_saved_without_altscreen);
+	RUN_TEST(non_ephemeral_altcmd_still_needs_altscreen);
 }
 
 TEST_SUITE(save_cmd)
