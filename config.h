@@ -254,6 +254,7 @@ static KeySym mappedkeys[] = {
 	XK_0, XK_1, XK_2, XK_3, XK_4, XK_5, XK_6, XK_7, XK_8, XK_9, XK_minus,
 	XK_m,
 	XK_O,
+	XK_bracketleft, XK_bracketright,
 	XK_semicolon,
 	-1
 };
@@ -377,6 +378,8 @@ static Key key[] = {
 	{ XK_m,             ControlMask,    "\033[109;5u",   0,    0},
 	{ XK_E,             ControlMask|ShiftMask, "\033[101;6u", 0,  0},
 	{ XK_O,             ControlMask|ShiftMask, "\033[111;6u", 0,  0},
+	{ XK_bracketleft,   ControlMask,    "\033[91;5u",    0,    0},
+	{ XK_bracketright,  ControlMask,    "\033[93;5u",    0,    0},
 	{ XK_semicolon,     ControlMask,    "\033[59;5u",    0,    0},
 	{ XK_Return,        ShiftMask,      "\033[13;2u",    0,    0},
 	{ XK_Return,        Mod1Mask,       "\033\r",        0,    0},
