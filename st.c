@@ -2745,6 +2745,382 @@ twrite(const char *buf, int buflen, int show_ctrl)
 	return n;
 }
 
+typedef struct {
+	Line *buf;
+	int cap;
+	int len;
+	int head;
+	long long total;
+} ReflowBuf;
+
+static Glyph
+blankglyph(void)
+{
+	Glyph g = term.c.attr;
+
+	g.mode = ATTR_NULL;
+	g.fg = defaultfg;
+	g.bg = defaultbg;
+	g.u = ' ';
+	return g;
+}
+
+static Line
+newlineblank(int col)
+{
+	Line line;
+	Glyph g;
+	int i;
+
+	line = xmalloc(col * sizeof(Glyph));
+	g = blankglyph();
+	for (i = 0; i < col; i++)
+		line[i] = g;
+	return line;
+}
+
+static int
+linelenwidth(Line line, int col)
+{
+	int i = col;
+
+	if (col <= 0)
+		return 0;
+	if (line[col - 1].mode & ATTR_WRAP)
+		return col;
+	while (i > 0 && line[i - 1].u == ' ')
+		--i;
+	return i;
+}
+
+static int
+linehascontent(Line line, int col)
+{
+	int i;
+
+	if (line[col - 1].mode & ATTR_WRAP)
+		return 1;
+	for (i = 0; i < col; i++)
+		if (line[i].u != ' ')
+			return 1;
+	return 0;
+}
+
+static void
+rfinit(ReflowBuf *rf, int cap)
+{
+	int i;
+
+	rf->buf = xmalloc(MAX(cap, 1) * sizeof(Line));
+	rf->cap = cap;
+	rf->len = 0;
+	rf->head = 0;
+	rf->total = 0;
+	for (i = 0; i < MAX(cap, 1); i++)
+		rf->buf[i] = NULL;
+}
+
+static void
+rffree(ReflowBuf *rf)
+{
+	int i;
+
+	for (i = 0; i < rf->len; i++)
+		free(rf->buf[(rf->head + i) % rf->cap]);
+	free(rf->buf);
+}
+
+static void
+rfpush(ReflowBuf *rf, Line line)
+{
+	int p;
+
+	if (rf->cap <= 0) {
+		free(line);
+		return;
+	}
+	if (rf->len < rf->cap) {
+		p = (rf->head + rf->len) % rf->cap;
+		rf->len++;
+	} else {
+		p = rf->head;
+		free(rf->buf[p]);
+		rf->head = (rf->head + 1) % rf->cap;
+	}
+	rf->buf[p] = line;
+	rf->total++;
+}
+
+static Line
+rfget(ReflowBuf *rf, long long idx)
+{
+	long long first = rf->total - rf->len;
+
+	if (idx < first || idx >= rf->total)
+		return NULL;
+	return rf->buf[(rf->head + (int)(idx - first)) % rf->cap];
+}
+
+static void
+logicalappend(Glyph **logical, int *len, int *cap, Line src, int n)
+{
+	int oldlen = *len, i;
+
+	if (n <= 0)
+		return;
+	if (*len + n > *cap) {
+		*cap = MAX(*len + n, MAX(*cap * 2, 64));
+		*logical = xrealloc(*logical, *cap * sizeof(Glyph));
+	}
+	memcpy(*logical + *len, src, n * sizeof(Glyph));
+	*len += n;
+	for (i = oldlen; i < *len; i++)
+		(*logical)[i].mode &= ~ATTR_WRAP;
+}
+
+static void
+logicalpad(Glyph **logical, int *len, int *cap, int n)
+{
+	Glyph g;
+	int i;
+
+	if (n <= *len)
+		return;
+	if (n > *cap) {
+		*cap = MAX(n, MAX(*cap * 2, 64));
+		*logical = xrealloc(*logical, *cap * sizeof(Glyph));
+	}
+	g = blankglyph();
+	for (i = *len; i < n; i++)
+		(*logical)[i] = g;
+	*len = n;
+}
+
+static void
+reflowlogical(ReflowBuf *rf, Glyph *logical, int logical_len, int newcol,
+              int cursor_in_line, int cursor_off, long long *cursor_abs,
+              int *cursor_x)
+{
+	long long first = rf->total;
+	int off, n, i;
+	Line line;
+
+	if (cursor_in_line && cursor_off >= logical_len)
+		logical_len = cursor_off + 1;
+
+	if (logical_len == 0) {
+		rfpush(rf, newlineblank(newcol));
+		if (cursor_in_line) {
+			*cursor_abs = first;
+			*cursor_x = MIN(cursor_off, newcol - 1);
+		}
+		return;
+	}
+
+	for (off = 0; off < logical_len; off += n) {
+		n = MIN(newcol, logical_len - off);
+		/* Do not split a wide glyph across a newly wrapped row. */
+		if (n > 1 && n == newcol && off + n < logical_len &&
+		    (logical[off + n - 1].mode & ATTR_WIDE) &&
+		    (logical[off + n].mode & ATTR_WDUMMY))
+			n--;
+		line = newlineblank(newcol);
+		memcpy(line, logical + off, n * sizeof(Glyph));
+		for (i = 0; i < n; i++)
+			line[i].mode &= ~ATTR_WRAP;
+		if (off + n < logical_len)
+			line[newcol - 1].mode |= ATTR_WRAP;
+		rfpush(rf, line);
+	}
+
+	if (cursor_in_line) {
+		*cursor_abs = first + cursor_off / newcol;
+		*cursor_x = cursor_off % newcol;
+	}
+}
+
+static void
+resizealt(Line *oldalt, int oldrow, int oldcol, int newrow, int newcol)
+{
+	Line *newalt;
+	int i, n;
+
+	newalt = xmalloc(newrow * sizeof(Line));
+	for (i = 0; i < newrow; i++) {
+		newalt[i] = newlineblank(newcol);
+		if (i < oldrow && oldalt && oldalt[i]) {
+			n = MIN(oldcol, newcol);
+			memcpy(newalt[i], oldalt[i], n * sizeof(Glyph));
+			if (newcol < oldcol)
+				newalt[i][newcol - 1].mode &= ~ATTR_WRAP;
+		}
+	}
+	for (i = 0; i < oldrow; i++)
+		free(oldalt[i]);
+	free(oldalt);
+	term.alt = newalt;
+}
+
+static int
+tresize_reflow(int newcol, int newrow)
+{
+	int oldrow = term.row, oldcol = term.col;
+	Line *oldline = term.line, *oldalt = term.alt;
+	Line oldhist[HISTSIZE];
+	int oldhisti = term.histi, oldhistn = term.histn, oldscr = term.scr;
+	int i, y, idx, save_end, last_content, wrapped, append_len;
+	int logical_len = 0, logical_cap = 0, cursor_in_line = 0, cursor_off = 0;
+	int cursor_x = term.c.x, hist_count, screen_count, screen_y;
+	int *oldtabs = term.tabs;
+	long long cursor_abs = -1, screen_start, hist_start, outidx;
+	Glyph *logical = NULL;
+	ReflowBuf rf;
+	TCursor c = term.c;
+
+	if (newcol < 1 || newrow < 1 || oldrow < 1 || oldcol < 1)
+		return 0;
+	if (IS_SET(MODE_ALTSCREEN))
+		return 0;
+
+	if (sel.ob.x != -1)
+		selclear();
+
+	for (i = 0; i < HISTSIZE; i++)
+		oldhist[i] = term.hist[i];
+
+	rfinit(&rf, HISTSIZE + newrow);
+
+	#define FLUSH_LOGICAL() do { \
+		logicalpad(&logical, &logical_len, &logical_cap, \
+		           cursor_in_line ? cursor_off + 1 : logical_len); \
+		reflowlogical(&rf, logical, logical_len, newcol, cursor_in_line, \
+		              cursor_off, &cursor_abs, &cursor_x); \
+		logical_len = 0; \
+		cursor_in_line = 0; \
+		cursor_off = 0; \
+	} while (0)
+
+	/* History, oldest to newest. */
+	for (i = 0; i < oldhistn; i++) {
+		idx = (oldhisti - oldhistn + 1 + i + HISTSIZE) % HISTSIZE;
+		wrapped = oldhist[idx][oldcol - 1].mode & ATTR_WRAP;
+		append_len = wrapped ? oldcol : linelenwidth(oldhist[idx], oldcol);
+		logicalappend(&logical, &logical_len, &logical_cap, oldhist[idx], append_len);
+		if (!wrapped)
+			FLUSH_LOGICAL();
+	}
+
+	/* Only preserve meaningful screen rows; blank rows after the cursor are
+	 * recreated below, instead of pushing the prompt out of view on resize. */
+	last_content = -1;
+	for (y = oldrow - 1; y >= 0; y--) {
+		if (linehascontent(oldline[y], oldcol)) {
+			last_content = y;
+			break;
+		}
+	}
+	save_end = MAX(c.y + 1, last_content + 1);
+	LIMIT(save_end, 1, oldrow);
+
+	for (y = 0; y < save_end; y++) {
+		wrapped = oldline[y][oldcol - 1].mode & ATTR_WRAP;
+		append_len = wrapped ? oldcol : linelenwidth(oldline[y], oldcol);
+		if (y == c.y) {
+			cursor_in_line = 1;
+			cursor_off = logical_len + c.x;
+		}
+		logicalappend(&logical, &logical_len, &logical_cap, oldline[y], append_len);
+		if (!wrapped)
+			FLUSH_LOGICAL();
+	}
+	if (logical_len > 0 || cursor_in_line)
+		FLUSH_LOGICAL();
+	#undef FLUSH_LOGICAL
+	free(logical);
+
+	/* Allocate fresh primary screen/history at the new width. */
+	term.line = xmalloc(newrow * sizeof(Line));
+	for (y = 0; y < newrow; y++)
+		term.line[y] = newlineblank(newcol);
+	for (i = 0; i < HISTSIZE; i++)
+		term.hist[i] = newlineblank(newcol);
+
+	if (rf.total > newrow) {
+		screen_start = rf.total - newrow;
+		screen_count = newrow;
+		hist_count = MIN((int)screen_start, HISTSIZE);
+		hist_start = screen_start - hist_count;
+	} else {
+		screen_start = 0;
+		screen_count = (int)rf.total;
+		hist_count = 0;
+		hist_start = 0;
+	}
+
+	for (i = 0; i < hist_count; i++) {
+		outidx = hist_start + i;
+		idx = i;
+		free(term.hist[idx]);
+		term.hist[idx] = rfget(&rf, outidx);
+		if (term.hist[idx])
+			rf.buf[(rf.head + (int)(outidx - (rf.total - rf.len))) % rf.cap] = NULL;
+		else
+			term.hist[idx] = newlineblank(newcol);
+	}
+	term.histn = hist_count;
+	term.histi = hist_count > 0 ? hist_count - 1 : 0;
+
+	for (i = 0; i < screen_count; i++) {
+		outidx = screen_start + i;
+		screen_y = i;
+		free(term.line[screen_y]);
+		term.line[screen_y] = rfget(&rf, outidx);
+		if (term.line[screen_y])
+			rf.buf[(rf.head + (int)(outidx - (rf.total - rf.len))) % rf.cap] = NULL;
+		else
+			term.line[screen_y] = newlineblank(newcol);
+	}
+
+	/* Resize the alternate screen without reflowing it. */
+	resizealt(oldalt, oldrow, oldcol, newrow, newcol);
+
+	term.dirty = xrealloc(term.dirty, newrow * sizeof(*term.dirty));
+	for (i = 0; i < newrow; i++)
+		term.dirty[i] = 1;
+
+	term.tabs = xmalloc(newcol * sizeof(*term.tabs));
+	memset(term.tabs, 0, newcol * sizeof(*term.tabs));
+	if (oldtabs) {
+		memcpy(term.tabs, oldtabs, MIN(oldcol, newcol) * sizeof(*term.tabs));
+		free(oldtabs);
+	}
+	for (i = tabspaces; i < newcol; i += tabspaces)
+		term.tabs[i] = 1;
+
+	for (y = 0; y < oldrow; y++)
+		free(oldline[y]);
+	free(oldline);
+	for (i = 0; i < HISTSIZE; i++)
+		free(oldhist[i]);
+
+	term.col = newcol;
+	term.maxcol = newcol;
+	term.row = newrow;
+	term.scr = MIN(oldscr, term.histn);
+	term.top = 0;
+	term.bot = newrow - 1;
+	term.c = c;
+	if (cursor_abs >= 0) {
+		term.c.y = (int)(cursor_abs - screen_start);
+		term.c.x = cursor_x;
+	}
+	tmoveto(term.c.x, term.c.y);
+	LIMIT(term.ocx, 0, newcol - 1);
+	LIMIT(term.ocy, 0, newrow - 1);
+	rffree(&rf);
+	return 1;
+}
+
 void
 tresize(int col, int row)
 {
@@ -2753,6 +3129,9 @@ tresize(int col, int row)
 	int minrow, mincol;
 	int *bp;
 	TCursor c;
+
+	if (tresize_reflow(col, row))
+		return;
 
 	tmp = col;
 	if (!term.maxcol)
