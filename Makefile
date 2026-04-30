@@ -7,7 +7,7 @@ include config.mk
 SRC = st.c x.c vimnav.c sshind.c notif.c persist.c cmdline.c search.c
 OBJ = $(SRC:.c=.o)
 
-all: st
+all: st install-hint
 
 config.h:
 	cp config.def.h config.h
@@ -28,6 +28,9 @@ $(OBJ): config.h config.mk
 
 st: $(OBJ)
 	$(CC) -o $@ $(OBJ) $(STLDFLAGS)
+
+install-hint:
+	@echo "Build complete. Install changes with: sudo make install"
 
 clean:
 	rm -f st $(OBJ) st-$(VERSION).tar.gz
@@ -135,4 +138,4 @@ test: test_vimnav test_sshind test_scrollback test_cwd test_notif test_persist t
 clean-tests:
 	rm -f tests/*.o tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search
 
-.PHONY: all clean dist install uninstall test clean-tests
+.PHONY: all install-hint clean dist install uninstall test clean-tests
