@@ -1907,6 +1907,12 @@ void
 xseturgency(int add)
 {
 	XWMHints *h = XGetWMHints(xw.dpy, xw.win);
+	if (!h) {
+		h = XAllocWMHints();
+		if (!h)
+			return;
+		h->flags = 0;
+	}
 
 	MODBIT(h->flags, add, XUrgencyHint);
 	XSetWMHints(xw.dpy, xw.win, h);
