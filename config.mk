@@ -22,6 +22,8 @@ LIBS = -L$(X11LIB) -lm -lrt -lX11 -lutil -lXft -lGL \
 
 # flags
 STCPPFLAGS = -DVERSION=\"$(VERSION)\" -D_XOPEN_SOURCE=600
+CFLAGS = -O3 -march=native -flto
+LDFLAGS = -flto
 STCFLAGS = $(INCS) $(STCPPFLAGS) $(CPPFLAGS) $(CFLAGS)
 STLDFLAGS = $(LIBS) $(LDFLAGS)
 

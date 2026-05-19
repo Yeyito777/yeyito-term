@@ -864,7 +864,7 @@ ttynew(const char *line, char *cmd, const char *out, char **args)
 size_t
 ttyread(void)
 {
-	static char buf[BUFSIZ];
+	static char buf[65536];
 	static int buflen = 0;
 	int ret, written;
 

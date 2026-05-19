@@ -284,6 +284,9 @@ char *usedfont = NULL;          /* non-static for sshind.c access */
 double usedfontsize = 0;        /* non-static for sshind.c access */
 static double defaultfontsize = 0;
 
+static float gpupal[512][3];
+static int gpupalvalid;
+
 typedef struct {
 	Rune rune;
 	int flags;
@@ -320,6 +323,8 @@ typedef void (*GpuGenBuffers)(GLsizei, GLuint *);
 
 typedef struct {
 	int active, doublebuf;
+	int needclear;
+	int vw, vh;
 	GLXContext ctx;
 	int vbo_ok;
 	GLuint vbo;
@@ -434,6 +439,12 @@ void
 ttysend(const Arg *arg)
 {
 	ttywrite(arg->s, strlen(arg->s), 1);
+}
+
+int
+xgpuactive(void)
+{
+	return gpu.active;
 }
 
 int
@@ -956,6 +967,7 @@ xloadcols(void)
 				die("could not allocate color %d\n", i);
 		}
 	loaded = 1;
+	gpupalvalid = 0;
 }
 
 int
@@ -984,6 +996,7 @@ xsetcolorname(int x, const char *name)
 
 	XftColorFree(xw.dpy, xw.vis, xw.cmap, &dc.col[x]);
 	dc.col[x] = ncolor;
+	gpupalvalid = 0;
 
 	return 0;
 }
@@ -1130,7 +1143,7 @@ gpusetfontsize(FT_Face face, int color)
 static void
 gpucolor(uint32_t c, float out[3])
 {
-	Color *xc;
+	int i, n;
 
 	if (IS_TRUECOL(c)) {
 		out[0] = ((c >> 16) & 0xff) / 255.0f;
@@ -1138,11 +1151,19 @@ gpucolor(uint32_t c, float out[3])
 		out[2] = (c & 0xff) / 255.0f;
 		return;
 	}
-	c = MIN(c, dc.collen - 1);
-	xc = &dc.col[c];
-	out[0] = xc->color.red / 65535.0f;
-	out[1] = xc->color.green / 65535.0f;
-	out[2] = xc->color.blue / 65535.0f;
+	n = MIN(dc.collen, LEN(gpupal));
+	if (!gpupalvalid) {
+		for (i = 0; i < n; i++) {
+			gpupal[i][0] = dc.col[i].color.red / 65535.0f;
+			gpupal[i][1] = dc.col[i].color.green / 65535.0f;
+			gpupal[i][2] = dc.col[i].color.blue / 65535.0f;
+		}
+		gpupalvalid = 1;
+	}
+	c = MIN(c, n - 1);
+	out[0] = gpupal[c][0];
+	out[1] = gpupal[c][1];
+	out[2] = gpupal[c][2];
 }
 
 static void
@@ -1262,14 +1283,20 @@ gpuresize(void)
 	if (fabs(px - gpu.fontpx) > 0.10) {
 		gpu.fontpx = px;
 		gpuatlasreset();
+		gpu.needclear = 1;
 	}
-	glXMakeCurrent(xw.dpy, xw.win, gpu.ctx);
-	glViewport(0, 0, win.w, win.h);
-	glMatrixMode(GL_PROJECTION);
-	glLoadIdentity();
-	glOrtho(0, win.w, win.h, 0, -1, 1);
-	glMatrixMode(GL_MODELVIEW);
-	glLoadIdentity();
+	if (gpu.vw != win.w || gpu.vh != win.h) {
+		glXMakeCurrent(xw.dpy, xw.win, gpu.ctx);
+		gpu.vw = win.w;
+		gpu.vh = win.h;
+		gpu.needclear = 1;
+		glViewport(0, 0, win.w, win.h);
+		glMatrixMode(GL_PROJECTION);
+		glLoadIdentity();
+		glOrtho(0, win.w, win.h, 0, -1, 1);
+		glMatrixMode(GL_MODELVIEW);
+		glLoadIdentity();
+	}
 }
 
 static void
@@ -1348,6 +1375,7 @@ gpuinit(void)
 		return;
 	}
 	gpu.active = 1;
+	gpu.needclear = 1;
 	gpu.fontpx = usedfontsize;
 	gpu.atlasw = 2048;
 	gpu.atlash = 2048;
@@ -1706,19 +1734,13 @@ gpudrawline(Line line, int x1, int y, int x2)
 	int x, haverun = 0;
 	int basey = gpucelly(y), rowh = gpurowbottom(y) - basey;
 	int baseline = gpubaseline(y), runx = 0, runw = 0;
+	int vimline = vimnav_curline_y();
 	Glyph g;
-	float fg[3], bg[3], runbg[3], white[3] = {1.0f, 1.0f, 1.0f};
+	float fg[3], bg[3], dfg[3], dbg[3], runbg[3], white[3] = {1.0f, 1.0f, 1.0f};
 	GpuGlyph *gg;
 
-	for (x = x1; x < x2; x++)
-		if (line[x].mode != ATTR_WDUMMY && line[x].u != ' ') {
-			g = line[x];
-			if (selected(x, y))
-				g.mode |= ATTR_SELECTED;
-			if (search_matched(x, y))
-				g.mode |= ATTR_MATCH;
-			gpuglyph(g.u, g.mode);
-		}
+	gpucolor(defaultfg, dfg);
+	gpucolor(defaultbg, dbg);
 
 	for (x = x1; x < x2; x++) {
 		g = line[x];
@@ -1728,7 +1750,14 @@ gpudrawline(Line line, int x1, int y, int x2)
 			g.mode |= ATTR_SELECTED;
 		if (search_matched(x, y))
 			g.mode |= ATTR_MATCH;
-		gpuresolve(g, x, y, fg, bg);
+		if (g.fg == defaultfg && g.bg == defaultbg &&
+		    !(g.mode & (ATTR_SELECTED|ATTR_MATCH|ATTR_BOLD_FAINT|ATTR_REVERSE|ATTR_BLINK|ATTR_INVISIBLE)) &&
+		    !IS_SET(MODE_REVERSE) && !debug_mode && y != vimline) {
+			memcpy(fg, dfg, sizeof fg);
+			memcpy(bg, dbg, sizeof bg);
+		} else {
+			gpuresolve(g, x, y, fg, bg);
+		}
 		int cellx = gpucellx(x);
 		int cellw = gpucellright(x, g.mode & ATTR_WIDE) - cellx;
 		if (!haverun) {
@@ -1741,57 +1770,35 @@ gpudrawline(Line line, int x1, int y, int x2)
 		} else {
 			gpubatchrect(&gpu.bg, runx, basey, runw, rowh, runbg);
 			runx = cellx;
-			runw = cellw;
-			memcpy(runbg, bg, sizeof runbg);
+				runw = cellw;
+				memcpy(runbg, bg, sizeof runbg);
+			}
+		if (g.u != ' ') {
+			gg = gpuglyph(g.u, g.mode);
+			if (gg && gg->valid && gg->w > 0 && gg->h > 0) {
+				if (gg->color) {
+					double scale = MIN((double)cellw / gg->w, (double)rowh / gg->h);
+					int dw = MAX(1, gpuround(gg->w * scale));
+					int dh = MAX(1, gpuround(gg->h * scale));
+					int dx = cellx + (cellw - dw) / 2;
+					int dy = basey + (rowh - dh) / 2;
+					gpubatchglyph(&gpu.ctext, dx, dy, dw, dh, gg, white);
+				} else {
+					int dx = cellx + gg->left;
+					int dy = baseline - gg->top;
+					gpubatchglyph(&gpu.text, dx, dy, gg->w, gg->h, gg, fg);
+				}
+			}
 		}
+		if (g.mode & ATTR_UNDERLINE)
+			gpubatchrect(&gpu.deco, cellx, baseline + 1,
+			             gpucellright(x, 0) - cellx, 1, fg);
+		if (g.mode & ATTR_STRUCK)
+			gpubatchrect(&gpu.deco, cellx, basey + rowh / 2,
+			             gpucellright(x, 0) - cellx, 1, fg);
 	}
 	if (haverun)
 		gpubatchrect(&gpu.bg, runx, basey, runw, rowh, runbg);
-
-	for (x = x1; x < x2; x++) {
-		g = line[x];
-		if (g.mode == ATTR_WDUMMY || g.u == ' ')
-			continue;
-		if (selected(x, y))
-			g.mode |= ATTR_SELECTED;
-		if (search_matched(x, y))
-			g.mode |= ATTR_MATCH;
-		gpuresolve(g, x, y, fg, bg);
-		gg = gpuglyph(g.u, g.mode);
-		if (!gg || !gg->valid || gg->w <= 0 || gg->h <= 0)
-			continue;
-		int cellx = gpucellx(x);
-		int cellw = gpucellright(x, g.mode & ATTR_WIDE) - cellx;
-		if (gg->color) {
-			double scale = MIN((double)cellw / gg->w, (double)rowh / gg->h);
-			int dw = MAX(1, gpuround(gg->w * scale));
-			int dh = MAX(1, gpuround(gg->h * scale));
-			int dx = cellx + (cellw - dw) / 2;
-			int dy = basey + (rowh - dh) / 2;
-			gpubatchglyph(&gpu.ctext, dx, dy, dw, dh, gg, white);
-		} else {
-			int dx = cellx + gg->left;
-			int dy = baseline - gg->top;
-			gpubatchglyph(&gpu.text, dx, dy, gg->w, gg->h, gg, fg);
-		}
-	}
-
-	for (x = x1; x < x2; x++) {
-		g = line[x];
-		if (g.mode == ATTR_WDUMMY)
-			continue;
-		if (selected(x, y))
-			g.mode |= ATTR_SELECTED;
-		if (search_matched(x, y))
-			g.mode |= ATTR_MATCH;
-		gpuresolve(g, x, y, fg, bg);
-		if (g.mode & ATTR_UNDERLINE)
-			gpubatchrect(&gpu.deco, gpucellx(x), baseline + 1,
-			             gpucellright(x, 0) - gpucellx(x), 1, fg);
-		if (g.mode & ATTR_STRUCK)
-			gpubatchrect(&gpu.deco, gpucellx(x), basey + rowh / 2,
-			             gpucellright(x, 0) - gpucellx(x), 1, fg);
-	}
 }
 
 static void
@@ -2196,7 +2203,6 @@ xinit(int cols, int rows)
 
 	/* Xft rendering context */
 	xw.draw = XftDrawCreate(xw.dpy, xw.buf, xw.vis, xw.cmap);
-	gpuinit();
 
 	/* input methods */
 	if (!ximopen(xw.dpy)) {
@@ -2244,7 +2250,7 @@ xinit(int cols, int rows)
 	resettitle();
 	xhints();
 	XMapWindow(xw.dpy, xw.win);
-	XSync(xw.dpy, False);
+	XFlush(xw.dpy);
 
 	clock_gettime(CLOCK_MONOTONIC, &xsel.tclick1);
 	clock_gettime(CLOCK_MONOTONIC, &xsel.tclick2);
@@ -2721,22 +2727,24 @@ xstartdraw(void)
 {
 	float bg[3];
 
+	if (gpudraw && !gpu.active) {
+		gpuinit();
+		if (gpu.active)
+			xhints();
+	}
 	if (gpu.active) {
-		/*
-		 * The GPU backend always redraws the whole terminal into a handful of
-		 * large client-side batches.  The batches are then submitted with six GL
-		 * draw calls below, which is much faster than the first bring-up path that
-		 * used glBegin/glEnd for every line/cursor fragment.
-		 */
 		if (!IS_SET(MODE_VISIBLE))
 			return 0;
 		glXMakeCurrent(xw.dpy, xw.win, gpu.ctx);
 		gpuresize();
 		gpubatchreset();
-		gpucolor(IS_SET(MODE_REVERSE) ? defaultfg : defaultbg, bg);
-		glClearColor(bg[0], bg[1], bg[2], 1.0f);
-		glClear(GL_COLOR_BUFFER_BIT);
-		tfulldirt();
+		if (gpu.needclear) {
+			gpucolor(IS_SET(MODE_REVERSE) ? defaultfg : defaultbg, bg);
+			glClearColor(bg[0], bg[1], bg[2], 1.0f);
+			glClear(GL_COLOR_BUFFER_BIT);
+			tfulldirt();
+			gpu.needclear = 0;
+		}
 		return 1;
 	}
 	return IS_SET(MODE_VISIBLE);

@@ -38,6 +38,7 @@ void xsettitle(char *);
 void xsetcwd(char *);
 int xgetcursor(void);
 int xsetcursor(int);
+int xgpuactive(void);
 void xsetmode(int, unsigned int);
 void xsetpointermotion(int);
 void xsetmousecursor(int);
