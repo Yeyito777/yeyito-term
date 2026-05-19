@@ -2770,7 +2770,12 @@ twrite(const char *buf, int buflen, int show_ctrl)
 	for (n = 0; n < buflen; n += charsize) {
 		if (IS_SET(MODE_UTF8)) {
 			/* process a complete utf8 char */
-			charsize = utf8decode(buf + n, &u, buflen - n);
+			if (!(buf[n] & 0x80)) {
+				u = buf[n];
+				charsize = 1;
+			} else {
+				charsize = utf8decode(buf + n, &u, buflen - n);
+			}
 			if (charsize == 0)
 				break;
 		} else {
