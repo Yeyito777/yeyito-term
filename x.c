@@ -465,6 +465,12 @@ xgpuactive(void)
 }
 
 int
+xgpuenabled(void)
+{
+	return gpudraw;
+}
+
+int
 evcol(XEvent *e)
 {
 	int x = e->xbutton.x - borderpx;

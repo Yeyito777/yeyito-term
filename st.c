@@ -210,6 +210,7 @@ static void tsetscroll(int, int);
 static void tswapscreen(void);
 static void tsetmode(int, int, const int *, int);
 static int tfastcsi(const char *, int, int *);
+static int tputcfastascii(uchar);
 static int twrite(const char *, int, int);
 void tfulldirt(void);
 static void tcontrolcode(uchar );
@@ -2804,17 +2805,65 @@ tfastcsi(const char *s, int n, int *used)
 	return 1;
 }
 
+static int
+tputcfastascii(uchar u)
+{
+	Glyph *gp;
+
+	if (!BETWEEN(u, 0x20, 0x7e) || term.esc || IS_SET(MODE_PRINT) ||
+	    IS_SET(MODE_INSERT) || term.trantbl[term.charset] != CS_USA)
+		return 0;
+
+	if (sel.ob.x != -1 && selected(term.c.x, term.c.y))
+		selclear();
+
+	gp = &term.line[term.c.y][term.c.x];
+	if (IS_SET(MODE_WRAP) && (term.c.state & CURSOR_WRAPNEXT)) {
+		gp->mode |= ATTR_WRAP;
+		tnewline(1);
+		gp = &term.line[term.c.y][term.c.x];
+	}
+
+	if (gp->mode & ATTR_WIDE) {
+		if (term.c.x + 1 < term.col) {
+			gp[1].u = ' ';
+			gp[1].mode &= ~ATTR_WDUMMY;
+		}
+	} else if (gp->mode & ATTR_WDUMMY) {
+		if (term.c.x > 0) {
+			gp[-1].u = ' ';
+			gp[-1].mode &= ~ATTR_WIDE;
+		}
+	}
+
+	term.dirty[term.c.y] = 1;
+	*gp = term.c.attr;
+	gp->u = u;
+	term.lastc = u;
+	if (term.c.x + 1 < term.col) {
+		term.c.state &= ~CURSOR_WRAPNEXT;
+		term.c.x++;
+	} else {
+		term.c.state |= CURSOR_WRAPNEXT;
+	}
+	return 1;
+}
+
 int
 twrite(const char *buf, int buflen, int show_ctrl)
 {
 	int charsize;
 	Rune u;
-	int n, used;
+	int n, used, gpu = xgpuenabled();
 
 	for (n = 0; n < buflen; n += charsize) {
 		if (!show_ctrl && term.esc == 0 && buf[n] == '\033' &&
 		    tfastcsi(buf + n, buflen - n, &used)) {
 			charsize = used;
+			continue;
+		}
+		if (gpu && !show_ctrl && tputcfastascii((uchar)buf[n])) {
+			charsize = 1;
 			continue;
 		}
 		if (IS_SET(MODE_UTF8)) {

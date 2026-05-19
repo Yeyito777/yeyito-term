@@ -40,6 +40,7 @@ int xgetcursor(void);
 int xsetcursor(int);
 int xgpuactive(void);
 void xsetmode(int, unsigned int);
+int xgpuenabled(void);
 void xsetpointermotion(int);
 void xsetmousecursor(int);
 void xsetsel(char *);
