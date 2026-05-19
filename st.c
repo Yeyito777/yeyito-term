@@ -1719,6 +1719,21 @@ csihandle(void)
 	char buf[40];
 	int len;
 
+	/* Kitty keyboard protocol push/pop.  We only need enough of the
+	 * progressive enhancement protocol to report key release events to apps
+	 * that request them (CSI > flags u / CSI < u). */
+	if (csiescseq.len >= 2 && csiescseq.buf[0] == '>'
+	    && csiescseq.buf[csiescseq.len - 1] == 'u') {
+		long flags = strtol(csiescseq.buf + 1, NULL, 10);
+		xsetmode(flags & 2, MODE_KITTYKBD); /* report event types */
+		return;
+	}
+	if (csiescseq.len >= 2 && csiescseq.buf[0] == '<'
+	    && csiescseq.buf[csiescseq.len - 1] == 'u') {
+		xsetmode(0, MODE_KITTYKBD);
+		return;
+	}
+
 	switch (csiescseq.mode[0]) {
 	default:
 	unknown:

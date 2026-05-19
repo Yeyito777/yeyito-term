@@ -12,6 +12,7 @@ enum win_mode {
 	MODE_APPCURSOR   = 1 << 8,
 	MODE_MOUSESGR    = 1 << 9,
 	MODE_8BIT        = 1 << 10,
+	MODE_KITTYKBD    = 1 << 18,
 	MODE_BLINK       = 1 << 11,
 	MODE_FBLINK      = 1 << 12,
 	MODE_FOCUS       = 1 << 13,

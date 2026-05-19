@@ -175,6 +175,8 @@ static void expose(XEvent *);
 static void visibility(XEvent *);
 static void unmap(XEvent *);
 static void kpress(XEvent *);
+static void krelease(XEvent *);
+static int xisautorepeatrelease(XEvent *);
 static void cmessage(XEvent *);
 static void resize(XEvent *);
 static void focus(XEvent *);
@@ -198,6 +200,7 @@ static void usage(void);
 
 static void (*handler[LASTEvent])(XEvent *) = {
 	[KeyPress] = kpress,
+	[KeyRelease] = krelease,
 	[ClientMessage] = cmessage,
 	[ConfigureNotify] = resize,
 	[VisibilityNotify] = visibility,
@@ -1178,6 +1181,8 @@ xinit(int cols, int rows)
 
 	if (!(xw.dpy = XOpenDisplay(NULL)))
 		die("can't open display\n");
+	Bool detectable_autorepeat_supported;
+	XkbSetDetectableAutoRepeat(xw.dpy, True, &detectable_autorepeat_supported);
 	xw.scr = XDefaultScreen(xw.dpy);
 	xw.vis = XDefaultVisual(xw.dpy, xw.scr);
 
@@ -1995,6 +2000,102 @@ kmap(KeySym k, uint state)
 	return NULL;
 }
 
+static int
+kittykbd_modifier(uint state)
+{
+	int mod = 1;
+	if (state & ShiftMask)
+		mod += 1;
+	if (state & Mod1Mask)
+		mod += 2;
+	if (state & ControlMask)
+		mod += 4;
+	if (state & Mod4Mask)
+		mod += 8;
+	return mod;
+}
+
+static long
+kittykbd_decode_utf8(const char *buf, int len)
+{
+	const unsigned char *s = (const unsigned char *)buf;
+	if (len <= 0)
+		return 0;
+	if (s[0] < 0x80)
+		return s[0];
+	if (len >= 2 && (s[0] & 0xe0) == 0xc0)
+		return ((s[0] & 0x1f) << 6) | (s[1] & 0x3f);
+	if (len >= 3 && (s[0] & 0xf0) == 0xe0)
+		return ((s[0] & 0x0f) << 12) | ((s[1] & 0x3f) << 6) | (s[2] & 0x3f);
+	if (len >= 4 && (s[0] & 0xf8) == 0xf0)
+		return ((s[0] & 0x07) << 18) | ((s[1] & 0x3f) << 12) | ((s[2] & 0x3f) << 6) | (s[3] & 0x3f);
+	return 0;
+}
+
+static long
+kittykbd_keycode(KeySym ksym, uint state, const char *buf, int len)
+{
+	if ((state & ControlMask) && ksym >= XK_A && ksym <= XK_Z)
+		return 'a' + (ksym - XK_A);
+	if ((state & ControlMask) && ksym >= XK_a && ksym <= XK_z)
+		return ksym;
+
+	long decoded = kittykbd_decode_utf8(buf, len);
+	if (decoded)
+		return decoded;
+
+	switch (ksym) {
+	case XK_Return:    return 13;
+	case XK_Tab:       return 9;
+	case XK_BackSpace: return 127;
+	case XK_Escape:    return 27;
+	case XK_space:     return 32;
+	default:
+		if ((ksym & 0xff000000) == 0x01000000)
+			return (long)(ksym & 0x00ffffff);
+		if (ksym >= 0x20 && ksym <= 0xff)
+			return (long)ksym;
+		return 0;
+	}
+}
+
+static int
+kittykbd_write(KeySym ksym, uint state, const char *buf, int len, int event)
+{
+	char seq[128];
+	long code = kittykbd_keycode(ksym, state, buf, len);
+	if (!code)
+		return 0;
+	int n = snprintf(seq, sizeof(seq), "\033[%ld;%d:%du", code, kittykbd_modifier(state), event);
+	if (n > 0 && n < (int)sizeof(seq)) {
+		ttywrite(seq, n, 1);
+		return 1;
+	}
+	return 0;
+}
+
+int
+xisautorepeatrelease(XEvent *ev)
+{
+	XEvent next;
+
+	if (ev->type != KeyRelease)
+		return 0;
+
+	/* Without XKB detectable auto-repeat, X11 represents a repeated key as
+	 * KeyRelease immediately followed by KeyPress for the same key and time.
+	 * Do not forward that synthetic release to applications using kitty's
+	 * keyboard event-type protocol: held Space must remain "pressed" until the
+	 * actual physical release. */
+	if (XEventsQueued(xw.dpy, QueuedAfterReading) <= 0)
+		return 0;
+
+	XPeekEvent(xw.dpy, &next);
+	return next.type == KeyPress
+		&& next.xkey.keycode == ev->xkey.keycode
+		&& next.xkey.time == ev->xkey.time;
+}
+
 void
 kpress(XEvent *ev)
 {
@@ -2089,6 +2190,9 @@ kpress(XEvent *ev)
 		return;
 	}
 
+	if (IS_SET(MODE_KITTYKBD) && kittykbd_write(ksym, e->state, buf, len, 1))
+		return;
+
 	/* 3. composed string from input method */
 	if (len == 0)
 		return;
@@ -2153,6 +2257,31 @@ kpress(XEvent *ev)
 	}
 
 	ttywrite(buf, len, 1);
+}
+
+void
+krelease(XEvent *ev)
+{
+	XKeyEvent *e = &ev->xkey;
+	KeySym ksym = NoSymbol;
+	char buf[64];
+	int len;
+	Status status;
+
+	if (IS_SET(MODE_KBDLOCK) || !IS_SET(MODE_KITTYKBD))
+		return;
+
+	if (xw.ime.xic) {
+		len = XmbLookupString(xw.ime.xic, e, buf, sizeof buf, &ksym, &status);
+		if (status == XBufferOverflow)
+			return;
+	} else {
+		len = XLookupString(e, buf, sizeof buf, &ksym, NULL);
+	}
+	if (ksym == NoSymbol)
+		ksym = XLookupKeysym(e, 0);
+
+	kittykbd_write(ksym, e->state, buf, len, 3);
 }
 
 void
@@ -2270,7 +2399,11 @@ run(void)
 		while (XPending(xw.dpy)) {
 			xev = 1;
 			XNextEvent(xw.dpy, &ev);
-			if (XFilterEvent(&ev, None))
+			if (xisautorepeatrelease(&ev))
+				continue;
+			/* XIM may filter KeyRelease even though the kitty keyboard
+			 * protocol needs release events for event type reporting. */
+			if (ev.type != KeyRelease && XFilterEvent(&ev, None))
 				continue;
 			if (handler[ev.type])
 				(handler[ev.type])(&ev);
