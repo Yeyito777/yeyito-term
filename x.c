@@ -21,6 +21,12 @@
 #include <ft2build.h>
 #include FT_FREETYPE_H
 
+#ifndef GLX_BACK_BUFFER_AGE_EXT
+#define GLX_BACK_BUFFER_AGE_EXT 0x20F4
+#endif
+
+#define GPU_DAMAGE_HISTORY 4
+
 char *argv0;
 #include "arg.h"
 #include "st.h"
@@ -182,6 +188,7 @@ static void xresize(int, int);
 static void xhints(void);
 static void xensurexftbuf(int);
 static void gpuinit(void);
+static void gpudamageensure(void);
 static void gpuresize(void);
 static void gpudestroy(void);
 static double gpuxscale(void);
@@ -326,7 +333,11 @@ typedef void (*GpuGenBuffers)(GLsizei, GLuint *);
 
 typedef struct {
 	int active, doublebuf;
+	int bufferage;
 	int needclear;
+	unsigned int backage;
+	int damageidx, damagerows;
+	uchar *damage[GPU_DAMAGE_HISTORY];
 	int vw, vh;
 	GLXContext ctx;
 	int vbo_ok;
@@ -1360,6 +1371,23 @@ gpuresize(void)
 }
 
 static void
+gpudamageensure(void)
+{
+	int i, rows = trow();
+
+	if (!gpu.doublebuf || rows <= 0)
+		return;
+	if (gpu.damagerows == rows && gpu.damage[0])
+		return;
+	for (i = 0; i < GPU_DAMAGE_HISTORY; i++) {
+		gpu.damage[i] = xrealloc(gpu.damage[i], rows * sizeof(*gpu.damage[i]));
+		memset(gpu.damage[i], 0, rows * sizeof(*gpu.damage[i]));
+	}
+	gpu.damagerows = rows;
+	gpu.needclear = 1;
+}
+
+static void
 gpudisablesync(void)
 {
 	typedef void (*SwapIntervalEXT)(Display *, GLXDrawable, int);
@@ -1409,6 +1437,10 @@ gpuinit(void)
 		return;
 	}
 	glXGetConfig(xw.dpy, vi, GLX_DOUBLEBUFFER, &gpu.doublebuf);
+	{
+		const char *ext = glXQueryExtensionsString(xw.dpy, xw.scr);
+		gpu.bufferage = ext && strstr(ext, "GLX_EXT_buffer_age");
+	}
 	gpu.ctx = glXCreateContext(xw.dpy, vi, NULL, True);
 	XFree(vi);
 	if (!gpu.ctx)
@@ -1481,6 +1513,8 @@ gpudestroy(void)
 		glDeleteTextures(1, &gpu.atlas);
 	if (gpu.catlas)
 		glDeleteTextures(1, &gpu.catlas);
+	for (i = 0; i < GPU_DAMAGE_HISTORY; i++)
+		free(gpu.damage[i]);
 	for (i = 0; i < 4; i++)
 		if (gpu.face[i])
 			FT_Done_Face(gpu.face[i]);
@@ -1798,6 +1832,9 @@ gpudrawline(Line line, int x1, int y, int x2)
 	Glyph g;
 	float fg[3], bg[3], dfg[3], dbg[3], runbg[3], white[3] = {1.0f, 1.0f, 1.0f};
 	GpuGlyph *gg;
+
+	if (gpu.doublebuf && gpu.damage[0] && BETWEEN(y, 0, gpu.damagerows - 1))
+		gpu.damage[gpu.damageidx][y] = 1;
 
 	gpucolor(defaultfg, dfg);
 	gpucolor(defaultbg, dbg);
@@ -2759,6 +2796,7 @@ int
 xstartdraw(void)
 {
 	float bg[3];
+	int i, y;
 
 	if (gpudraw && !gpu.active) {
 		gpuinit();
@@ -2770,8 +2808,17 @@ xstartdraw(void)
 			return 0;
 		glXMakeCurrent(xw.dpy, xw.win, gpu.ctx);
 		gpuresize();
+		gpudamageensure();
+		if (gpu.doublebuf && gpu.damage[0]) {
+			gpu.damageidx = (gpu.damageidx + 1) % GPU_DAMAGE_HISTORY;
+			memset(gpu.damage[gpu.damageidx], 0,
+			       gpu.damagerows * sizeof(*gpu.damage[gpu.damageidx]));
+		}
 		gpubatchreset();
-		if (gpu.needclear || gpu.doublebuf) {
+		gpu.backage = 0;
+		if (gpu.doublebuf && gpu.bufferage)
+			glXQueryDrawable(xw.dpy, xw.win, GLX_BACK_BUFFER_AGE_EXT, &gpu.backage);
+		if (gpu.needclear || (gpu.doublebuf && (!gpu.bufferage || gpu.backage == 0 || gpu.backage > GPU_DAMAGE_HISTORY))) {
 			gpucolor(IS_SET(MODE_REVERSE) ? defaultfg : defaultbg, bg);
 			glClearColor(bg[0], bg[1], bg[2], 1.0f);
 			glClear(GL_COLOR_BUFFER_BIT);
@@ -2784,6 +2831,13 @@ xstartdraw(void)
 			 */
 			tfulldirt();
 			gpu.needclear = 0;
+		} else if (gpu.doublebuf && gpu.backage > 1 && gpu.damage[0]) {
+			for (i = 1; i < (int)gpu.backage; i++) {
+				int di = (gpu.damageidx - i + GPU_DAMAGE_HISTORY) % GPU_DAMAGE_HISTORY;
+				for (y = 0; y < gpu.damagerows; y++)
+					if (gpu.damage[di][y])
+						tsetdirt(y, y);
+			}
 		}
 		return 1;
 	}

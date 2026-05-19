@@ -105,6 +105,8 @@ void toggleprinter(const Arg *);
 int tattrset(int);
 int tisaltscreen(void);
 int tlinelen(int);
+int trow(void);
+void tsetdirt(int, int);
 void tfulldirt(void);
 void tnew(int, int);
 void tresize(int, int);
