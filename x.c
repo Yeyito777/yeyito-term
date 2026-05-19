@@ -3410,10 +3410,16 @@ run(void)
 		tv = timeout >= 0 ? &seltv : NULL;
 
 		if (pselect(MAX(xfd, ttyfd)+1, &rfd, NULL, NULL, tv, NULL) < 0) {
-			if (errno == EINTR)
+			if (errno == EINTR) {
+				if (childready())
+					reapchild();
 				continue;
+			}
 			die("select failed: %s\n", strerror(errno));
 		}
+
+		if (childready())
+			reapchild();
 		clock_gettime(CLOCK_MONOTONIC, &now);
 
 		if (FD_ISSET(ttyfd, &rfd))
@@ -3587,7 +3593,13 @@ main(int argc, char *argv[])
 run:
 	if (argc > 0) { /* eat all remaining arguments */
 		opt_cmd = argv;
-		persist_set_ephemeral(1);
+		/* Short-lived -e helper commands used by scripts/benchmarks often exit
+		 * before the terminal has finished its initial resize.  Persisting those
+		 * processes from SIGCHLD can race with allocation and is not useful.
+		 * Keep persistence for interactive shell restores, but skip ephemeral -e
+		 * sessions unless they were explicitly launched from a saved directory. */
+		if (opt_fromsave)
+			persist_set_ephemeral(1);
 
 		/*
 		 * Save -e command for ephemeral persist restore.

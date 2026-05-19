@@ -244,6 +244,7 @@ static STREscape strescseq;
 static int iofd = 1;
 static int cmdfd;
 static pid_t pid;
+static volatile sig_atomic_t childexited;
 
 static const uchar utfbyte[UTF_SIZ + 1] = {0x80,    0, 0xC0, 0xE0, 0xF0};
 static const uchar utfmask[UTF_SIZ + 1] = {0xC0, 0x80, 0xE0, 0xF0, 0xF8};
@@ -755,6 +756,19 @@ execsh(char *cmd, char **args)
 void
 sigchld(int a)
 {
+	(void)a;
+	childexited = 1;
+}
+
+int
+childready(void)
+{
+	return childexited;
+}
+
+void
+reapchild(void)
+{
 	int stat;
 	pid_t p;
 
@@ -864,7 +878,7 @@ ttynew(const char *line, char *cmd, const char *out, char **args)
 size_t
 ttyread(void)
 {
-	static char buf[65536];
+	static char buf[262144];
 	static int buflen = 0;
 	int ret, written;
 
@@ -873,10 +887,16 @@ ttyread(void)
 
 	switch (ret) {
 	case 0:
-		persist_save();
-		persist_cleanup();
-		exit(0);
+		reapchild();
 	case -1:
+		if (errno == EIO) {
+			/* Linux ptys report EIO when the slave side closes.  This can
+			 * arrive before SIGCHLD is observed; treat it as normal child exit
+			 * instead of turning short-lived -e commands into terminal errors. */
+			persist_save();
+			persist_cleanup();
+			exit(0);
+		}
 		die("couldn't read from shell: %s\n", strerror(errno));
 	default:
 		buflen += ret;

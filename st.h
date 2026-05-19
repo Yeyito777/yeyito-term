@@ -92,6 +92,8 @@ typedef union {
 void die(const char *, ...);
 void redraw(void);
 void draw(void);
+int childready(void);
+void reapchild(void);
 
 void kscrolldown(const Arg *);
 void kscrollup(const Arg *);
