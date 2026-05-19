@@ -1639,6 +1639,42 @@ cleanup:
 	return face;
 }
 
+static unsigned char *
+gpuresamplebgra(const FT_Bitmap *bm, int dw, int dh)
+{
+	int x, y, sx, sy, sx0, sx1, sy0, sy1, n;
+	unsigned int b, g, r, a;
+	unsigned char *out = xmalloc(dw * dh * 4), *dst = out;
+
+	for (y = 0; y < dh; y++) {
+		sy0 = y * bm->rows / dh;
+		sy1 = (y + 1) * bm->rows / dh;
+		if (sy1 <= sy0)
+			sy1 = sy0 + 1;
+		for (x = 0; x < dw; x++, dst += 4) {
+			sx0 = x * bm->width / dw;
+			sx1 = (x + 1) * bm->width / dw;
+			if (sx1 <= sx0)
+				sx1 = sx0 + 1;
+			b = g = r = a = n = 0;
+			for (sy = sy0; sy < sy1; sy++) {
+				const unsigned char *row = bm->buffer + sy * bm->pitch;
+				if (bm->pitch < 0)
+					row = bm->buffer + (bm->rows - 1 - sy) * -bm->pitch;
+				for (sx = sx0; sx < sx1; sx++) {
+					const unsigned char *p = row + sx * 4;
+					b += p[0]; g += p[1]; r += p[2]; a += p[3]; n++;
+				}
+			}
+			dst[0] = b / n;
+			dst[1] = g / n;
+			dst[2] = r / n;
+			dst[3] = a / n;
+		}
+	}
+	return out;
+}
+
 static GpuGlyph *
 gpuglyph(Rune rune, int mode)
 {
@@ -1699,6 +1735,15 @@ gpuglyph(Rune rune, int mode)
 	g->color = bm->pixel_mode == FT_PIXEL_MODE_BGRA;
 	g->w = bm->width;
 	g->h = bm->rows;
+	if (g->color) {
+		int cellw = gpucellright(0, mode & ATTR_WIDE) - gpucellx(0);
+		int cellh = gpurowbottom(0) - gpucelly(0);
+		double scale = MIN((double)cellw / MAX(1, g->w), (double)cellh / MAX(1, g->h));
+		if (scale < 1.0) {
+			g->w = MAX(1, gpuround(g->w * scale));
+			g->h = MAX(1, gpuround(g->h * scale));
+		}
+	}
 	g->left = face->glyph->bitmap_left;
 	g->top = face->glyph->bitmap_top;
 	g->advance = face->glyph->advance.x >> 6;
@@ -1718,14 +1763,21 @@ gpuglyph(Rune rune, int mode)
 	g->y = gpu.peny;
 	glBindTexture(GL_TEXTURE_2D, g->color ? gpu.catlas : gpu.atlas);
 	if (g->color) {
-		unsigned char *tight = xmalloc(g->w * g->h * 4), *dst = tight;
-		int row;
-		for (row = 0; row < g->h; row++) {
-			const unsigned char *src = bm->buffer + row * bm->pitch;
-			if (bm->pitch < 0)
-				src = bm->buffer + (g->h - 1 - row) * -bm->pitch;
-			memcpy(dst, src, g->w * 4);
-			dst += g->w * 4;
+		unsigned char *tight;
+		if (g->w != bm->width || g->h != bm->rows) {
+			tight = gpuresamplebgra(bm, g->w, g->h);
+		} else {
+			unsigned char *dst;
+			int row;
+			tight = xmalloc(g->w * g->h * 4);
+			dst = tight;
+			for (row = 0; row < g->h; row++) {
+				const unsigned char *src = bm->buffer + row * bm->pitch;
+				if (bm->pitch < 0)
+					src = bm->buffer + (g->h - 1 - row) * -bm->pitch;
+				memcpy(dst, src, g->w * 4);
+				dst += g->w * 4;
+			}
 		}
 		glTexSubImage2D(GL_TEXTURE_2D, 0, g->x, g->y, g->w, g->h,
 		                GL_BGRA, GL_UNSIGNED_BYTE, tight);
@@ -1913,9 +1965,8 @@ gpudrawline(Line line, int x1, int y, int x2)
 			gg = gpuglyph(g.u, g.mode);
 			if (gg && gg->valid && gg->w > 0 && gg->h > 0) {
 				if (gg->color) {
-					double scale = MIN((double)cellw / gg->w, (double)rowh / gg->h);
-					int dw = MAX(1, gpuround(gg->w * scale));
-					int dh = MAX(1, gpuround(gg->h * scale));
+					int dw = gg->w;
+					int dh = gg->h;
 					int dx = cellx + (cellw - dw) / 2;
 					int dy = basey + (rowh - dh) / 2;
 					gpubatchglyph(&gpu.ctext, dx, dy, dw, dh, gg, white);
@@ -1963,9 +2014,8 @@ gpudrawcell(Glyph g, int x, int y, int overlay)
 		gg = gpuglyph(g.u, g.mode);
 		if (gg && gg->valid && gg->w > 0 && gg->h > 0) {
 			if (gg->color) {
-				double scale = MIN((double)cellw / gg->w, (double)cellh / gg->h);
-				int dw = MAX(1, gpuround(gg->w * scale));
-				int dh = MAX(1, gpuround(gg->h * scale));
+				int dw = gg->w;
+				int dh = gg->h;
 				int dx = cellx + (cellw - dw) / 2;
 				int dy = celly + (cellh - dh) / 2;
 				gpubatchglyph(ctb, dx, dy, dw, dh, gg, white);
