@@ -303,7 +303,7 @@ typedef struct {
 	Rune rune;
 	int flags;
 	int color;
-	int x, y, w, h;
+	int x, y, w, h, ow, oh;
 	int left, top, advance;
 	int valid;
 } GpuGlyph;
@@ -1499,8 +1499,11 @@ gpuinit(void)
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 	glGenTextures(1, &gpu.catlas);
 	glBindTexture(GL_TEXTURE_2D, gpu.catlas);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	/* Color emoji fonts here are bitmap strikes (Twemoji is a 71px strike).
+	 * Xft/XRender scales those to terminal size with simple linear filtering;
+	 * mipmaps reduced jaggies but measured/appeared too blurry at this scale. */
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
@@ -1644,6 +1647,7 @@ gpuglyph(Rune rune, int mode)
 	FT_Bitmap *bm;
 	uint h = 0, slot = GPU_GLYPH_HASH;
 	int i, probes, flags = gpufaceidx(mode), wantcolor = gpuisemoji(rune);
+	int cropx = 0, cropy = 0;
 
 	if (rune < 128 && gpu.ascii[flags][rune] >= 0)
 		return &gpu.glyphs[gpu.ascii[flags][rune]];
@@ -1696,6 +1700,30 @@ gpuglyph(Rune rune, int mode)
 	g->color = bm->pixel_mode == FT_PIXEL_MODE_BGRA;
 	g->w = bm->width;
 	g->h = bm->rows;
+	g->ow = bm->width;
+	g->oh = bm->rows;
+	if (g->color) {
+		int x, y, minx = bm->width, miny = bm->rows, maxx = -1, maxy = -1;
+		for (y = 0; y < bm->rows; y++) {
+			const unsigned char *row = bm->buffer + y * bm->pitch;
+			if (bm->pitch < 0)
+				row = bm->buffer + (bm->rows - 1 - y) * -bm->pitch;
+			for (x = 0; x < bm->width; x++) {
+				if (row[x * 4 + 3]) {
+					minx = MIN(minx, x);
+					miny = MIN(miny, y);
+					maxx = MAX(maxx, x);
+					maxy = MAX(maxy, y);
+				}
+			}
+		}
+		if (maxx >= minx && maxy >= miny) {
+			cropx = minx;
+			cropy = miny;
+			g->w = maxx - minx + 1;
+			g->h = maxy - miny + 1;
+		}
+	}
 	g->left = face->glyph->bitmap_left;
 	g->top = face->glyph->bitmap_top;
 	g->advance = face->glyph->advance.x >> 6;
@@ -1718,9 +1746,10 @@ gpuglyph(Rune rune, int mode)
 		unsigned char *tight = xmalloc(g->w * g->h * 4), *dst = tight;
 		int row;
 		for (row = 0; row < g->h; row++) {
-			const unsigned char *src = bm->buffer + row * bm->pitch;
+			const unsigned char *src = bm->buffer + (row + cropy) * bm->pitch;
 			if (bm->pitch < 0)
-				src = bm->buffer + (g->h - 1 - row) * -bm->pitch;
+				src = bm->buffer + (bm->rows - 1 - (row + cropy)) * -bm->pitch;
+			src += cropx * 4;
 			memcpy(dst, src, g->w * 4);
 			dst += g->w * 4;
 		}
@@ -1910,7 +1939,9 @@ gpudrawline(Line line, int x1, int y, int x2)
 			gg = gpuglyph(g.u, g.mode);
 			if (gg && gg->valid && gg->w > 0 && gg->h > 0) {
 				if (gg->color) {
-					double scale = MIN((double)cellw / gg->w, (double)rowh / gg->h);
+					double fitw = MAX(cellw, rowh);
+					double scale = MIN(fitw / MAX(1, gg->ow), (double)rowh / MAX(1, gg->oh));
+					scale *= 0.94;
 					int dw = MAX(1, gpuround(gg->w * scale));
 					int dh = MAX(1, gpuround(gg->h * scale));
 					int dx = cellx + (cellw - dw) / 2;
@@ -1961,7 +1992,9 @@ gpudrawcell(Glyph g, int x, int y, int overlay)
 		gg = gpuglyph(g.u, g.mode);
 		if (gg && gg->valid && gg->w > 0 && gg->h > 0) {
 			if (gg->color) {
-				double scale = MIN((double)cellw / gg->w, (double)cellh / gg->h);
+				double fitw = MAX(cellw, cellh);
+				double scale = MIN(fitw / MAX(1, gg->ow), (double)cellh / MAX(1, gg->oh));
+				scale *= 0.94;
 				int dw = MAX(1, gpuround(gg->w * scale));
 				int dh = MAX(1, gpuround(gg->h * scale));
 				int dx = cellx + (cellw - dw) / 2;
@@ -3556,6 +3589,7 @@ run(void)
 	int w = win.w, h = win.h;
 	fd_set rfd;
 	int xfd = XConnectionNumber(xw.dpy), ttyfd, xev, drawing;
+	int selret, ttyready, redraw;
 	struct timespec seltv, *tv, now, lastblink, trigger;
 	double timeout;
 
@@ -3608,7 +3642,7 @@ run(void)
 		seltv.tv_nsec = 1E6 * (timeout - 1E3 * seltv.tv_sec);
 		tv = timeout >= 0 ? &seltv : NULL;
 
-		if (pselect(MAX(xfd, ttyfd)+1, &rfd, NULL, NULL, tv, NULL) < 0) {
+		if ((selret = pselect(MAX(xfd, ttyfd)+1, &rfd, NULL, NULL, tv, NULL)) < 0) {
 			if (errno == EINTR) {
 				if (childready())
 					reapchild();
@@ -3621,7 +3655,8 @@ run(void)
 			reapchild();
 		clock_gettime(CLOCK_MONOTONIC, &now);
 
-		if (FD_ISSET(ttyfd, &rfd))
+		ttyready = FD_ISSET(ttyfd, &rfd);
+		if (ttyready)
 			ttyread();
 
 		xev = 0;
@@ -3649,7 +3684,7 @@ run(void)
 		 * maximum latency intervals during `cat huge.txt`, and perfect
 		 * sync with periodic updates from animations/key-repeats/etc.
 		 */
-		if (FD_ISSET(ttyfd, &rfd) || xev) {
+		if (ttyready || xev) {
 			if (!drawing) {
 				trigger = now;
 				drawing = 1;
@@ -3660,7 +3695,18 @@ run(void)
 				continue;  /* we have time, try to find idle */
 		}
 
+		/* The X fd can become readable due to internal GLX/DRI traffic without
+		 * yielding any X events.  Do not let that cut short the draw latency timer
+		 * or create an idle redraw/swap loop. */
+		if (drawing && !ttyready && !xev && selret > 0) {
+			timeout = (maxlatency - TIMEDIFF(now, trigger)) \
+			          / maxlatency * minlatency;
+			if (timeout > 0)
+				continue;
+		}
+
 		/* idle detected or maxlatency exhausted -> draw */
+		redraw = drawing;
 		timeout = -1;
 		if (blinktimeout && tattrset(ATTR_BLINK)) {
 			timeout = blinktimeout - TIMEDIFF(now, lastblink);
@@ -3671,11 +3717,14 @@ run(void)
 				tsetdirtattr(ATTR_BLINK);
 				lastblink = now;
 				timeout = blinktimeout;
+				redraw = 1;
 			}
 		}
 
 		if (notif_active()) {
 			int notif_remain = notif_check_timeout(&now);
+			if (selret == 0)
+				redraw = 1;
 			if (notif_remain > 0) {
 				if (timeout < 0 || notif_remain < timeout)
 					timeout = notif_remain;
@@ -3694,6 +3743,8 @@ run(void)
 				timeout = persist_remain;
 		}
 
+		if (!redraw)
+			continue;
 		draw();
 		XFlush(xw.dpy);
 		drawing = 0;
