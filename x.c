@@ -26,6 +26,7 @@
 #endif
 
 #define GPU_DAMAGE_HISTORY 4
+#define GPU_GLYPH_HASH 8192
 
 char *argv0;
 #include "arg.h"
@@ -357,6 +358,7 @@ typedef struct {
 	GpuGlyph *glyphs;
 	int glyphlen, glyphcap;
 	int ascii[4][128];
+	int glyphhash[GPU_GLYPH_HASH];
 	GpuFallbackFace *fallbacks;
 	int fallbacklen, fallbackcap;
 	GpuBatch bg, text, ctext, deco, obg, otext, octext, odeco;
@@ -1322,6 +1324,7 @@ gpuatlasreset(void)
 	gpu.rowh = 0;
 	gpu.glyphlen = 0;
 	memset(gpu.ascii, 0xff, sizeof gpu.ascii);
+	memset(gpu.glyphhash, 0, sizeof gpu.glyphhash);
 	for (i = 0; i < 4; i++)
 		if (gpu.face[i])
 			gpusetfontsize(gpu.face[i], 0);
@@ -1622,16 +1625,28 @@ gpuglyph(Rune rune, int mode)
 	GpuGlyph *g;
 	FT_Face face;
 	FT_Bitmap *bm;
-	int i, flags = gpufaceidx(mode), wantcolor = gpuisemoji(rune);
+	uint h = 0, slot = GPU_GLYPH_HASH;
+	int i, probes, flags = gpufaceidx(mode), wantcolor = gpuisemoji(rune);
 
 	if (rune < 128 && gpu.ascii[flags][rune] >= 0)
 		return &gpu.glyphs[gpu.ascii[flags][rune]];
-	for (i = 0; i < gpu.glyphlen; i++)
-		if (gpu.glyphs[i].rune == rune && gpu.glyphs[i].flags == flags) {
-			if (rune < 128)
-				gpu.ascii[flags][rune] = i;
-			return &gpu.glyphs[i];
+	if (rune >= 128) {
+		h = (rune * 2654435761u + flags * 97u) & (GPU_GLYPH_HASH - 1);
+		for (probes = 0, slot = h; probes < GPU_GLYPH_HASH && gpu.glyphhash[slot];
+		     probes++, slot = (slot + 1) & (GPU_GLYPH_HASH - 1)) {
+			i = gpu.glyphhash[slot] - 1;
+			if (gpu.glyphs[i].rune == rune && gpu.glyphs[i].flags == flags)
+				return &gpu.glyphs[i];
 		}
+		if (probes == GPU_GLYPH_HASH)
+			slot = GPU_GLYPH_HASH;
+	} else {
+		for (i = 0; i < gpu.glyphlen; i++)
+			if (gpu.glyphs[i].rune == rune && gpu.glyphs[i].flags == flags) {
+				gpu.ascii[flags][rune] = i;
+				return &gpu.glyphs[i];
+			}
+	}
 	if (gpu.glyphlen >= gpu.glyphcap) {
 		gpu.glyphcap += 256;
 		gpu.glyphs = xrealloc(gpu.glyphs, gpu.glyphcap * sizeof *gpu.glyphs);
@@ -1639,6 +1654,8 @@ gpuglyph(Rune rune, int mode)
 	g = &gpu.glyphs[gpu.glyphlen++];
 	if (rune < 128)
 		gpu.ascii[flags][rune] = gpu.glyphlen - 1;
+	else if (slot < GPU_GLYPH_HASH)
+		gpu.glyphhash[slot] = gpu.glyphlen;
 	memset(g, 0, sizeof *g);
 	g->rune = rune;
 	g->flags = flags;
