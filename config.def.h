@@ -28,6 +28,9 @@ char *vtiden = "\033[?6c";
 static float cwscale = 1.0;
 static float chscale = 1.0;
 
+/* Use the experimental OpenGL/FreeType renderer for the terminal grid. */
+static int gpudraw = 1;
+
 /*
  * word delimiter string
  *

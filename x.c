@@ -4,6 +4,7 @@
 #include <limits.h>
 #include <locale.h>
 #include <signal.h>
+#include <stddef.h>
 #include <string.h>
 #include <sys/select.h>
 #include <time.h>
@@ -15,6 +16,10 @@
 #include <X11/keysym.h>
 #include <X11/Xft/Xft.h>
 #include <X11/XKBlib.h>
+#include <GL/gl.h>
+#include <GL/glx.h>
+#include <ft2build.h>
+#include FT_FREETYPE_H
 
 char *argv0;
 #include "arg.h"
@@ -83,6 +88,16 @@ static void ttysend(const Arg *);
 typedef XftDraw *Draw;
 typedef XftColor Color;
 typedef XftGlyphFontSpec GlyphFontSpec;
+
+#ifndef GL_ARRAY_BUFFER
+#define GL_ARRAY_BUFFER 0x8892
+#endif
+#ifndef GL_STREAM_DRAW
+#define GL_STREAM_DRAW 0x88E0
+#endif
+#ifndef GL_DYNAMIC_DRAW
+#define GL_DYNAMIC_DRAW 0x88E8
+#endif
 
 /* Purely graphic info */
 typedef struct {
@@ -161,6 +176,14 @@ static void xinit(int, int);
 static void cresize(int, int);
 static void xresize(int, int);
 static void xhints(void);
+static void gpuinit(void);
+static void gpuresize(void);
+static void gpudestroy(void);
+static double gpuxscale(void);
+static double gpuyscale(void);
+static void gpudrawline(Line, int, int, int);
+static void gpudrawcell(Glyph, int, int, int);
+static void gpudrawcursor(int, int, Glyph, int, int, Glyph);
 static int xloadcolor(int, const char *, Color *);
 static int xloadfont(Font *, FcPattern *);
 static void xloadfonts(const char *, double);
@@ -258,6 +281,65 @@ char *usedfont = NULL;          /* non-static for sshind.c access */
 double usedfontsize = 0;        /* non-static for sshind.c access */
 static double defaultfontsize = 0;
 
+typedef struct {
+	Rune rune;
+	int flags;
+	int x, y, w, h;
+	int left, top, advance;
+	int valid;
+} GpuGlyph;
+
+typedef struct {
+	FT_Face face;
+	int flags;
+	char *file;
+	int index;
+} GpuFallbackFace;
+
+typedef struct {
+	GLfloat x, y;
+	GLfloat u, v;
+	GLfloat r, g, b, a;
+} GpuVertex;
+
+typedef struct {
+	GpuVertex *v;
+	int len, cap;
+} GpuBatch;
+
+typedef void (*GpuBindBuffer)(GLenum, GLuint);
+typedef void (*GpuBufferData)(GLenum, ptrdiff_t, const void *, GLenum);
+typedef void (*GpuBufferSubData)(GLenum, ptrdiff_t, ptrdiff_t, const void *);
+typedef void (*GpuDeleteBuffers)(GLsizei, const GLuint *);
+typedef void (*GpuGenBuffers)(GLsizei, GLuint *);
+
+typedef struct {
+	int active, doublebuf;
+	GLXContext ctx;
+	int vbo_ok;
+	GLuint vbo;
+	int vbosz;
+	GpuBindBuffer BindBuffer;
+	GpuBufferData BufferData;
+	GpuBufferSubData BufferSubData;
+	GpuDeleteBuffers DeleteBuffers;
+	GpuGenBuffers GenBuffers;
+	FT_Library ft;
+	FT_Face face[4];
+	double fontpx;
+	int ascent, descent;
+	GLuint atlas;
+	int atlasw, atlash, penx, peny, rowh;
+	GpuGlyph *glyphs;
+	int glyphlen, glyphcap;
+	int ascii[4][128];
+	GpuFallbackFace *fallbacks;
+	int fallbacklen, fallbackcap;
+	GpuBatch bg, text, deco, obg, otext, odeco;
+} Gpu;
+
+static Gpu gpu;
+
 static char *opt_class = NULL;
 static char **opt_cmd  = NULL;
 static char *opt_embed = NULL;
@@ -321,8 +403,12 @@ zoom(const Arg *arg)
 void
 zoomabs(const Arg *arg)
 {
+	if (gpu.active)
+		gpudestroy();
 	xunloadfonts();
 	xloadfonts(usedfont, arg->f);
+	if (gpudraw)
+		gpuinit();
 	cresize(0, 0);
 	redraw();
 	xhints();
@@ -349,6 +435,9 @@ int
 evcol(XEvent *e)
 {
 	int x = e->xbutton.x - borderpx;
+
+	if (gpu.active)
+		x = x / gpuxscale();
 	LIMIT(x, 0, win.tw - 1);
 	return x / win.cw;
 }
@@ -357,6 +446,9 @@ int
 evrow(XEvent *e)
 {
 	int y = e->xbutton.y - borderpx;
+
+	if (gpu.active)
+		y = y / gpuyscale();
 	LIMIT(y, 0, win.th - 1);
 	return y / win.ch;
 }
@@ -800,6 +892,7 @@ xresize(int col, int row)
 			DefaultDepth(xw.dpy, xw.scr));
 	XftDrawChange(xw.draw, xw.buf);
 	xclear(0, 0, win.w, win.h);
+	gpuresize();
 
 	/* resize to new width */
 	xw.specbuf = xrealloc(xw.specbuf, col * sizeof(GlyphFontSpec));
@@ -914,8 +1007,8 @@ xhints(void)
 	sizeh->flags = PSize | PResizeInc | PBaseSize | PMinSize;
 	sizeh->height = win.h;
 	sizeh->width = win.w;
-	sizeh->height_inc = win.ch;
-	sizeh->width_inc = win.cw;
+	sizeh->height_inc = gpu.active ? 1 : win.ch;
+	sizeh->width_inc = gpu.active ? 1 : win.cw;
 	sizeh->base_height = 2 * borderpx;
 	sizeh->base_width = 2 * borderpx;
 	sizeh->min_height = win.ch + 2 * borderpx;
@@ -935,6 +1028,737 @@ xhints(void)
 	XSetWMProperties(xw.dpy, xw.win, NULL, NULL, NULL, 0, sizeh, &wm,
 			&class);
 	XFree(sizeh);
+}
+
+static double
+gpuxscale(void)
+{
+	return win.tw > 0 ? (double)(win.w - 2 * borderpx) / win.tw : 1.0;
+}
+
+static double
+gpuyscale(void)
+{
+	return win.th > 0 ? (double)(win.h - 2 * borderpx) / win.th : 1.0;
+}
+
+static double
+gpucellw(void)
+{
+	return win.cw * gpuxscale();
+}
+
+static double
+gpucellh(void)
+{
+	return win.ch * gpuyscale();
+}
+
+static void
+gpucolor(uint32_t c, float out[3])
+{
+	Color *xc;
+
+	if (IS_TRUECOL(c)) {
+		out[0] = ((c >> 16) & 0xff) / 255.0f;
+		out[1] = ((c >> 8) & 0xff) / 255.0f;
+		out[2] = (c & 0xff) / 255.0f;
+		return;
+	}
+	c = MIN(c, dc.collen - 1);
+	xc = &dc.col[c];
+	out[0] = xc->color.red / 65535.0f;
+	out[1] = xc->color.green / 65535.0f;
+	out[2] = xc->color.blue / 65535.0f;
+}
+
+static void
+gpuresolve(Glyph g, int x, int y, float fg[3], float bg[3])
+{
+	uint32_t f = g.fg, b = g.bg, t;
+
+	if (y == vimnav_curline_y() && b == defaultbg)
+		b = vimnav_curline_bg;
+	if (debug_mode && b == defaultbg) {
+		int ps, pe;
+		vimnav_prompt_line_range(&ps, &pe);
+		if (ps >= 0 && y >= ps && y <= pe)
+			b = debug_prompt_bg;
+	}
+	if (g.mode & ATTR_SELECTED)
+		b = selectionbg;
+	if (g.mode & ATTR_MATCH) {
+		f = b;
+		b = search_match_bg;
+	}
+	if ((g.mode & ATTR_BOLD_FAINT) == ATTR_BOLD && BETWEEN(f, 0, 7))
+		f += 8;
+	if (IS_SET(MODE_REVERSE)) {
+		if (f == defaultfg)
+			f = defaultbg;
+		if (b == defaultbg)
+			b = defaultfg;
+	}
+	if (g.mode & ATTR_REVERSE) {
+		t = f;
+		f = b;
+		b = t;
+	}
+	if (g.mode & ATTR_BLINK && win.mode & MODE_BLINK)
+		f = b;
+	if (g.mode & ATTR_INVISIBLE)
+		f = b;
+
+	gpucolor(f, fg);
+	gpucolor(b, bg);
+	if ((g.mode & ATTR_BOLD_FAINT) == ATTR_FAINT) {
+		fg[0] *= 0.5f;
+		fg[1] *= 0.5f;
+		fg[2] *= 0.5f;
+	}
+}
+
+static int
+gpufaceidx(int mode)
+{
+	if ((mode & ATTR_ITALIC) && (mode & ATTR_BOLD) && gpu.face[FRC_ITALICBOLD])
+		return FRC_ITALICBOLD;
+	if ((mode & ATTR_ITALIC) && gpu.face[FRC_ITALIC])
+		return FRC_ITALIC;
+	if ((mode & ATTR_BOLD) && gpu.face[FRC_BOLD])
+		return FRC_BOLD;
+	return FRC_NORMAL;
+}
+
+static FT_Face
+gpuloadface(Font *font)
+{
+	FcChar8 *file = NULL;
+	int index = 0;
+	FT_Face face = NULL;
+
+	if (FcPatternGetString(font->match->pattern, FC_FILE, 0, &file) != FcResultMatch)
+		return NULL;
+	FcPatternGetInteger(font->match->pattern, FC_INDEX, 0, &index);
+	if (FT_New_Face(gpu.ft, (const char *)file, index, &face))
+		return NULL;
+	return face;
+}
+
+static void
+gpuatlasreset(void)
+{
+	int i;
+
+	if (!gpu.active)
+		return;
+	gpu.penx = gpu.peny = 1;
+	gpu.rowh = 0;
+	gpu.glyphlen = 0;
+	memset(gpu.ascii, 0xff, sizeof gpu.ascii);
+	for (i = 0; i < 4; i++)
+		if (gpu.face[i])
+			FT_Set_Pixel_Sizes(gpu.face[i], 0, MAX(1, (int)round(gpu.fontpx)));
+	glBindTexture(GL_TEXTURE_2D, gpu.atlas);
+	unsigned char zero = 0;
+	/* Clearing the whole atlas is cheap and avoids stale alpha on reused slots. */
+	unsigned char *empty = xmalloc(gpu.atlasw * gpu.atlash);
+	memset(empty, zero, gpu.atlasw * gpu.atlash);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_ALPHA, gpu.atlasw, gpu.atlash, 0,
+	             GL_ALPHA, GL_UNSIGNED_BYTE, empty);
+	free(empty);
+	if (gpu.face[FRC_NORMAL]) {
+		gpu.ascent = gpu.face[FRC_NORMAL]->size->metrics.ascender >> 6;
+		gpu.descent = -(gpu.face[FRC_NORMAL]->size->metrics.descender >> 6);
+	}
+	for (i = 0; i < gpu.fallbacklen; i++)
+		if (gpu.fallbacks[i].face)
+			FT_Set_Pixel_Sizes(gpu.fallbacks[i].face, 0, MAX(1, (int)round(gpu.fontpx)));
+}
+
+static void
+gpuresize(void)
+{
+	double px;
+
+	if (!gpu.active)
+		return;
+	px = MAX(1.0, usedfontsize * gpuyscale());
+	if (fabs(px - gpu.fontpx) > 0.10) {
+		gpu.fontpx = px;
+		gpuatlasreset();
+	}
+	glXMakeCurrent(xw.dpy, xw.win, gpu.ctx);
+	glViewport(0, 0, win.w, win.h);
+	glMatrixMode(GL_PROJECTION);
+	glLoadIdentity();
+	glOrtho(0, win.w, win.h, 0, -1, 1);
+	glMatrixMode(GL_MODELVIEW);
+	glLoadIdentity();
+}
+
+static void
+gpudisablesync(void)
+{
+	typedef void (*SwapIntervalEXT)(Display *, GLXDrawable, int);
+	typedef int (*SwapIntervalMESA)(unsigned int);
+	typedef int (*SwapIntervalSGI)(int);
+	SwapIntervalEXT ext;
+	SwapIntervalMESA mesa;
+	SwapIntervalSGI sgi;
+
+	/* Terminal throughput should not be capped by compositor/Xephyr vsync. */
+	ext = (SwapIntervalEXT)glXGetProcAddressARB((const GLubyte *)"glXSwapIntervalEXT");
+	if (ext) {
+		ext(xw.dpy, xw.win, 0);
+		return;
+	}
+	mesa = (SwapIntervalMESA)glXGetProcAddressARB((const GLubyte *)"glXSwapIntervalMESA");
+	if (mesa && mesa(0) == 0)
+		return;
+	sgi = (SwapIntervalSGI)glXGetProcAddressARB((const GLubyte *)"glXSwapIntervalSGI");
+	if (sgi)
+		sgi(0);
+}
+
+static int
+gpucoloreq(const float a[3], const float b[3])
+{
+	return a[0] == b[0] && a[1] == b[1] && a[2] == b[2];
+}
+
+static void
+gpuinit(void)
+{
+	XVisualInfo templ, *vi;
+	int nvi = 0;
+	long vid;
+	int usegl = 0;
+
+	if (!gpudraw)
+		return;
+	vid = XVisualIDFromVisual(xw.vis);
+	templ.visualid = vid;
+	vi = XGetVisualInfo(xw.dpy, VisualIDMask, &templ, &nvi);
+	if (!vi)
+		return;
+	if (glXGetConfig(xw.dpy, vi, GLX_USE_GL, &usegl) || !usegl) {
+		XFree(vi);
+		return;
+	}
+	glXGetConfig(xw.dpy, vi, GLX_DOUBLEBUFFER, &gpu.doublebuf);
+	gpu.ctx = glXCreateContext(xw.dpy, vi, NULL, True);
+	XFree(vi);
+	if (!gpu.ctx)
+		return;
+	/* GLX swaps can clobber the X event mask on some servers/Xephyr; restore
+	 * the st mask after creating the context so keyboard/mouse input stays live. */
+	XChangeWindowAttributes(xw.dpy, xw.win, CWEventMask, &xw.attrs);
+	if (!glXMakeCurrent(xw.dpy, xw.win, gpu.ctx)) {
+		glXDestroyContext(xw.dpy, gpu.ctx);
+		memset(&gpu, 0, sizeof gpu);
+		return;
+	}
+	if (FT_Init_FreeType(&gpu.ft)) {
+		glXDestroyContext(xw.dpy, gpu.ctx);
+		memset(&gpu, 0, sizeof gpu);
+		return;
+	}
+	gpu.face[FRC_NORMAL] = gpuloadface(&dc.font);
+	gpu.face[FRC_BOLD] = gpuloadface(&dc.bfont);
+	gpu.face[FRC_ITALIC] = gpuloadface(&dc.ifont);
+	gpu.face[FRC_ITALICBOLD] = gpuloadface(&dc.ibfont);
+	if (!gpu.face[FRC_NORMAL]) {
+		gpudestroy();
+		return;
+	}
+	gpu.active = 1;
+	gpu.fontpx = usedfontsize;
+	gpu.atlasw = 2048;
+	gpu.atlash = 2048;
+	glGenTextures(1, &gpu.atlas);
+	glBindTexture(GL_TEXTURE_2D, gpu.atlas);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	gpudisablesync();
+	gpu.BindBuffer = (GpuBindBuffer)glXGetProcAddressARB((const GLubyte *)"glBindBuffer");
+	gpu.BufferData = (GpuBufferData)glXGetProcAddressARB((const GLubyte *)"glBufferData");
+	gpu.BufferSubData = (GpuBufferSubData)glXGetProcAddressARB((const GLubyte *)"glBufferSubData");
+	gpu.DeleteBuffers = (GpuDeleteBuffers)glXGetProcAddressARB((const GLubyte *)"glDeleteBuffers");
+	gpu.GenBuffers = (GpuGenBuffers)glXGetProcAddressARB((const GLubyte *)"glGenBuffers");
+	if (gpu.BindBuffer && gpu.BufferData && gpu.BufferSubData && gpu.DeleteBuffers && gpu.GenBuffers) {
+		gpu.GenBuffers(1, &gpu.vbo);
+		gpu.vbo_ok = gpu.vbo != 0;
+	}
+	gpuatlasreset();
+	gpuresize();
+}
+
+static void
+gpudestroy(void)
+{
+	int i;
+
+	if (gpu.vbo_ok && gpu.vbo)
+		gpu.DeleteBuffers(1, &gpu.vbo);
+	if (gpu.atlas)
+		glDeleteTextures(1, &gpu.atlas);
+	for (i = 0; i < 4; i++)
+		if (gpu.face[i])
+			FT_Done_Face(gpu.face[i]);
+	for (i = 0; i < gpu.fallbacklen; i++) {
+		if (gpu.fallbacks[i].face)
+			FT_Done_Face(gpu.fallbacks[i].face);
+		free(gpu.fallbacks[i].file);
+	}
+	if (gpu.ft)
+		FT_Done_FreeType(gpu.ft);
+	if (gpu.ctx) {
+		glXMakeCurrent(xw.dpy, None, NULL);
+		glXDestroyContext(xw.dpy, gpu.ctx);
+	}
+	free(gpu.glyphs);
+	free(gpu.fallbacks);
+	free(gpu.bg.v);
+	free(gpu.text.v);
+	free(gpu.deco.v);
+	free(gpu.obg.v);
+	free(gpu.otext.v);
+	free(gpu.odeco.v);
+	memset(&gpu, 0, sizeof gpu);
+}
+
+static FT_Face
+gpufallbackface(Rune rune, int flags)
+{
+	FcPattern *pat, *match;
+	FcCharSet *charset;
+	FcResult result;
+	FcChar8 *file = NULL;
+	char *filedup;
+	int index = 0, i;
+	FT_Face face = NULL;
+
+	for (i = 0; i < gpu.fallbacklen; i++)
+		if (gpu.fallbacks[i].flags == flags &&
+		    FT_Get_Char_Index(gpu.fallbacks[i].face, rune))
+			return gpu.fallbacks[i].face;
+
+	pat = FcPatternCreate();
+	charset = FcCharSetCreate();
+	if (!pat || !charset)
+		goto cleanup;
+	FcCharSetAddChar(charset, rune);
+	FcPatternAddCharSet(pat, FC_CHARSET, charset);
+	FcPatternAddBool(pat, FC_SCALABLE, 1);
+	FcPatternAddBool(pat, FC_COLOR, 0);
+	if (flags == FRC_BOLD || flags == FRC_ITALICBOLD)
+		FcPatternAddInteger(pat, FC_WEIGHT, FC_WEIGHT_BOLD);
+	if (flags == FRC_ITALIC || flags == FRC_ITALICBOLD)
+		FcPatternAddInteger(pat, FC_SLANT, FC_SLANT_ITALIC);
+	FcConfigSubstitute(NULL, pat, FcMatchPattern);
+	FcDefaultSubstitute(pat);
+	match = FcFontMatch(NULL, pat, &result);
+	if (!match)
+		goto cleanup;
+	if (FcPatternGetString(match, FC_FILE, 0, &file) != FcResultMatch) {
+		FcPatternDestroy(match);
+		goto cleanup;
+	}
+	FcPatternGetInteger(match, FC_INDEX, 0, &index);
+	filedup = xstrdup((const char *)file);
+	for (i = 0; i < gpu.fallbacklen; i++)
+		if (gpu.fallbacks[i].flags == flags &&
+		    gpu.fallbacks[i].index == index &&
+		    !strcmp(gpu.fallbacks[i].file, filedup)) {
+			free(filedup);
+			face = gpu.fallbacks[i].face;
+			FcPatternDestroy(match);
+			goto cleanup;
+		}
+	if (FT_New_Face(gpu.ft, filedup, index, &face)) {
+		free(filedup);
+		FcPatternDestroy(match);
+		goto cleanup;
+	}
+	FT_Set_Pixel_Sizes(face, 0, MAX(1, (int)round(gpu.fontpx)));
+	if (gpu.fallbacklen >= gpu.fallbackcap) {
+		gpu.fallbackcap += 16;
+		gpu.fallbacks = xrealloc(gpu.fallbacks,
+		                         gpu.fallbackcap * sizeof *gpu.fallbacks);
+	}
+	gpu.fallbacks[gpu.fallbacklen++] = (GpuFallbackFace){
+		.face = face, .flags = flags, .file = filedup, .index = index
+	};
+	FcPatternDestroy(match);
+
+cleanup:
+	if (charset)
+		FcCharSetDestroy(charset);
+	if (pat)
+		FcPatternDestroy(pat);
+	return face;
+}
+
+static GpuGlyph *
+gpuglyph(Rune rune, int mode)
+{
+	GpuGlyph *g;
+	FT_Face face;
+	FT_Bitmap *bm;
+	int i, flags = gpufaceidx(mode);
+
+	if (rune < 128 && gpu.ascii[flags][rune] >= 0)
+		return &gpu.glyphs[gpu.ascii[flags][rune]];
+	for (i = 0; i < gpu.glyphlen; i++)
+		if (gpu.glyphs[i].rune == rune && gpu.glyphs[i].flags == flags) {
+			if (rune < 128)
+				gpu.ascii[flags][rune] = i;
+			return &gpu.glyphs[i];
+		}
+	if (gpu.glyphlen >= gpu.glyphcap) {
+		gpu.glyphcap += 256;
+		gpu.glyphs = xrealloc(gpu.glyphs, gpu.glyphcap * sizeof *gpu.glyphs);
+	}
+	g = &gpu.glyphs[gpu.glyphlen++];
+	if (rune < 128)
+		gpu.ascii[flags][rune] = gpu.glyphlen - 1;
+	memset(g, 0, sizeof *g);
+	g->rune = rune;
+	g->flags = flags;
+	face = gpu.face[flags] ? gpu.face[flags] : gpu.face[FRC_NORMAL];
+	if (!FT_Get_Char_Index(face, rune)) {
+		FT_Face fallback = gpufallbackface(rune, flags);
+		if (fallback)
+			face = fallback;
+	}
+	if (FT_Load_Char(face, rune, FT_LOAD_RENDER | FT_LOAD_TARGET_NORMAL)) {
+		face = gpu.face[FRC_NORMAL];
+		FT_Load_Char(face, 0xfffd, FT_LOAD_RENDER | FT_LOAD_TARGET_NORMAL);
+	}
+	bm = &face->glyph->bitmap;
+	g->w = bm->width;
+	g->h = bm->rows;
+	g->left = face->glyph->bitmap_left;
+	g->top = face->glyph->bitmap_top;
+	g->advance = face->glyph->advance.x >> 6;
+	g->valid = 1;
+	if (g->w <= 0 || g->h <= 0)
+		return g;
+	if (gpu.penx + g->w + 1 >= gpu.atlasw) {
+		gpu.penx = 1;
+		gpu.peny += gpu.rowh + 1;
+		gpu.rowh = 0;
+	}
+	if (gpu.peny + g->h + 1 >= gpu.atlash) {
+		gpuatlasreset();
+		return gpuglyph(rune, mode);
+	}
+	g->x = gpu.penx;
+	g->y = gpu.peny;
+	glBindTexture(GL_TEXTURE_2D, gpu.atlas);
+	if (bm->pixel_mode == FT_PIXEL_MODE_GRAY && bm->pitch == g->w) {
+		glTexSubImage2D(GL_TEXTURE_2D, 0, g->x, g->y, g->w, g->h,
+		                GL_ALPHA, GL_UNSIGNED_BYTE, bm->buffer);
+	} else {
+		unsigned char *tight = xmalloc(g->w * g->h), *dst = tight;
+		int row, col;
+		for (row = 0; row < g->h; row++) {
+			const unsigned char *src = bm->buffer + row * bm->pitch;
+			if (bm->pitch < 0)
+				src = bm->buffer + (g->h - 1 - row) * -bm->pitch;
+			if (bm->pixel_mode == FT_PIXEL_MODE_MONO) {
+				for (col = 0; col < g->w; col++)
+					dst[col] = (src[col >> 3] & (0x80 >> (col & 7))) ? 255 : 0;
+			} else if (bm->pixel_mode == FT_PIXEL_MODE_GRAY) {
+				memcpy(dst, src, g->w);
+			} else {
+				memset(dst, 0, g->w);
+			}
+			dst += g->w;
+		}
+		glTexSubImage2D(GL_TEXTURE_2D, 0, g->x, g->y, g->w, g->h,
+		                GL_ALPHA, GL_UNSIGNED_BYTE, tight);
+		free(tight);
+	}
+	gpu.penx += g->w + 1;
+	gpu.rowh = MAX(gpu.rowh, g->h);
+	return g;
+}
+
+static void
+gpubatchclear(GpuBatch *b)
+{
+	b->len = 0;
+}
+
+static void
+gpubatchreset(void)
+{
+	gpubatchclear(&gpu.bg);
+	gpubatchclear(&gpu.text);
+	gpubatchclear(&gpu.deco);
+	gpubatchclear(&gpu.obg);
+	gpubatchclear(&gpu.otext);
+	gpubatchclear(&gpu.odeco);
+}
+
+static GpuVertex *
+gpubatchalloc(GpuBatch *b, int n)
+{
+	if (b->len + n > b->cap) {
+		b->cap = MAX(b->cap * 2, b->len + n + 4096);
+		b->v = xrealloc(b->v, b->cap * sizeof *b->v);
+	}
+	GpuVertex *v = &b->v[b->len];
+	b->len += n;
+	return v;
+}
+
+static void
+gpubatchquad(GpuBatch *b, double x, double y, double w, double h,
+             double u1, double v1, double u2, double v2, float c[3])
+{
+	GpuVertex *v = gpubatchalloc(b, 4);
+	v[0] = (GpuVertex){ x,     y,     u1, v1, c[0], c[1], c[2], 1.0f };
+	v[1] = (GpuVertex){ x + w, y,     u2, v1, c[0], c[1], c[2], 1.0f };
+	v[2] = (GpuVertex){ x + w, y + h, u2, v2, c[0], c[1], c[2], 1.0f };
+	v[3] = (GpuVertex){ x,     y + h, u1, v2, c[0], c[1], c[2], 1.0f };
+}
+
+static void
+gpubatchrect(GpuBatch *b, double x, double y, double w, double h, float c[3])
+{
+	gpubatchquad(b, x, y, w, h, 0, 0, 0, 0, c);
+}
+
+static void
+gpubatchglyph(GpuBatch *b, double x, double y, GpuGlyph *g, float c[3])
+{
+	double tx1 = (double)g->x / gpu.atlasw, ty1 = (double)g->y / gpu.atlash;
+	double tx2 = (double)(g->x + g->w) / gpu.atlasw;
+	double ty2 = (double)(g->y + g->h) / gpu.atlash;
+	gpubatchquad(b, x, y, g->w, g->h, tx1, ty1, tx2, ty2, c);
+}
+
+static void
+gpudrawbatch(GpuBatch *b, int textured)
+{
+	const void *voff, *toff, *coff;
+
+	if (!b->len)
+		return;
+	voff = &b->v[0].x;
+	toff = &b->v[0].u;
+	coff = &b->v[0].r;
+	glPushClientAttrib(GL_CLIENT_VERTEX_ARRAY_BIT);
+	if (gpu.vbo_ok) {
+		int bytes = b->len * (int)sizeof *b->v;
+		gpu.BindBuffer(GL_ARRAY_BUFFER, gpu.vbo);
+		if (bytes > gpu.vbosz) {
+			gpu.vbosz = bytes * 2;
+			gpu.BufferData(GL_ARRAY_BUFFER, gpu.vbosz, NULL, GL_DYNAMIC_DRAW);
+		}
+		gpu.BufferSubData(GL_ARRAY_BUFFER, 0, bytes, b->v);
+		voff = (const void *)offsetof(GpuVertex, x);
+		toff = (const void *)offsetof(GpuVertex, u);
+		coff = (const void *)offsetof(GpuVertex, r);
+	}
+	if (textured) {
+		glEnable(GL_TEXTURE_2D);
+		glBindTexture(GL_TEXTURE_2D, gpu.atlas);
+		glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+		glTexCoordPointer(2, GL_FLOAT, sizeof(GpuVertex), toff);
+	} else {
+		glDisable(GL_TEXTURE_2D);
+		glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+	}
+	glEnableClientState(GL_VERTEX_ARRAY);
+	glEnableClientState(GL_COLOR_ARRAY);
+	glVertexPointer(2, GL_FLOAT, sizeof(GpuVertex), voff);
+	glColorPointer(4, GL_FLOAT, sizeof(GpuVertex), coff);
+	glDrawArrays(GL_QUADS, 0, b->len);
+	if (gpu.vbo_ok)
+		gpu.BindBuffer(GL_ARRAY_BUFFER, 0);
+	glPopClientAttrib();
+}
+
+static void
+gpudrawline(Line line, int x1, int y, int x2)
+{
+	int x, haverun = 0;
+	double cw = gpucellw(), ch = gpucellh();
+	double basey = borderpx + y * ch, runx = 0, runw = 0;
+	Glyph g;
+	float fg[3], bg[3], runbg[3];
+	GpuGlyph *gg;
+
+	for (x = x1; x < x2; x++)
+		if (line[x].mode != ATTR_WDUMMY && line[x].u != ' ') {
+			g = line[x];
+			if (selected(x, y))
+				g.mode |= ATTR_SELECTED;
+			if (search_matched(x, y))
+				g.mode |= ATTR_MATCH;
+			gpuglyph(g.u, g.mode);
+		}
+
+	for (x = x1; x < x2; x++) {
+		g = line[x];
+		if (g.mode == ATTR_WDUMMY)
+			continue;
+		if (selected(x, y))
+			g.mode |= ATTR_SELECTED;
+		if (search_matched(x, y))
+			g.mode |= ATTR_MATCH;
+		gpuresolve(g, x, y, fg, bg);
+		double cellw = cw * ((g.mode & ATTR_WIDE) ? 2 : 1);
+		if (!haverun) {
+			haverun = 1;
+			runx = borderpx + x * cw;
+			runw = cellw;
+			memcpy(runbg, bg, sizeof runbg);
+		} else if (gpucoloreq(runbg, bg)) {
+			runw += cellw;
+		} else {
+			gpubatchrect(&gpu.bg, runx, basey, runw, ch, runbg);
+			runx = borderpx + x * cw;
+			runw = cellw;
+			memcpy(runbg, bg, sizeof runbg);
+		}
+	}
+	if (haverun)
+		gpubatchrect(&gpu.bg, runx, basey, runw, ch, runbg);
+
+	for (x = x1; x < x2; x++) {
+		g = line[x];
+		if (g.mode == ATTR_WDUMMY || g.u == ' ')
+			continue;
+		if (selected(x, y))
+			g.mode |= ATTR_SELECTED;
+		if (search_matched(x, y))
+			g.mode |= ATTR_MATCH;
+		gpuresolve(g, x, y, fg, bg);
+		gg = gpuglyph(g.u, g.mode);
+		if (!gg || !gg->valid || gg->w <= 0 || gg->h <= 0)
+			continue;
+		double dx = borderpx + x * cw + gg->left;
+		double dy = basey + gpu.ascent - gg->top;
+		gpubatchglyph(&gpu.text, dx, dy, gg, fg);
+	}
+
+	for (x = x1; x < x2; x++) {
+		g = line[x];
+		if (g.mode == ATTR_WDUMMY)
+			continue;
+		if (selected(x, y))
+			g.mode |= ATTR_SELECTED;
+		if (search_matched(x, y))
+			g.mode |= ATTR_MATCH;
+		gpuresolve(g, x, y, fg, bg);
+		if (g.mode & ATTR_UNDERLINE)
+			gpubatchrect(&gpu.deco, borderpx + x * cw,
+			             basey + gpu.ascent + 1, cw, 1, fg);
+		if (g.mode & ATTR_STRUCK)
+			gpubatchrect(&gpu.deco, borderpx + x * cw,
+			             basey + gpu.ascent * 2.0 / 3.0, cw, 1, fg);
+	}
+}
+
+static void
+gpudrawcell(Glyph g, int x, int y, int overlay)
+{
+	double cw = gpucellw(), ch = gpucellh();
+	double basey = borderpx + y * ch;
+	float fg[3], bg[3];
+	GpuGlyph *gg;
+	GpuBatch *bb = overlay ? &gpu.obg : &gpu.bg;
+	GpuBatch *tb = overlay ? &gpu.otext : &gpu.text;
+	GpuBatch *db = overlay ? &gpu.odeco : &gpu.deco;
+
+	if (g.mode == ATTR_WDUMMY)
+		return;
+	if (selected(x, y))
+		g.mode |= ATTR_SELECTED;
+	if (search_matched(x, y))
+		g.mode |= ATTR_MATCH;
+	gpuresolve(g, x, y, fg, bg);
+	gpubatchrect(bb, borderpx + x * cw, basey,
+	             cw * ((g.mode & ATTR_WIDE) ? 2 : 1), ch, bg);
+	if (g.u != ' ') {
+		gg = gpuglyph(g.u, g.mode);
+		if (gg && gg->valid && gg->w > 0 && gg->h > 0) {
+			double dx = borderpx + x * cw + gg->left;
+			double dy = basey + gpu.ascent - gg->top;
+			gpubatchglyph(tb, dx, dy, gg, fg);
+		}
+	}
+	if (g.mode & ATTR_UNDERLINE)
+		gpubatchrect(db, borderpx + x * cw, basey + gpu.ascent + 1, cw, 1, fg);
+	if (g.mode & ATTR_STRUCK)
+		gpubatchrect(db, borderpx + x * cw, basey + gpu.ascent * 2.0 / 3.0, cw, 1, fg);
+}
+
+static void
+gpudrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
+{
+	double cw = gpucellw(), ch = gpucellh();
+	float col[3];
+	Glyph cg = g;
+
+	if (selected(ox, oy))
+		og.mode |= ATTR_SELECTED;
+	if (search_matched(ox, oy))
+		og.mode |= ATTR_MATCH;
+	gpudrawcell(og, ox, oy, 1);
+	if ((IS_SET(MODE_HIDE) && !vimnav.forced) || cmdline_active())
+		return;
+	cg.mode &= ATTR_BOLD|ATTR_ITALIC|ATTR_UNDERLINE|ATTR_STRUCK|ATTR_WIDE;
+	if (vimnav.forced) {
+		cg.fg = defaultbg;
+		cg.bg = TRUECOLOR(0xff, 0x6b, 0x6b);
+		gpucolor(cg.bg, col);
+	} else if (IS_SET(MODE_REVERSE)) {
+		cg.mode |= ATTR_REVERSE;
+		cg.bg = defaultfg;
+		cg.fg = selected(cx, cy) ? defaultrcs : defaultcs;
+		gpucolor(selected(cx, cy) ? defaultcs : defaultrcs, col);
+	} else {
+		cg.fg = defaultbg;
+		cg.bg = defaultcs;
+		gpucolor(cg.bg, col);
+	}
+	if (IS_SET(MODE_FOCUSED)) {
+		switch (win.cursor) {
+		case 7:
+			cg.u = 0x2603;
+			/* FALLTHROUGH */
+		case 0: case 1: case 2:
+			gpudrawcell(cg, cx, cy, 1);
+			break;
+		case 3: case 4:
+			gpubatchrect(&gpu.odeco, borderpx + cx * cw,
+			             borderpx + (cy + 1) * ch - cursorthickness,
+			             cw, cursorthickness, col);
+			break;
+		case 5: case 6:
+			gpubatchrect(&gpu.odeco, borderpx + cx * cw, borderpx + cy * ch,
+			             cursorthickness, ch, col);
+			break;
+		}
+	} else {
+		gpubatchrect(&gpu.odeco, borderpx + cx * cw, borderpx + cy * ch, cw, 1, col);
+		gpubatchrect(&gpu.odeco, borderpx + cx * cw, borderpx + cy * ch, 1, ch, col);
+		gpubatchrect(&gpu.odeco, borderpx + (cx + 1) * cw - 1,
+		             borderpx + cy * ch, 1, ch, col);
+		gpubatchrect(&gpu.odeco, borderpx + cx * cw,
+		             borderpx + (cy + 1) * ch - 1, cw, 1, col);
+	}
 }
 
 int
@@ -1239,6 +2063,7 @@ xinit(int cols, int rows)
 
 	/* Xft rendering context */
 	xw.draw = XftDrawCreate(xw.dpy, xw.buf, xw.vis, xw.cmap);
+	gpuinit();
 
 	/* input methods */
 	if (!ximopen(xw.dpy)) {
@@ -1585,6 +2410,11 @@ xdrawglyph(Glyph g, int x, int y)
 	int numspecs;
 	XftGlyphFontSpec spec;
 
+	if (gpu.active) {
+		gpudrawcell(g, x, y, 1);
+		return;
+	}
+
 	numspecs = xmakeglyphfontspecs(&spec, &g, 1, x, y);
 	xdrawglyphfontspecs(&spec, g, numspecs, x, y, DRAW_BG | DRAW_FG);
 }
@@ -1593,6 +2423,11 @@ void
 xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 {
 	Color drawcol;
+
+	if (gpu.active) {
+		gpudrawcursor(cx, cy, g, ox, oy, og);
+		return;
+	}
 
 	/* remove the old cursor */
 	if (selected(ox, oy))
@@ -1751,6 +2586,26 @@ xsetdwmsaveargv(const char *argv)
 int
 xstartdraw(void)
 {
+	float bg[3];
+
+	if (gpu.active) {
+		/*
+		 * The GPU backend always redraws the whole terminal into a handful of
+		 * large client-side batches.  The batches are then submitted with six GL
+		 * draw calls below, which is much faster than the first bring-up path that
+		 * used glBegin/glEnd for every line/cursor fragment.
+		 */
+		if (!IS_SET(MODE_VISIBLE))
+			return 0;
+		glXMakeCurrent(xw.dpy, xw.win, gpu.ctx);
+		gpuresize();
+		gpubatchreset();
+		gpucolor(IS_SET(MODE_REVERSE) ? defaultfg : defaultbg, bg);
+		glClearColor(bg[0], bg[1], bg[2], 1.0f);
+		glClear(GL_COLOR_BUFFER_BIT);
+		tfulldirt();
+		return 1;
+	}
 	return IS_SET(MODE_VISIBLE);
 }
 
@@ -1760,6 +2615,11 @@ xdrawline(Line line, int x1, int y1, int x2)
 	int i, x, ox, numspecs, numspecs_cached;
 	Glyph base, new;
 	XftGlyphFontSpec *specs;
+
+	if (gpu.active) {
+		gpudrawline(line, x1, y1, x2);
+		return;
+	}
 
 	numspecs_cached = xmakeglyphfontspecs(xw.specbuf, &line[x1], x2 - x1, x1, y1);
 
@@ -1820,6 +2680,23 @@ xdrawline(Line line, int x1, int y1, int x2)
 void
 xfinishdraw(void)
 {
+	if (gpu.active) {
+		gpudrawbatch(&gpu.bg, 0);
+		gpudrawbatch(&gpu.text, 1);
+		gpudrawbatch(&gpu.deco, 0);
+		gpudrawbatch(&gpu.obg, 0);
+		gpudrawbatch(&gpu.otext, 1);
+		gpudrawbatch(&gpu.odeco, 0);
+		glDisableClientState(GL_VERTEX_ARRAY);
+		glDisableClientState(GL_COLOR_ARRAY);
+		glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+		glDisable(GL_TEXTURE_2D);
+		if (gpu.doublebuf)
+			glXSwapBuffers(xw.dpy, xw.win);
+		else
+			glFlush();
+		return;
+	}
 	XCopyArea(xw.dpy, xw.buf, xw.win, dc.gc, 0, 0, win.w,
 			win.h, 0, 0);
 	XSetForeground(xw.dpy, dc.gc,
@@ -1835,6 +2712,10 @@ xximspot(int x, int y)
 
 	xw.ime.spot.x = borderpx + x * win.cw;
 	xw.ime.spot.y = borderpx + (y + 1) * win.ch;
+	if (gpu.active) {
+		xw.ime.spot.x = borderpx + x * gpucellw();
+		xw.ime.spot.y = borderpx + (y + 1) * gpucellh();
+	}
 
 	XSetICValues(xw.ime.xic, XNPreeditAttributes, xw.ime.spotlist, NULL);
 }
@@ -2299,6 +3180,7 @@ cmessage(XEvent *e)
 			win.mode &= ~MODE_FOCUSED;
 		}
 	} else if (e->xclient.data.l[0] == xw.wmdeletewin) {
+		gpudestroy();
 		ttyhangup();
 		persist_save();
 		persist_cleanup();
