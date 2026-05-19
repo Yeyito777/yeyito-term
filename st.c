@@ -2776,6 +2776,11 @@ tfastcsi(const char *s, int n, int *used)
 	}
 	if (i >= n)
 		return 0;
+	if (s[i] == 'H' && !any) {
+		tmoveato(0, 0);
+		*used = i + 1;
+		return 1;
+	}
 	if (s[i] == 'm') {
 		if (!any || a == 0) {
 			term.c.attr.mode &= ~(ATTR_BOLD | ATTR_FAINT | ATTR_ITALIC |
