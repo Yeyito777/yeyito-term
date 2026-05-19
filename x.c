@@ -1254,15 +1254,14 @@ gpuatlasreset(void)
 		if (gpu.face[i])
 			gpusetfontsize(gpu.face[i], 0);
 	glBindTexture(GL_TEXTURE_2D, gpu.atlas);
-	/* Clearing the whole atlas is cheap and avoids stale alpha on reused slots. */
-	unsigned char *empty = xmalloc(gpu.atlasw * gpu.atlash * 4);
-	memset(empty, 0, gpu.atlasw * gpu.atlash * 4);
+	/* Allocate atlas storage only.  Cleared contents are unnecessary because
+	 * batches only sample freshly assigned glyph rectangles.  Avoiding a full
+	 * 16 MiB memset/upload makes first GPU draw and zoom much cheaper. */
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_ALPHA, gpu.atlasw, gpu.atlash, 0,
-	             GL_ALPHA, GL_UNSIGNED_BYTE, empty);
+	             GL_ALPHA, GL_UNSIGNED_BYTE, NULL);
 	glBindTexture(GL_TEXTURE_2D, gpu.catlas);
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, gpu.atlasw, gpu.atlash, 0,
-	             GL_BGRA, GL_UNSIGNED_BYTE, empty);
-	free(empty);
+	             GL_BGRA, GL_UNSIGNED_BYTE, NULL);
 	if (gpu.face[FRC_NORMAL]) {
 		gpu.ascent = gpu.face[FRC_NORMAL]->size->metrics.ascender >> 6;
 		gpu.descent = -(gpu.face[FRC_NORMAL]->size->metrics.descender >> 6);
