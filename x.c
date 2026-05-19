@@ -175,10 +175,12 @@ static int ximopen(Display *);
 static void ximinstantiate(Display *, XPointer, XPointer);
 static void ximdestroy(XIM, XPointer, XPointer);
 static int xicdestroy(XIC, XPointer, XPointer);
+static void xinitinputcursor(void);
 static void xinit(int, int);
 static void cresize(int, int);
 static void xresize(int, int);
 static void xhints(void);
+static void xensurexftbuf(int);
 static void gpuinit(void);
 static void gpuresize(void);
 static void gpudestroy(void);
@@ -261,6 +263,7 @@ TermWindow win;      /* non-static for sshind.c access */
 static Cursor xcursortext;
 static Cursor xcursorpointer;
 static Cursor xcursorhand;
+static int xcursorsready;
 
 /* Font Ring Cache */
 enum {
@@ -903,15 +906,65 @@ xresize(int col, int row)
 	win.tw = col * win.cw;
 	win.th = row * win.ch;
 
-	XFreePixmap(xw.dpy, xw.buf);
-	xw.buf = XCreatePixmap(xw.dpy, xw.win, win.w, win.h,
-			DefaultDepth(xw.dpy, xw.scr));
-	XftDrawChange(xw.draw, xw.buf);
-	xclear(0, 0, win.w, win.h);
+	if (xw.buf) {
+		XFreePixmap(xw.dpy, xw.buf);
+		xw.buf = XCreatePixmap(xw.dpy, xw.win, win.w, win.h,
+				DefaultDepth(xw.dpy, xw.scr));
+		if (xw.draw)
+			XftDrawChange(xw.draw, xw.buf);
+		xclear(0, 0, win.w, win.h);
+	}
 	gpuresize();
 
 	/* resize to new width */
-	xw.specbuf = xrealloc(xw.specbuf, col * sizeof(GlyphFontSpec));
+	if (xw.specbuf)
+		xw.specbuf = xrealloc(xw.specbuf, col * sizeof(GlyphFontSpec));
+}
+
+static void
+xensurexftbuf(int col)
+{
+	if (!xw.buf) {
+		xw.buf = XCreatePixmap(xw.dpy, xw.win, win.w, win.h,
+				DefaultDepth(xw.dpy, xw.scr));
+		XSetForeground(xw.dpy, dc.gc, dc.col[defaultbg].pixel);
+		XFillRectangle(xw.dpy, xw.buf, dc.gc, 0, 0, win.w, win.h);
+	}
+	if (!xw.draw)
+		xw.draw = XftDrawCreate(xw.dpy, xw.buf, xw.vis, xw.cmap);
+	if (!xw.specbuf)
+		xw.specbuf = xmalloc(col * sizeof(GlyphFontSpec));
+}
+
+static void
+xinitinputcursor(void)
+{
+	XColor xmousefg, xmousebg;
+
+	if (xcursorsready)
+		return;
+
+	/* white cursor, black outline */
+	xcursortext = XCreateFontCursor(xw.dpy, mouseshape);
+	xcursorpointer = XCreateFontCursor(xw.dpy, mousecursorshape);
+	xcursorhand = XCreateFontCursor(xw.dpy, mousehandshape);
+
+	if (XParseColor(xw.dpy, xw.cmap, colorname[mousefg], &xmousefg) == 0) {
+		xmousefg.red   = 0xffff;
+		xmousefg.green = 0xffff;
+		xmousefg.blue  = 0xffff;
+	}
+
+	if (XParseColor(xw.dpy, xw.cmap, colorname[mousebg], &xmousebg) == 0) {
+		xmousebg.red   = 0x0000;
+		xmousebg.green = 0x0000;
+		xmousebg.blue  = 0x0000;
+	}
+
+	XRecolorCursor(xw.dpy, xcursortext, &xmousefg, &xmousebg);
+	XRecolorCursor(xw.dpy, xcursorpointer, &xmousefg, &xmousebg);
+	XRecolorCursor(xw.dpy, xcursorhand, &xmousefg, &xmousebg);
+	xcursorsready = 1;
 }
 
 ushort
@@ -1394,12 +1447,14 @@ gpuinit(void)
 	glEnable(GL_BLEND);
 	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 	gpudisablesync();
-	gpu.BindBuffer = (GpuBindBuffer)glXGetProcAddressARB((const GLubyte *)"glBindBuffer");
-	gpu.BufferData = (GpuBufferData)glXGetProcAddressARB((const GLubyte *)"glBufferData");
-	gpu.BufferSubData = (GpuBufferSubData)glXGetProcAddressARB((const GLubyte *)"glBufferSubData");
-	gpu.DeleteBuffers = (GpuDeleteBuffers)glXGetProcAddressARB((const GLubyte *)"glDeleteBuffers");
-	gpu.GenBuffers = (GpuGenBuffers)glXGetProcAddressARB((const GLubyte *)"glGenBuffers");
-	if (gpu.BindBuffer && gpu.BufferData && gpu.BufferSubData && gpu.DeleteBuffers && gpu.GenBuffers) {
+	/* Xephyr/Mesa and small terminal damage regions benchmark faster with
+	 * client arrays than with BufferSubData uploads into a streaming VBO. */
+	if (0) {
+		gpu.BindBuffer = (GpuBindBuffer)glXGetProcAddressARB((const GLubyte *)"glBindBuffer");
+		gpu.BufferData = (GpuBufferData)glXGetProcAddressARB((const GLubyte *)"glBufferData");
+		gpu.BufferSubData = (GpuBufferSubData)glXGetProcAddressARB((const GLubyte *)"glBufferSubData");
+		gpu.DeleteBuffers = (GpuDeleteBuffers)glXGetProcAddressARB((const GLubyte *)"glDeleteBuffers");
+		gpu.GenBuffers = (GpuGenBuffers)glXGetProcAddressARB((const GLubyte *)"glGenBuffers");
 		gpu.GenBuffers(1, &gpu.vbo);
 		gpu.vbo_ok = gpu.vbo != 0;
 	}
@@ -1692,7 +1747,6 @@ gpudrawbatch(GpuBatch *b, int textured)
 	voff = &b->v[0].x;
 	toff = &b->v[0].u;
 	coff = &b->v[0].r;
-	glPushClientAttrib(GL_CLIENT_VERTEX_ARRAY_BIT);
 	if (gpu.vbo_ok) {
 		int bytes = b->len * (int)sizeof *b->v;
 		gpu.BindBuffer(GL_ARRAY_BUFFER, gpu.vbo);
@@ -1724,7 +1778,6 @@ gpudrawbatch(GpuBatch *b, int textured)
 		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 	if (gpu.vbo_ok)
 		gpu.BindBuffer(GL_ARRAY_BUFFER, 0);
-	glPopClientAttrib();
 }
 
 static void
@@ -2139,7 +2192,6 @@ xinit(int cols, int rows)
 	XGCValues gcvalues;
 	Window parent, root;
 	pid_t thispid = getpid();
-	XColor xmousefg, xmousebg;
 
 	if (!(xw.dpy = XOpenDisplay(NULL)))
 		die("can't open display\n");
@@ -2191,16 +2243,8 @@ xinit(int cols, int rows)
 	gcvalues.graphics_exposures = False;
 	dc.gc = XCreateGC(xw.dpy, xw.win, GCGraphicsExposures,
 			&gcvalues);
-	xw.buf = XCreatePixmap(xw.dpy, xw.win, win.w, win.h,
-			DefaultDepth(xw.dpy, xw.scr));
-	XSetForeground(xw.dpy, dc.gc, dc.col[defaultbg].pixel);
-	XFillRectangle(xw.dpy, xw.buf, dc.gc, 0, 0, win.w, win.h);
-
-	/* font spec buffer */
-	xw.specbuf = xmalloc(cols * sizeof(GlyphFontSpec));
-
-	/* Xft rendering context */
-	xw.draw = XftDrawCreate(xw.dpy, xw.buf, xw.vis, xw.cmap);
+	if (!gpudraw)
+		xensurexftbuf(cols);
 
 	/* input methods */
 	if (!ximopen(xw.dpy)) {
@@ -2208,27 +2252,10 @@ xinit(int cols, int rows)
 	                                       ximinstantiate, NULL);
 	}
 
-	/* white cursor, black outline */
-	xcursortext = XCreateFontCursor(xw.dpy, mouseshape);
-	xcursorpointer = XCreateFontCursor(xw.dpy, mousecursorshape);
-	xcursorhand = XCreateFontCursor(xw.dpy, mousehandshape);
-	XDefineCursor(xw.dpy, xw.win, xcursortext);
-
-	if (XParseColor(xw.dpy, xw.cmap, colorname[mousefg], &xmousefg) == 0) {
-		xmousefg.red   = 0xffff;
-		xmousefg.green = 0xffff;
-		xmousefg.blue  = 0xffff;
+	if (!gpudraw) {
+		xinitinputcursor();
+		XDefineCursor(xw.dpy, xw.win, xcursortext);
 	}
-
-	if (XParseColor(xw.dpy, xw.cmap, colorname[mousebg], &xmousebg) == 0) {
-		xmousebg.red   = 0x0000;
-		xmousebg.green = 0x0000;
-		xmousebg.blue  = 0x0000;
-	}
-
-	XRecolorCursor(xw.dpy, xcursortext, &xmousefg, &xmousebg);
-	XRecolorCursor(xw.dpy, xcursorpointer, &xmousefg, &xmousebg);
-	XRecolorCursor(xw.dpy, xcursorhand, &xmousefg, &xmousebg);
 
 	xw.xembed = XInternAtom(xw.dpy, "_XEMBED", False);
 	xw.wmdeletewin = XInternAtom(xw.dpy, "WM_DELETE_WINDOW", False);
@@ -2745,6 +2772,7 @@ xstartdraw(void)
 		}
 		return 1;
 	}
+	xensurexftbuf(win.cw ? MAX(1, win.tw / win.cw) : 1);
 	return IS_SET(MODE_VISIBLE);
 }
 
@@ -2898,15 +2926,18 @@ xsetmode(int set, unsigned int flags)
 	MODBIT(win.mode, set, flags);
 	if ((win.mode & MODE_REVERSE) != (mode & MODE_REVERSE))
 		redraw();
-	if ((win.mode & MODE_MOUSE) != (mode & MODE_MOUSE))
+	if ((win.mode & MODE_MOUSE) != (mode & MODE_MOUSE)) {
+		xinitinputcursor();
 		XDefineCursor(xw.dpy, xw.win, IS_SET(MODE_MOUSE)
 			? xcursorpointer : xcursortext);
+	}
 }
 
 void
 xsetmousecursor(int shape)
 {
 	Cursor c;
+	xinitinputcursor();
 	switch (shape) {
 	case 1:  c = xcursorpointer; break;
 	case 2:  c = xcursorhand;    break;
