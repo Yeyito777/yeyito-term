@@ -1078,8 +1078,16 @@ xhints(void)
 	sizeh->flags = PSize | PResizeInc | PBaseSize | PMinSize;
 	sizeh->height = win.h;
 	sizeh->width = win.w;
-	sizeh->height_inc = gpu.active ? 1 : win.ch;
-	sizeh->width_inc = gpu.active ? 1 : win.cw;
+	/*
+	 * The GPU renderer supports fractional cell scaling by keeping the terminal
+	 * grid fixed and stretching cells to the actual pixel size.  GPU startup is
+	 * lazy, so gpu.active is still false when the window is first mapped; using
+	 * the Xft cell increments here makes the WM snap the initial tiled size down
+	 * to an integer grid until the user manually resizes.  Advertise pixel resize
+	 * increments as soon as the GPU path is configured, not only after GL init.
+	 */
+	sizeh->height_inc = gpudraw ? 1 : win.ch;
+	sizeh->width_inc = gpudraw ? 1 : win.cw;
 	sizeh->base_height = 2 * borderpx;
 	sizeh->base_width = 2 * borderpx;
 	sizeh->min_height = win.ch + 2 * borderpx;
@@ -2763,13 +2771,20 @@ xstartdraw(void)
 		glXMakeCurrent(xw.dpy, xw.win, gpu.ctx);
 		gpuresize();
 		gpubatchreset();
-		if (gpu.needclear) {
-			gpucolor(IS_SET(MODE_REVERSE) ? defaultfg : defaultbg, bg);
-			glClearColor(bg[0], bg[1], bg[2], 1.0f);
-			glClear(GL_COLOR_BUFFER_BIT);
-			tfulldirt();
-			gpu.needclear = 0;
-		}
+			if (gpu.needclear || gpu.doublebuf) {
+				gpucolor(IS_SET(MODE_REVERSE) ? defaultfg : defaultbg, bg);
+				glClearColor(bg[0], bg[1], bg[2], 1.0f);
+				glClear(GL_COLOR_BUFFER_BIT);
+				/*
+				 * With double-buffered GLX drawables the back buffer's contents after
+				 * a swap are undefined (often black/stale).  The optimized GPU path
+				 * normally redraws only dirty rows, which is correct for a preserved
+				 * front buffer but leaves untouched rows black after a swap.  Rebuild a
+				 * complete frame whenever we are presenting via swaps.
+				 */
+				tfulldirt();
+				gpu.needclear = 0;
+			}
 		return 1;
 	}
 	xensurexftbuf(win.cw ? MAX(1, win.tw / win.cw) : 1);
