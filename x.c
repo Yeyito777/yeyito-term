@@ -199,6 +199,7 @@ static void gpudrawcell(Glyph, int, int, int);
 static void gpudrawcursor(int, int, Glyph, int, int, Glyph);
 static int xloadcolor(int, const char *, Color *);
 static int xloadfont(Font *, FcPattern *);
+static int xloadstylefont(int);
 static void xloadfonts(const char *, double);
 static void xunloadfont(Font *);
 static void xunloadfonts(void);
@@ -1286,18 +1287,6 @@ gpuresolve(Glyph g, int x, int y, float fg[3], float bg[3])
 	}
 }
 
-static int
-gpufaceidx(int mode)
-{
-	if ((mode & ATTR_ITALIC) && (mode & ATTR_BOLD) && gpu.face[FRC_ITALICBOLD])
-		return FRC_ITALICBOLD;
-	if ((mode & ATTR_ITALIC) && gpu.face[FRC_ITALIC])
-		return FRC_ITALIC;
-	if ((mode & ATTR_BOLD) && gpu.face[FRC_BOLD])
-		return FRC_BOLD;
-	return FRC_NORMAL;
-}
-
 static FT_Face
 gpuloadface(Font *font)
 {
@@ -1305,12 +1294,37 @@ gpuloadface(Font *font)
 	int index = 0;
 	FT_Face face = NULL;
 
+	if (!font->match)
+		return NULL;
 	if (FcPatternGetString(font->match->pattern, FC_FILE, 0, &file) != FcResultMatch)
 		return NULL;
 	FcPatternGetInteger(font->match->pattern, FC_INDEX, 0, &index);
 	if (FT_New_Face(gpu.ft, (const char *)file, index, &face))
 		return NULL;
 	return face;
+}
+
+static int
+gpufaceidx(int mode)
+{
+	int idx = FRC_NORMAL;
+
+	if ((mode & ATTR_ITALIC) && (mode & ATTR_BOLD))
+		idx = FRC_ITALICBOLD;
+	else if (mode & ATTR_ITALIC)
+		idx = FRC_ITALIC;
+	else if (mode & ATTR_BOLD)
+		idx = FRC_BOLD;
+	if (idx != FRC_NORMAL && !gpu.face[idx]) {
+		if (!xloadstylefont(idx))
+			gpu.face[idx] = gpuloadface(idx == FRC_BOLD ? &dc.bfont :
+			                           idx == FRC_ITALIC ? &dc.ifont : &dc.ibfont);
+		if (gpu.face[idx]) {
+			gpusetfontsize(gpu.face[idx], 0);
+			return idx;
+		}
+	}
+	return gpu.face[idx] ? idx : FRC_NORMAL;
 }
 
 static void
@@ -1462,9 +1476,6 @@ gpuinit(void)
 		return;
 	}
 	gpu.face[FRC_NORMAL] = gpuloadface(&dc.font);
-	gpu.face[FRC_BOLD] = gpuloadface(&dc.bfont);
-	gpu.face[FRC_ITALIC] = gpuloadface(&dc.ifont);
-	gpu.face[FRC_ITALICBOLD] = gpuloadface(&dc.ibfont);
 	if (!gpu.face[FRC_NORMAL]) {
 		gpudestroy();
 		return;
@@ -2038,6 +2049,8 @@ xloadfont(Font *f, FcPattern *pattern)
 	XGlyphInfo extents;
 	int wantattr, haveattr;
 
+	memset(f, 0, sizeof *f);
+
 	/*
 	 * Manually configure instead of calling XftMatchFont
 	 * so that we can use the configured pattern for
@@ -2102,6 +2115,53 @@ xloadfont(Font *f, FcPattern *pattern)
 	return 0;
 }
 
+static int
+xloadstylefont(int style)
+{
+	FcPattern *pattern;
+	Font *fontp;
+
+	if (!gpudraw || !usedfont)
+		return 1;
+	if (style == FRC_BOLD) {
+		fontp = &dc.bfont;
+		if (fontp->match)
+			return 0;
+	} else if (style == FRC_ITALIC) {
+		fontp = &dc.ifont;
+		if (fontp->match)
+			return 0;
+	} else if (style == FRC_ITALICBOLD) {
+		fontp = &dc.ibfont;
+		if (fontp->match)
+			return 0;
+	} else {
+		return 1;
+	}
+
+	pattern = usedfont[0] == '-' ?
+	          XftXlfdParse(usedfont, False, False) :
+	          FcNameParse((const FcChar8 *)usedfont);
+	if (!pattern)
+		return 1;
+	if (usedfontsize > 0) {
+		FcPatternDel(pattern, FC_PIXEL_SIZE);
+		FcPatternDel(pattern, FC_SIZE);
+		FcPatternAddDouble(pattern, FC_PIXEL_SIZE, usedfontsize);
+	}
+	if (style == FRC_ITALIC || style == FRC_ITALICBOLD) {
+		FcPatternDel(pattern, FC_SLANT);
+		FcPatternAddInteger(pattern, FC_SLANT, FC_SLANT_ITALIC);
+	}
+	if (style == FRC_BOLD || style == FRC_ITALICBOLD) {
+		FcPatternDel(pattern, FC_WEIGHT);
+		FcPatternAddInteger(pattern, FC_WEIGHT, FC_WEIGHT_BOLD);
+	}
+	style = xloadfont(fontp, pattern);
+	FcPatternDestroy(pattern);
+	return style;
+}
+
 void
 xloadfonts(const char *fontstr, double fontsize)
 {
@@ -2153,6 +2213,10 @@ xloadfonts(const char *fontstr, double fontsize)
 	/* Setting character width and height. */
 	win.cw = ceilf(dc.font.width * cwscale);
 	win.ch = ceilf(dc.font.height * chscale);
+	if (gpudraw) {
+		FcPatternDestroy(pattern);
+		return;
+	}
 
 	FcPatternDel(pattern, FC_SLANT);
 	FcPatternAddInteger(pattern, FC_SLANT, FC_SLANT_ITALIC);
@@ -2175,10 +2239,13 @@ xloadfonts(const char *fontstr, double fontsize)
 void
 xunloadfont(Font *f)
 {
+	if (!f->match)
+		return;
 	XftFontClose(xw.dpy, f->match);
 	FcPatternDestroy(f->pattern);
 	if (f->set)
 		FcFontSetDestroy(f->set);
+	memset(f, 0, sizeof *f);
 }
 
 void
