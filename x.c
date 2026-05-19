@@ -2373,8 +2373,10 @@ xinit(int cols, int rows)
 
 	if (!(xw.dpy = XOpenDisplay(NULL)))
 		die("can't open display\n");
-	Bool detectable_autorepeat_supported;
-	XkbSetDetectableAutoRepeat(xw.dpy, True, &detectable_autorepeat_supported);
+	if (!gpudraw) {
+		Bool detectable_autorepeat_supported;
+		XkbSetDetectableAutoRepeat(xw.dpy, True, &detectable_autorepeat_supported);
+	}
 	xw.scr = XDefaultScreen(xw.dpy);
 	xw.vis = XDefaultVisual(xw.dpy, xw.scr);
 
@@ -3608,6 +3610,10 @@ run(void)
 			h = ev.xconfigure.height;
 		}
 	} while (ev.type != MapNotify);
+	if (gpudraw) {
+		Bool detectable_autorepeat_supported;
+		XkbSetDetectableAutoRepeat(xw.dpy, True, &detectable_autorepeat_supported);
+	}
 
 	ttyfd = ttynew(opt_line, shell, opt_io, opt_cmd);
 	cresize(w, h);
