@@ -1731,7 +1731,7 @@ gpudrawbatch(GpuBatch *b, int textured)
 static void
 gpudrawline(Line line, int x1, int y, int x2)
 {
-	int x, haverun = 0;
+	int x, haverun = 0, searchactive = search_active();
 	int basey = gpucelly(y), rowh = gpurowbottom(y) - basey;
 	int baseline = gpubaseline(y), runx = 0, runw = 0;
 	int vimline = vimnav_curline_y();
@@ -1741,14 +1741,13 @@ gpudrawline(Line line, int x1, int y, int x2)
 
 	gpucolor(defaultfg, dfg);
 	gpucolor(defaultbg, dbg);
-
 	for (x = x1; x < x2; x++) {
 		g = line[x];
 		if (g.mode == ATTR_WDUMMY)
 			continue;
 		if (selected(x, y))
 			g.mode |= ATTR_SELECTED;
-		if (search_matched(x, y))
+		if (searchactive && search_matched(x, y))
 			g.mode |= ATTR_MATCH;
 		if (g.fg == defaultfg && g.bg == defaultbg &&
 		    !(g.mode & (ATTR_SELECTED|ATTR_MATCH|ATTR_BOLD_FAINT|ATTR_REVERSE|ATTR_BLINK|ATTR_INVISIBLE)) &&
