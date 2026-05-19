@@ -3526,8 +3526,7 @@ run(void)
 		}
 
 		draw();
-		if (!gpu.active)
-			XFlush(xw.dpy);
+		XFlush(xw.dpy);
 		drawing = 0;
 	}
 }
