@@ -209,6 +209,7 @@ static void tsetchar(Rune, const Glyph *, int, int);
 static void tsetscroll(int, int);
 static void tswapscreen(void);
 static void tsetmode(int, int, const int *, int);
+static int tfastcsi(const char *, int, int *);
 static int twrite(const char *, int, int);
 void tfulldirt(void);
 static void tcontrolcode(uchar );
@@ -2760,14 +2761,62 @@ check_control_code:
 	}
 }
 
+static int
+tfastcsi(const char *s, int n, int *used)
+{
+	int i = 2, a = 0, b = 0, any = 0;
+
+	if (n < 3 || s[0] != '\033' || s[1] != '[')
+		return 0;
+	for (; i < n && BETWEEN(s[i], '0', '9'); i++) {
+		any = 1;
+		a = MIN(9999, a * 10 + s[i] - '0');
+	}
+	if (i >= n)
+		return 0;
+	if (s[i] == 'm') {
+		if (!any || a == 0) {
+			term.c.attr.mode &= ~(ATTR_BOLD | ATTR_FAINT | ATTR_ITALIC |
+			                      ATTR_UNDERLINE | ATTR_BLINK | ATTR_REVERSE |
+			                      ATTR_INVISIBLE | ATTR_STRUCK);
+			term.c.attr.fg = defaultfg;
+			term.c.attr.bg = defaultbg;
+			*used = i + 1;
+			return 1;
+		}
+		if (BETWEEN(a, 30, 37)) {
+			term.c.attr.fg = a - 30;
+			*used = i + 1;
+			return 1;
+		}
+		return 0;
+	}
+	if (s[i] != ';' || !any)
+		return 0;
+	for (i++, any = 0; i < n && BETWEEN(s[i], '0', '9'); i++) {
+		any = 1;
+		b = MIN(9999, b * 10 + s[i] - '0');
+	}
+	if (!any || i >= n || s[i] != 'H')
+		return 0;
+	tmoveato(b - 1, a - 1);
+	*used = i + 1;
+	return 1;
+}
+
 int
 twrite(const char *buf, int buflen, int show_ctrl)
 {
 	int charsize;
 	Rune u;
-	int n;
+	int n, used;
 
 	for (n = 0; n < buflen; n += charsize) {
+		if (!show_ctrl && term.esc == 0 && buf[n] == '\033' &&
+		    tfastcsi(buf + n, buflen - n, &used)) {
+			charsize = used;
+			continue;
+		}
 		if (IS_SET(MODE_UTF8)) {
 			/* process a complete utf8 char */
 			if (!(buf[n] & 0x80)) {
