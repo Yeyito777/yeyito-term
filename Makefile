@@ -125,6 +125,9 @@ tests/test_search.o: tests/test_search.c tests/test.h st.h search.h vimnav.h
 test_search: tests/test_search.o
 	$(CC) -o tests/test_search tests/test_search.o
 
+test_gpu_regressions: st
+	@./tests/test_gpu_regressions.sh
+
 test: test_vimnav test_sshind test_scrollback test_cwd test_notif test_persist test_search
 	@echo "Running tests..."
 	@./tests/test_vimnav
@@ -138,4 +141,4 @@ test: test_vimnav test_sshind test_scrollback test_cwd test_notif test_persist t
 clean-tests:
 	rm -f tests/*.o tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search
 
-.PHONY: all install-hint clean dist install uninstall test clean-tests
+.PHONY: all install-hint clean dist install uninstall test test_gpu_regressions clean-tests
