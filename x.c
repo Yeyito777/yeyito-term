@@ -1874,10 +1874,13 @@ gpudrawline(Line line, int x1, int y, int x2)
 			g.mode |= ATTR_SELECTED;
 		if (searchactive && search_matched(x, y))
 			g.mode |= ATTR_MATCH;
-		if (g.fg == defaultfg && g.bg == defaultbg &&
+		if (g.bg == defaultbg &&
 		    !(g.mode & (ATTR_SELECTED|ATTR_MATCH|ATTR_BOLD_FAINT|ATTR_REVERSE|ATTR_BLINK|ATTR_INVISIBLE)) &&
 		    !IS_SET(MODE_REVERSE) && !debug_mode && y != vimline) {
-			memcpy(fg, dfg, sizeof fg);
+			if (g.fg == defaultfg)
+				memcpy(fg, dfg, sizeof fg);
+			else
+				gpucolor(g.fg, fg);
 			memcpy(bg, dbg, sizeof bg);
 		} else {
 			gpuresolve(g, x, y, fg, bg);
