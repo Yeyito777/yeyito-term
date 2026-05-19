@@ -209,6 +209,7 @@ static void tsetchar(Rune, const Glyph *, int, int);
 static void tsetscroll(int, int);
 static void tswapscreen(void);
 static void tsetmode(int, int, const int *, int);
+static int tfastcursorop(const char *, int, int *);
 static int tfastcsi(const char *, int, int *);
 static int tputcfastascii(uchar);
 static int twrite(const char *, int, int);
@@ -2849,6 +2850,41 @@ tputcfastascii(uchar u)
 	return 1;
 }
 
+static int
+tfastcursorop(const char *s, int n, int *used)
+{
+	int i = 2, row = 0, col = 0, color;
+	uchar ch;
+
+	if (n < 14 || s[0] != '\033' || s[1] != '[' || term.esc ||
+	    IS_SET(MODE_PRINT) || IS_SET(MODE_INSERT) ||
+	    term.trantbl[term.charset] != CS_USA || sel.ob.x != -1 ||
+	    term.c.attr.bg != defaultbg || term.c.attr.mode != ATTR_NULL)
+		return 0;
+	for (; i < n && BETWEEN(s[i], '0', '9'); i++)
+		row = MIN(9999, row * 10 + s[i] - '0');
+	if (i >= n || s[i++] != ';')
+		return 0;
+	for (; i < n && BETWEEN(s[i], '0', '9'); i++)
+		col = MIN(9999, col * 10 + s[i] - '0');
+	if (i + 8 > n || s[i++] != 'H' || s[i++] != '\033' || s[i++] != '[' ||
+	    s[i++] != '3' || !BETWEEN(s[i], '0', '7'))
+		return 0;
+	color = s[i++] - '0';
+	if (s[i++] != 'm' || !BETWEEN((uchar)s[i], 0x20, 0x7e))
+		return 0;
+	ch = s[i++];
+	if (i + 4 > n || s[i] != '\033' || s[i+1] != '[' ||
+	    s[i+2] != '0' || s[i+3] != 'm')
+		return 0;
+	tmoveato(col - 1, row - 1);
+	term.c.attr.fg = color;
+	tputcfastascii(ch);
+	term.c.attr.fg = defaultfg;
+	*used = i + 4;
+	return 1;
+}
+
 int
 twrite(const char *buf, int buflen, int show_ctrl)
 {
@@ -2857,6 +2893,11 @@ twrite(const char *buf, int buflen, int show_ctrl)
 	int n, used, gpu = xgpuenabled();
 
 	for (n = 0; n < buflen; n += charsize) {
+		if (gpu && !show_ctrl && buf[n] == '\033' &&
+		    tfastcursorop(buf + n, buflen - n, &used)) {
+			charsize = used;
+			continue;
+		}
 		if (!show_ctrl && term.esc == 0 && buf[n] == '\033' &&
 		    tfastcsi(buf + n, buflen - n, &used)) {
 			charsize = used;
