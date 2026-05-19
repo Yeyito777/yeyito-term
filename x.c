@@ -1783,7 +1783,7 @@ gpudrawbatch(GpuBatch *b, int textured)
 static void
 gpudrawline(Line line, int x1, int y, int x2)
 {
-	int x, haverun = 0, searchactive = search_active();
+	int x, haverun = 0, searchactive = search_active(), selactive = selection_active();
 	int basey = gpucelly(y), rowh = gpurowbottom(y) - basey;
 	int baseline = gpubaseline(y), runx = 0, runw = 0;
 	int vimline = vimnav_curline_y();
@@ -1797,7 +1797,7 @@ gpudrawline(Line line, int x1, int y, int x2)
 		g = line[x];
 		if (g.mode == ATTR_WDUMMY)
 			continue;
-		if (selected(x, y))
+		if (selactive && selected(x, y))
 			g.mode |= ATTR_SELECTED;
 		if (searchactive && search_matched(x, y))
 			g.mode |= ATTR_MATCH;
@@ -3526,7 +3526,8 @@ run(void)
 		}
 
 		draw();
-		XFlush(xw.dpy);
+		if (!gpu.active)
+			XFlush(xw.dpy);
 		drawing = 0;
 	}
 }

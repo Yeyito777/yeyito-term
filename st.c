@@ -540,6 +540,13 @@ selected(int x, int y)
 	    && (y != sel.ne.y || x <= sel.ne.x);
 }
 
+int
+selection_active(void)
+{
+	return sel.mode != SEL_EMPTY && sel.ob.x != -1 &&
+	       sel.alt == IS_SET(MODE_ALTSCREEN);
+}
+
 void
 selsnap(int *x, int *y, int direction)
 {
