@@ -2000,12 +2000,13 @@ gpudrawcell(Glyph g, int x, int y, int overlay)
 	GpuBatch *tb = overlay ? &gpu.otext : &gpu.text;
 	GpuBatch *ctb = overlay ? &gpu.octext : &gpu.ctext;
 	GpuBatch *db = overlay ? &gpu.odeco : &gpu.deco;
+	int selactive = selection_active(), searchactive = search_active();
 
 	if (g.mode == ATTR_WDUMMY)
 		return;
-	if (selected(x, y))
+	if (selactive && selected(x, y))
 		g.mode |= ATTR_SELECTED;
-	if (search_matched(x, y))
+	if (searchactive && search_matched(x, y))
 		g.mode |= ATTR_MATCH;
 	gpuresolve(g, x, y, fg, bg);
 	cellw = gpucellright(x, g.mode & ATTR_WIDE) - cellx;
@@ -2037,12 +2038,13 @@ gpudrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 {
 	int cellx = gpucellx(cx), celly = gpucelly(cy);
 	int cellw = gpucellright(cx, 0) - cellx, cellh = gpurowbottom(cy) - celly;
+	int selactive = selection_active(), searchactive = search_active();
 	float col[3];
 	Glyph cg = g;
 
-	if (selected(ox, oy))
+	if (selactive && selected(ox, oy))
 		og.mode |= ATTR_SELECTED;
-	if (search_matched(ox, oy))
+	if (searchactive && search_matched(ox, oy))
 		og.mode |= ATTR_MATCH;
 	gpudrawcell(og, ox, oy, 1);
 	if ((IS_SET(MODE_HIDE) && !vimnav.forced) || cmdline_active())
@@ -2055,8 +2057,13 @@ gpudrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 	} else if (IS_SET(MODE_REVERSE)) {
 		cg.mode |= ATTR_REVERSE;
 		cg.bg = defaultfg;
-		cg.fg = selected(cx, cy) ? defaultrcs : defaultcs;
-		gpucolor(selected(cx, cy) ? defaultcs : defaultrcs, col);
+		if (selactive && selected(cx, cy)) {
+			cg.fg = defaultrcs;
+			gpucolor(defaultcs, col);
+		} else {
+			cg.fg = defaultcs;
+			gpucolor(defaultrcs, col);
+		}
 	} else {
 		cg.fg = defaultbg;
 		cg.bg = defaultcs;
