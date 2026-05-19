@@ -98,6 +98,9 @@ typedef XftGlyphFontSpec GlyphFontSpec;
 #ifndef GL_DYNAMIC_DRAW
 #define GL_DYNAMIC_DRAW 0x88E8
 #endif
+#ifndef GL_BGRA
+#define GL_BGRA 0x80E1
+#endif
 
 /* Purely graphic info */
 typedef struct {
@@ -284,6 +287,7 @@ static double defaultfontsize = 0;
 typedef struct {
 	Rune rune;
 	int flags;
+	int color;
 	int x, y, w, h;
 	int left, top, advance;
 	int valid;
@@ -292,6 +296,7 @@ typedef struct {
 typedef struct {
 	FT_Face face;
 	int flags;
+	int color;
 	char *file;
 	int index;
 } GpuFallbackFace;
@@ -328,14 +333,14 @@ typedef struct {
 	FT_Face face[4];
 	double fontpx;
 	int ascent, descent;
-	GLuint atlas;
+	GLuint atlas, catlas;
 	int atlasw, atlash, penx, peny, rowh;
 	GpuGlyph *glyphs;
 	int glyphlen, glyphcap;
 	int ascii[4][128];
 	GpuFallbackFace *fallbacks;
 	int fallbacklen, fallbackcap;
-	GpuBatch bg, text, deco, obg, otext, odeco;
+	GpuBatch bg, text, ctext, deco, obg, otext, octext, odeco;
 } Gpu;
 
 static Gpu gpu;
@@ -1054,6 +1059,74 @@ gpucellh(void)
 	return win.ch * gpuyscale();
 }
 
+static int
+gpuround(double v)
+{
+	return (int)floor(v + 0.5);
+}
+
+static int
+gpucellx(int x)
+{
+	return borderpx + gpuround(x * gpucellw());
+}
+
+static int
+gpucelly(int y)
+{
+	return borderpx + gpuround(y * gpucellh());
+}
+
+static int
+gpucellright(int x, int wide)
+{
+	return gpucellx(x + (wide ? 2 : 1));
+}
+
+static int
+gpurowbottom(int y)
+{
+	return gpucelly(y + 1);
+}
+
+static int
+gpubaseline(int y)
+{
+	int top = gpucelly(y), bottom = gpurowbottom(y);
+	int lineh = gpu.ascent + gpu.descent;
+	int extra = MAX(0, bottom - top - lineh);
+	return top + (extra + 1) / 2 + gpu.ascent;
+}
+
+static int
+gpuisemoji(Rune r)
+{
+	return BETWEEN(r, 0x1f000, 0x1faff) || BETWEEN(r, 0x2600, 0x27bf);
+}
+
+static unsigned char
+gpualpha(unsigned char a)
+{
+	/* Xft's LCD/filtering path looks punchier than a raw grayscale FreeType
+	 * mask.  Drop near-invisible fringe pixels and slightly boost coverage so
+	 * GPU text does not look washed out or out-of-focus. */
+	if (a < 16)
+		return 0;
+	return MIN(255, ((int)a - 16) * 280 / 239);
+}
+
+static void
+gpusetfontsize(FT_Face face, int color)
+{
+	if (!face)
+		return;
+	if (color && face->num_fixed_sizes > 0) {
+		FT_Select_Size(face, 0);
+		return;
+	}
+	FT_Set_Pixel_Sizes(face, 0, MAX(1, gpuround(gpu.fontpx)));
+}
+
 static void
 gpucolor(uint32_t c, float out[3])
 {
@@ -1158,14 +1231,16 @@ gpuatlasreset(void)
 	memset(gpu.ascii, 0xff, sizeof gpu.ascii);
 	for (i = 0; i < 4; i++)
 		if (gpu.face[i])
-			FT_Set_Pixel_Sizes(gpu.face[i], 0, MAX(1, (int)round(gpu.fontpx)));
+			gpusetfontsize(gpu.face[i], 0);
 	glBindTexture(GL_TEXTURE_2D, gpu.atlas);
-	unsigned char zero = 0;
 	/* Clearing the whole atlas is cheap and avoids stale alpha on reused slots. */
-	unsigned char *empty = xmalloc(gpu.atlasw * gpu.atlash);
-	memset(empty, zero, gpu.atlasw * gpu.atlash);
+	unsigned char *empty = xmalloc(gpu.atlasw * gpu.atlash * 4);
+	memset(empty, 0, gpu.atlasw * gpu.atlash * 4);
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_ALPHA, gpu.atlasw, gpu.atlash, 0,
 	             GL_ALPHA, GL_UNSIGNED_BYTE, empty);
+	glBindTexture(GL_TEXTURE_2D, gpu.catlas);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, gpu.atlasw, gpu.atlash, 0,
+	             GL_BGRA, GL_UNSIGNED_BYTE, empty);
 	free(empty);
 	if (gpu.face[FRC_NORMAL]) {
 		gpu.ascent = gpu.face[FRC_NORMAL]->size->metrics.ascender >> 6;
@@ -1173,7 +1248,7 @@ gpuatlasreset(void)
 	}
 	for (i = 0; i < gpu.fallbacklen; i++)
 		if (gpu.fallbacks[i].face)
-			FT_Set_Pixel_Sizes(gpu.fallbacks[i].face, 0, MAX(1, (int)round(gpu.fontpx)));
+			gpusetfontsize(gpu.fallbacks[i].face, gpu.fallbacks[i].color);
 }
 
 static void
@@ -1278,8 +1353,14 @@ gpuinit(void)
 	gpu.atlash = 2048;
 	glGenTextures(1, &gpu.atlas);
 	glBindTexture(GL_TEXTURE_2D, gpu.atlas);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glGenTextures(1, &gpu.catlas);
+	glBindTexture(GL_TEXTURE_2D, gpu.catlas);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
@@ -1308,6 +1389,8 @@ gpudestroy(void)
 		gpu.DeleteBuffers(1, &gpu.vbo);
 	if (gpu.atlas)
 		glDeleteTextures(1, &gpu.atlas);
+	if (gpu.catlas)
+		glDeleteTextures(1, &gpu.catlas);
 	for (i = 0; i < 4; i++)
 		if (gpu.face[i])
 			FT_Done_Face(gpu.face[i]);
@@ -1326,15 +1409,17 @@ gpudestroy(void)
 	free(gpu.fallbacks);
 	free(gpu.bg.v);
 	free(gpu.text.v);
+	free(gpu.ctext.v);
 	free(gpu.deco.v);
 	free(gpu.obg.v);
 	free(gpu.otext.v);
+	free(gpu.octext.v);
 	free(gpu.odeco.v);
 	memset(&gpu, 0, sizeof gpu);
 }
 
 static FT_Face
-gpufallbackface(Rune rune, int flags)
+gpufallbackface(Rune rune, int flags, int color)
 {
 	FcPattern *pat, *match;
 	FcCharSet *charset;
@@ -1346,6 +1431,7 @@ gpufallbackface(Rune rune, int flags)
 
 	for (i = 0; i < gpu.fallbacklen; i++)
 		if (gpu.fallbacks[i].flags == flags &&
+		    gpu.fallbacks[i].color == color &&
 		    FT_Get_Char_Index(gpu.fallbacks[i].face, rune))
 			return gpu.fallbacks[i].face;
 
@@ -1356,7 +1442,7 @@ gpufallbackface(Rune rune, int flags)
 	FcCharSetAddChar(charset, rune);
 	FcPatternAddCharSet(pat, FC_CHARSET, charset);
 	FcPatternAddBool(pat, FC_SCALABLE, 1);
-	FcPatternAddBool(pat, FC_COLOR, 0);
+	FcPatternAddBool(pat, FC_COLOR, color ? 1 : 0);
 	if (flags == FRC_BOLD || flags == FRC_ITALICBOLD)
 		FcPatternAddInteger(pat, FC_WEIGHT, FC_WEIGHT_BOLD);
 	if (flags == FRC_ITALIC || flags == FRC_ITALICBOLD)
@@ -1374,6 +1460,7 @@ gpufallbackface(Rune rune, int flags)
 	filedup = xstrdup((const char *)file);
 	for (i = 0; i < gpu.fallbacklen; i++)
 		if (gpu.fallbacks[i].flags == flags &&
+		    gpu.fallbacks[i].color == color &&
 		    gpu.fallbacks[i].index == index &&
 		    !strcmp(gpu.fallbacks[i].file, filedup)) {
 			free(filedup);
@@ -1386,14 +1473,14 @@ gpufallbackface(Rune rune, int flags)
 		FcPatternDestroy(match);
 		goto cleanup;
 	}
-	FT_Set_Pixel_Sizes(face, 0, MAX(1, (int)round(gpu.fontpx)));
+	gpusetfontsize(face, color);
 	if (gpu.fallbacklen >= gpu.fallbackcap) {
 		gpu.fallbackcap += 16;
 		gpu.fallbacks = xrealloc(gpu.fallbacks,
 		                         gpu.fallbackcap * sizeof *gpu.fallbacks);
 	}
 	gpu.fallbacks[gpu.fallbacklen++] = (GpuFallbackFace){
-		.face = face, .flags = flags, .file = filedup, .index = index
+		.face = face, .flags = flags, .color = color, .file = filedup, .index = index
 	};
 	FcPatternDestroy(match);
 
@@ -1411,7 +1498,7 @@ gpuglyph(Rune rune, int mode)
 	GpuGlyph *g;
 	FT_Face face;
 	FT_Bitmap *bm;
-	int i, flags = gpufaceidx(mode);
+	int i, flags = gpufaceidx(mode), wantcolor = gpuisemoji(rune);
 
 	if (rune < 128 && gpu.ascii[flags][rune] >= 0)
 		return &gpu.glyphs[gpu.ascii[flags][rune]];
@@ -1432,16 +1519,23 @@ gpuglyph(Rune rune, int mode)
 	g->rune = rune;
 	g->flags = flags;
 	face = gpu.face[flags] ? gpu.face[flags] : gpu.face[FRC_NORMAL];
-	if (!FT_Get_Char_Index(face, rune)) {
-		FT_Face fallback = gpufallbackface(rune, flags);
+	if (wantcolor) {
+		FT_Face fallback = gpufallbackface(rune, flags, 1);
 		if (fallback)
 			face = fallback;
 	}
-	if (FT_Load_Char(face, rune, FT_LOAD_RENDER | FT_LOAD_TARGET_NORMAL)) {
+	if (!FT_Get_Char_Index(face, rune)) {
+		FT_Face fallback = gpufallbackface(rune, flags, 0);
+		if (fallback)
+			face = fallback;
+	}
+	if (FT_Load_Char(face, rune, FT_LOAD_RENDER |
+	                (wantcolor ? FT_LOAD_COLOR : FT_LOAD_TARGET_NORMAL))) {
 		face = gpu.face[FRC_NORMAL];
 		FT_Load_Char(face, 0xfffd, FT_LOAD_RENDER | FT_LOAD_TARGET_NORMAL);
 	}
 	bm = &face->glyph->bitmap;
+	g->color = bm->pixel_mode == FT_PIXEL_MODE_BGRA;
 	g->w = bm->width;
 	g->h = bm->rows;
 	g->left = face->glyph->bitmap_left;
@@ -1461,10 +1555,20 @@ gpuglyph(Rune rune, int mode)
 	}
 	g->x = gpu.penx;
 	g->y = gpu.peny;
-	glBindTexture(GL_TEXTURE_2D, gpu.atlas);
-	if (bm->pixel_mode == FT_PIXEL_MODE_GRAY && bm->pitch == g->w) {
+	glBindTexture(GL_TEXTURE_2D, g->color ? gpu.catlas : gpu.atlas);
+	if (g->color) {
+		unsigned char *tight = xmalloc(g->w * g->h * 4), *dst = tight;
+		int row;
+		for (row = 0; row < g->h; row++) {
+			const unsigned char *src = bm->buffer + row * bm->pitch;
+			if (bm->pitch < 0)
+				src = bm->buffer + (g->h - 1 - row) * -bm->pitch;
+			memcpy(dst, src, g->w * 4);
+			dst += g->w * 4;
+		}
 		glTexSubImage2D(GL_TEXTURE_2D, 0, g->x, g->y, g->w, g->h,
-		                GL_ALPHA, GL_UNSIGNED_BYTE, bm->buffer);
+		                GL_BGRA, GL_UNSIGNED_BYTE, tight);
+		free(tight);
 	} else {
 		unsigned char *tight = xmalloc(g->w * g->h), *dst = tight;
 		int row, col;
@@ -1476,7 +1580,8 @@ gpuglyph(Rune rune, int mode)
 				for (col = 0; col < g->w; col++)
 					dst[col] = (src[col >> 3] & (0x80 >> (col & 7))) ? 255 : 0;
 			} else if (bm->pixel_mode == FT_PIXEL_MODE_GRAY) {
-				memcpy(dst, src, g->w);
+				for (col = 0; col < g->w; col++)
+					dst[col] = gpualpha(src[col]);
 			} else {
 				memset(dst, 0, g->w);
 			}
@@ -1502,9 +1607,11 @@ gpubatchreset(void)
 {
 	gpubatchclear(&gpu.bg);
 	gpubatchclear(&gpu.text);
+	gpubatchclear(&gpu.ctext);
 	gpubatchclear(&gpu.deco);
 	gpubatchclear(&gpu.obg);
 	gpubatchclear(&gpu.otext);
+	gpubatchclear(&gpu.octext);
 	gpubatchclear(&gpu.odeco);
 }
 
@@ -1538,12 +1645,14 @@ gpubatchrect(GpuBatch *b, double x, double y, double w, double h, float c[3])
 }
 
 static void
-gpubatchglyph(GpuBatch *b, double x, double y, GpuGlyph *g, float c[3])
+gpubatchglyph(GpuBatch *b, double x, double y, double w, double h,
+              GpuGlyph *g, float c[3])
 {
-	double tx1 = (double)g->x / gpu.atlasw, ty1 = (double)g->y / gpu.atlash;
-	double tx2 = (double)(g->x + g->w) / gpu.atlasw;
-	double ty2 = (double)(g->y + g->h) / gpu.atlash;
-	gpubatchquad(b, x, y, g->w, g->h, tx1, ty1, tx2, ty2, c);
+	double tx1 = (double)(g->x + 0.5) / gpu.atlasw;
+	double ty1 = (double)(g->y + 0.5) / gpu.atlash;
+	double tx2 = (double)(g->x + g->w - 0.5) / gpu.atlasw;
+	double ty2 = (double)(g->y + g->h - 0.5) / gpu.atlash;
+	gpubatchquad(b, x, y, w, h, tx1, ty1, tx2, ty2, c);
 }
 
 static void
@@ -1571,7 +1680,8 @@ gpudrawbatch(GpuBatch *b, int textured)
 	}
 	if (textured) {
 		glEnable(GL_TEXTURE_2D);
-		glBindTexture(GL_TEXTURE_2D, gpu.atlas);
+		glBindTexture(GL_TEXTURE_2D, textured == 2 ? gpu.catlas : gpu.atlas);
+		glBlendFunc(textured == 2 ? GL_ONE : GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 		glEnableClientState(GL_TEXTURE_COORD_ARRAY);
 		glTexCoordPointer(2, GL_FLOAT, sizeof(GpuVertex), toff);
 	} else {
@@ -1583,6 +1693,8 @@ gpudrawbatch(GpuBatch *b, int textured)
 	glVertexPointer(2, GL_FLOAT, sizeof(GpuVertex), voff);
 	glColorPointer(4, GL_FLOAT, sizeof(GpuVertex), coff);
 	glDrawArrays(GL_QUADS, 0, b->len);
+	if (textured)
+		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 	if (gpu.vbo_ok)
 		gpu.BindBuffer(GL_ARRAY_BUFFER, 0);
 	glPopClientAttrib();
@@ -1592,10 +1704,10 @@ static void
 gpudrawline(Line line, int x1, int y, int x2)
 {
 	int x, haverun = 0;
-	double cw = gpucellw(), ch = gpucellh();
-	double basey = borderpx + y * ch, runx = 0, runw = 0;
+	int basey = gpucelly(y), rowh = gpurowbottom(y) - basey;
+	int baseline = gpubaseline(y), runx = 0, runw = 0;
 	Glyph g;
-	float fg[3], bg[3], runbg[3];
+	float fg[3], bg[3], runbg[3], white[3] = {1.0f, 1.0f, 1.0f};
 	GpuGlyph *gg;
 
 	for (x = x1; x < x2; x++)
@@ -1617,23 +1729,24 @@ gpudrawline(Line line, int x1, int y, int x2)
 		if (search_matched(x, y))
 			g.mode |= ATTR_MATCH;
 		gpuresolve(g, x, y, fg, bg);
-		double cellw = cw * ((g.mode & ATTR_WIDE) ? 2 : 1);
+		int cellx = gpucellx(x);
+		int cellw = gpucellright(x, g.mode & ATTR_WIDE) - cellx;
 		if (!haverun) {
 			haverun = 1;
-			runx = borderpx + x * cw;
+			runx = cellx;
 			runw = cellw;
 			memcpy(runbg, bg, sizeof runbg);
 		} else if (gpucoloreq(runbg, bg)) {
 			runw += cellw;
 		} else {
-			gpubatchrect(&gpu.bg, runx, basey, runw, ch, runbg);
-			runx = borderpx + x * cw;
+			gpubatchrect(&gpu.bg, runx, basey, runw, rowh, runbg);
+			runx = cellx;
 			runw = cellw;
 			memcpy(runbg, bg, sizeof runbg);
 		}
 	}
 	if (haverun)
-		gpubatchrect(&gpu.bg, runx, basey, runw, ch, runbg);
+		gpubatchrect(&gpu.bg, runx, basey, runw, rowh, runbg);
 
 	for (x = x1; x < x2; x++) {
 		g = line[x];
@@ -1647,9 +1760,20 @@ gpudrawline(Line line, int x1, int y, int x2)
 		gg = gpuglyph(g.u, g.mode);
 		if (!gg || !gg->valid || gg->w <= 0 || gg->h <= 0)
 			continue;
-		double dx = borderpx + x * cw + gg->left;
-		double dy = basey + gpu.ascent - gg->top;
-		gpubatchglyph(&gpu.text, dx, dy, gg, fg);
+		int cellx = gpucellx(x);
+		int cellw = gpucellright(x, g.mode & ATTR_WIDE) - cellx;
+		if (gg->color) {
+			double scale = MIN((double)cellw / gg->w, (double)rowh / gg->h);
+			int dw = MAX(1, gpuround(gg->w * scale));
+			int dh = MAX(1, gpuround(gg->h * scale));
+			int dx = cellx + (cellw - dw) / 2;
+			int dy = basey + (rowh - dh) / 2;
+			gpubatchglyph(&gpu.ctext, dx, dy, dw, dh, gg, white);
+		} else {
+			int dx = cellx + gg->left;
+			int dy = baseline - gg->top;
+			gpubatchglyph(&gpu.text, dx, dy, gg->w, gg->h, gg, fg);
+		}
 	}
 
 	for (x = x1; x < x2; x++) {
@@ -1662,23 +1786,25 @@ gpudrawline(Line line, int x1, int y, int x2)
 			g.mode |= ATTR_MATCH;
 		gpuresolve(g, x, y, fg, bg);
 		if (g.mode & ATTR_UNDERLINE)
-			gpubatchrect(&gpu.deco, borderpx + x * cw,
-			             basey + gpu.ascent + 1, cw, 1, fg);
+			gpubatchrect(&gpu.deco, gpucellx(x), baseline + 1,
+			             gpucellright(x, 0) - gpucellx(x), 1, fg);
 		if (g.mode & ATTR_STRUCK)
-			gpubatchrect(&gpu.deco, borderpx + x * cw,
-			             basey + gpu.ascent * 2.0 / 3.0, cw, 1, fg);
+			gpubatchrect(&gpu.deco, gpucellx(x), basey + rowh / 2,
+			             gpucellright(x, 0) - gpucellx(x), 1, fg);
 	}
 }
 
 static void
 gpudrawcell(Glyph g, int x, int y, int overlay)
 {
-	double cw = gpucellw(), ch = gpucellh();
-	double basey = borderpx + y * ch;
-	float fg[3], bg[3];
+	int cellx = gpucellx(x), celly = gpucelly(y);
+	int cellw, cellh = gpurowbottom(y) - celly;
+	int baseline = gpubaseline(y);
+	float fg[3], bg[3], white[3] = {1.0f, 1.0f, 1.0f};
 	GpuGlyph *gg;
 	GpuBatch *bb = overlay ? &gpu.obg : &gpu.bg;
 	GpuBatch *tb = overlay ? &gpu.otext : &gpu.text;
+	GpuBatch *ctb = overlay ? &gpu.octext : &gpu.ctext;
 	GpuBatch *db = overlay ? &gpu.odeco : &gpu.deco;
 
 	if (g.mode == ATTR_WDUMMY)
@@ -1688,26 +1814,36 @@ gpudrawcell(Glyph g, int x, int y, int overlay)
 	if (search_matched(x, y))
 		g.mode |= ATTR_MATCH;
 	gpuresolve(g, x, y, fg, bg);
-	gpubatchrect(bb, borderpx + x * cw, basey,
-	             cw * ((g.mode & ATTR_WIDE) ? 2 : 1), ch, bg);
+	cellw = gpucellright(x, g.mode & ATTR_WIDE) - cellx;
+	gpubatchrect(bb, cellx, celly, cellw, cellh, bg);
 	if (g.u != ' ') {
 		gg = gpuglyph(g.u, g.mode);
 		if (gg && gg->valid && gg->w > 0 && gg->h > 0) {
-			double dx = borderpx + x * cw + gg->left;
-			double dy = basey + gpu.ascent - gg->top;
-			gpubatchglyph(tb, dx, dy, gg, fg);
+			if (gg->color) {
+				double scale = MIN((double)cellw / gg->w, (double)cellh / gg->h);
+				int dw = MAX(1, gpuround(gg->w * scale));
+				int dh = MAX(1, gpuround(gg->h * scale));
+				int dx = cellx + (cellw - dw) / 2;
+				int dy = celly + (cellh - dh) / 2;
+				gpubatchglyph(ctb, dx, dy, dw, dh, gg, white);
+			} else {
+				int dx = cellx + gg->left;
+				int dy = baseline - gg->top;
+				gpubatchglyph(tb, dx, dy, gg->w, gg->h, gg, fg);
+			}
 		}
 	}
 	if (g.mode & ATTR_UNDERLINE)
-		gpubatchrect(db, borderpx + x * cw, basey + gpu.ascent + 1, cw, 1, fg);
+		gpubatchrect(db, cellx, baseline + 1, gpucellright(x, 0) - cellx, 1, fg);
 	if (g.mode & ATTR_STRUCK)
-		gpubatchrect(db, borderpx + x * cw, basey + gpu.ascent * 2.0 / 3.0, cw, 1, fg);
+		gpubatchrect(db, cellx, celly + cellh / 2, gpucellright(x, 0) - cellx, 1, fg);
 }
 
 static void
 gpudrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 {
-	double cw = gpucellw(), ch = gpucellh();
+	int cellx = gpucellx(cx), celly = gpucelly(cy);
+	int cellw = gpucellright(cx, 0) - cellx, cellh = gpurowbottom(cy) - celly;
 	float col[3];
 	Glyph cg = g;
 
@@ -1742,22 +1878,19 @@ gpudrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 			gpudrawcell(cg, cx, cy, 1);
 			break;
 		case 3: case 4:
-			gpubatchrect(&gpu.odeco, borderpx + cx * cw,
-			             borderpx + (cy + 1) * ch - cursorthickness,
-			             cw, cursorthickness, col);
+			gpubatchrect(&gpu.odeco, cellx,
+			             celly + cellh - cursorthickness,
+			             cellw, cursorthickness, col);
 			break;
 		case 5: case 6:
-			gpubatchrect(&gpu.odeco, borderpx + cx * cw, borderpx + cy * ch,
-			             cursorthickness, ch, col);
+			gpubatchrect(&gpu.odeco, cellx, celly, cursorthickness, cellh, col);
 			break;
 		}
 	} else {
-		gpubatchrect(&gpu.odeco, borderpx + cx * cw, borderpx + cy * ch, cw, 1, col);
-		gpubatchrect(&gpu.odeco, borderpx + cx * cw, borderpx + cy * ch, 1, ch, col);
-		gpubatchrect(&gpu.odeco, borderpx + (cx + 1) * cw - 1,
-		             borderpx + cy * ch, 1, ch, col);
-		gpubatchrect(&gpu.odeco, borderpx + cx * cw,
-		             borderpx + (cy + 1) * ch - 1, cw, 1, col);
+		gpubatchrect(&gpu.odeco, cellx, celly, cellw, 1, col);
+		gpubatchrect(&gpu.odeco, cellx, celly, 1, cellh, col);
+		gpubatchrect(&gpu.odeco, cellx + cellw - 1, celly, 1, cellh, col);
+		gpubatchrect(&gpu.odeco, cellx, celly + cellh - 1, cellw, 1, col);
 	}
 }
 
@@ -2683,9 +2816,11 @@ xfinishdraw(void)
 	if (gpu.active) {
 		gpudrawbatch(&gpu.bg, 0);
 		gpudrawbatch(&gpu.text, 1);
+		gpudrawbatch(&gpu.ctext, 2);
 		gpudrawbatch(&gpu.deco, 0);
 		gpudrawbatch(&gpu.obg, 0);
 		gpudrawbatch(&gpu.otext, 1);
+		gpudrawbatch(&gpu.octext, 2);
 		gpudrawbatch(&gpu.odeco, 0);
 		glDisableClientState(GL_VERTEX_ARRAY);
 		glDisableClientState(GL_COLOR_ARRAY);
