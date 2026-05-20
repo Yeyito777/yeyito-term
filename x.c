@@ -4,7 +4,6 @@
 #include <limits.h>
 #include <locale.h>
 #include <signal.h>
-#include <stddef.h>
 #include <string.h>
 #include <sys/select.h>
 #include <time.h>
