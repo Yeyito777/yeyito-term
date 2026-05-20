@@ -2364,6 +2364,24 @@ xicdestroy(XIC xim, XPointer client, XPointer call)
 	return 1;
 }
 
+static void
+xinitatoms(pid_t thispid)
+{
+	xw.xembed = XInternAtom(xw.dpy, "_XEMBED", False);
+	xw.wmdeletewin = XInternAtom(xw.dpy, "WM_DELETE_WINDOW", False);
+	xw.netwmname = XInternAtom(xw.dpy, "_NET_WM_NAME", False);
+	xw.netwmiconname = XInternAtom(xw.dpy, "_NET_WM_ICON_NAME", False);
+	XSetWMProtocols(xw.dpy, xw.win, &xw.wmdeletewin, 1);
+
+	xw.netwmpid = XInternAtom(xw.dpy, "_NET_WM_PID", False);
+	XChangeProperty(xw.dpy, xw.win, xw.netwmpid, XA_CARDINAL, 32,
+			PropModeReplace, (uchar *)&thispid, 1);
+
+	xw.stcwd = XInternAtom(xw.dpy, "_ST_CWD", False);
+	xw.stnotify = XInternAtom(xw.dpy, "_ST_NOTIFY", False);
+	xw.stsavecmd = XInternAtom(xw.dpy, "_ST_SAVE_CMD", False);
+}
+
 void
 xinit(int cols, int rows)
 {
@@ -2435,27 +2453,20 @@ xinit(int cols, int rows)
 	if (!gpudraw) {
 		xinitinputcursor();
 		XDefineCursor(xw.dpy, xw.win, xcursortext);
+		xinitatoms(thispid);
 	}
 
-	xw.xembed = XInternAtom(xw.dpy, "_XEMBED", False);
-	xw.wmdeletewin = XInternAtom(xw.dpy, "WM_DELETE_WINDOW", False);
-	xw.netwmname = XInternAtom(xw.dpy, "_NET_WM_NAME", False);
-	xw.netwmiconname = XInternAtom(xw.dpy, "_NET_WM_ICON_NAME", False);
-	XSetWMProtocols(xw.dpy, xw.win, &xw.wmdeletewin, 1);
-
-	xw.netwmpid = XInternAtom(xw.dpy, "_NET_WM_PID", False);
-	XChangeProperty(xw.dpy, xw.win, xw.netwmpid, XA_CARDINAL, 32,
-			PropModeReplace, (uchar *)&thispid, 1);
-
-	xw.stcwd = XInternAtom(xw.dpy, "_ST_CWD", False);
-	xw.stnotify = XInternAtom(xw.dpy, "_ST_NOTIFY", False);
-	xw.stsavecmd = XInternAtom(xw.dpy, "_ST_SAVE_CMD", False);
-
 	win.mode = MODE_NUMLOCK;
+	if (gpudraw) {
+		xw.netwmname = XInternAtom(xw.dpy, "_NET_WM_NAME", False);
+		xw.netwmiconname = XInternAtom(xw.dpy, "_NET_WM_ICON_NAME", False);
+	}
 	resettitle();
 	xhints();
 	XMapWindow(xw.dpy, xw.win);
 	XFlush(xw.dpy);
+	if (gpudraw)
+		xinitatoms(thispid);
 
 	clock_gettime(CLOCK_MONOTONIC, &xsel.tclick1);
 	clock_gettime(CLOCK_MONOTONIC, &xsel.tclick2);
