@@ -38,12 +38,6 @@ typedef struct {
 	int len, cap;
 } GpuBatch;
 
-typedef void (*GpuBindBuffer)(GLenum, GLuint);
-typedef void (*GpuBufferData)(GLenum, ptrdiff_t, const void *, GLenum);
-typedef void (*GpuBufferSubData)(GLenum, ptrdiff_t, ptrdiff_t, const void *);
-typedef void (*GpuDeleteBuffers)(GLsizei, const GLuint *);
-typedef void (*GpuGenBuffers)(GLsizei, GLuint *);
-
 typedef struct {
 	int active, doublebuf;
 	int bufferage;
@@ -53,14 +47,6 @@ typedef struct {
 	uchar *damage[GPU_DAMAGE_HISTORY];
 	int vw, vh;
 	GLXContext ctx;
-	int vbo_ok;
-	GLuint vbo;
-	int vbosz;
-	GpuBindBuffer BindBuffer;
-	GpuBufferData BufferData;
-	GpuBufferSubData BufferSubData;
-	GpuDeleteBuffers DeleteBuffers;
-	GpuGenBuffers GenBuffers;
 	FT_Library ft;
 	FT_Face face[4];
 	double fontpx;
@@ -459,17 +445,6 @@ gpuinit(void)
 	glEnable(GL_BLEND);
 	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 	gpudisablesync();
-	/* Xephyr/Mesa and small terminal damage regions benchmark faster with
-	 * client arrays than with BufferSubData uploads into a streaming VBO. */
-	if (0) {
-		gpu.BindBuffer = (GpuBindBuffer)glXGetProcAddressARB((const GLubyte *)"glBindBuffer");
-		gpu.BufferData = (GpuBufferData)glXGetProcAddressARB((const GLubyte *)"glBufferData");
-		gpu.BufferSubData = (GpuBufferSubData)glXGetProcAddressARB((const GLubyte *)"glBufferSubData");
-		gpu.DeleteBuffers = (GpuDeleteBuffers)glXGetProcAddressARB((const GLubyte *)"glDeleteBuffers");
-		gpu.GenBuffers = (GpuGenBuffers)glXGetProcAddressARB((const GLubyte *)"glGenBuffers");
-		gpu.GenBuffers(1, &gpu.vbo);
-		gpu.vbo_ok = gpu.vbo != 0;
-	}
 	gpuatlasreset();
 	gpuresize();
 }
@@ -479,8 +454,6 @@ gpudestroy(void)
 {
 	int i;
 
-	if (gpu.vbo_ok && gpu.vbo)
-		gpu.DeleteBuffers(1, &gpu.vbo);
 	if (gpu.atlas)
 		glDeleteTextures(1, &gpu.atlas);
 	if (gpu.catlas)
@@ -801,18 +774,6 @@ gpudrawbatch(GpuBatch *b, int textured)
 	voff = &b->v[0].x;
 	toff = &b->v[0].u;
 	coff = &b->v[0].r;
-	if (gpu.vbo_ok) {
-		int bytes = b->len * (int)sizeof *b->v;
-		gpu.BindBuffer(GL_ARRAY_BUFFER, gpu.vbo);
-		if (bytes > gpu.vbosz) {
-			gpu.vbosz = bytes * 2;
-			gpu.BufferData(GL_ARRAY_BUFFER, gpu.vbosz, NULL, GL_DYNAMIC_DRAW);
-		}
-		gpu.BufferSubData(GL_ARRAY_BUFFER, 0, bytes, b->v);
-		voff = (const void *)offsetof(GpuVertex, x);
-		toff = (const void *)offsetof(GpuVertex, u);
-		coff = (const void *)offsetof(GpuVertex, r);
-	}
 	if (textured) {
 		glEnable(GL_TEXTURE_2D);
 		glBindTexture(GL_TEXTURE_2D, textured == 2 ? gpu.catlas : gpu.atlas);
@@ -830,8 +791,6 @@ gpudrawbatch(GpuBatch *b, int textured)
 	glDrawArrays(GL_QUADS, 0, b->len);
 	if (textured)
 		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-	if (gpu.vbo_ok)
-		gpu.BindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
 static void
@@ -1022,4 +981,3 @@ gpudrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 		gpubatchrect(&gpu.odeco, cellx, celly + cellh - 1, cellw, 1, col);
 	}
 }
-
