@@ -840,9 +840,9 @@ gpudrawline(Line line, int x1, int y, int x2)
 		} else {
 			gpubatchrect(&gpu.bg, runx, basey, runw, rowh, runbg);
 			runx = cellx;
-				runw = cellw;
-				memcpy(runbg, bg, sizeof runbg);
-			}
+			runw = cellw;
+			memcpy(runbg, bg, sizeof runbg);
+		}
 		if (g.u != ' ') {
 			gg = gpuglyph(g.u, g.mode);
 			if (gg && gg->valid && gg->w > 0 && gg->h > 0) {
