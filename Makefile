@@ -16,7 +16,7 @@ config.h:
 	$(CC) $(STCFLAGS) -c $<
 
 st.o: config.h st.h win.h vimnav.h persist.h
-x.o: arg.h config.h st.h win.h sshind.h notif.h persist.h cmdline.h search.h
+x.o: arg.h config.h st.h win.h sshind.h notif.h persist.h cmdline.h search.h render/gpu.c
 vimnav.o: st.h vimnav.h
 sshind.o: sshind.h
 notif.o: sshind.h notif.h
@@ -39,9 +39,11 @@ clean:
 
 dist: clean
 	mkdir -p st-$(VERSION)
+	mkdir -p st-$(VERSION)/render
 	cp -R FAQ LEGACY TODO LICENSE Makefile README config.mk\
 		config.def.h st.info st.1 arg.h st.h win.h vimnav.h sshind.h notif.h persist.h cmdline.h search.h $(SRC)\
 		st-$(VERSION)
+	cp -R render/gpu.c render/README.md st-$(VERSION)/render
 	tar -cf - st-$(VERSION) | gzip > st-$(VERSION).tar.gz
 	rm -rf st-$(VERSION)
 
