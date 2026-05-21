@@ -9,6 +9,8 @@ typedef struct {
 	int width;
 	int height;
 	int row_height;
+	int content_y;
+	int content_height;
 	int baseline;
 } CmdlineLayout;
 
@@ -23,7 +25,7 @@ cmdline_layout(int win_w, int win_h, int row_top, int row_bottom,
                int font_ascent, int font_descent, int border_top)
 {
 	CmdlineLayout l;
-	int content_top, content_height, line_height;
+	int line_height;
 	int min_baseline, max_baseline;
 
 	if (row_top < 0)
@@ -50,10 +52,10 @@ cmdline_layout(int win_w, int win_h, int row_top, int row_bottom,
 	if (l.row_height < 1)
 		l.row_height = 1;
 
-	content_top = cmdline_clamp(border_top, 0, l.row_height - 1);
-	content_height = l.row_height - content_top;
-	if (content_height < 1)
-		content_height = 1;
+	l.content_y = cmdline_clamp(border_top, 0, l.row_height - 1);
+	l.content_height = l.row_height - l.content_y;
+	if (l.content_height < 1)
+		l.content_height = 1;
 	line_height = font_ascent + font_descent;
 	if (line_height < 1)
 		line_height = 1;
@@ -61,7 +63,7 @@ cmdline_layout(int win_w, int win_h, int row_top, int row_bottom,
 	/* The command line is drawn with Xft even when the terminal grid is drawn by
 	 * the GPU.  Center the Xft font inside the *actual rendered bottom row* so
 	 * it does not inherit stale integer-grid geometry or GPU-specific baselines. */
-	l.baseline = content_top + (content_height - line_height) / 2 + font_ascent;
+	l.baseline = l.content_y + (l.content_height - line_height) / 2 + font_ascent;
 	min_baseline = font_ascent;
 	max_baseline = l.height - font_descent;
 	if (max_baseline < 0)

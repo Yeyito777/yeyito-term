@@ -12,6 +12,8 @@ TEST(exact_grid_bottom_row)
 	ASSERT_EQ(1000, l.width);
 	ASSERT_EQ(22, l.height);      /* includes bottom border/padding */
 	ASSERT_EQ(18, l.row_height);  /* the rendered terminal row itself */
+	ASSERT_EQ(1, l.content_y);
+	ASSERT_EQ(17, l.content_height);
 	ASSERT_EQ(14, l.baseline);    /* top border + Xft ascent */
 }
 
@@ -23,6 +25,8 @@ TEST(gpu_scaled_bottom_row)
 	ASSERT_EQ(1003, l.width);
 	ASSERT_EQ(22, l.height);
 	ASSERT_EQ(20, l.row_height);
+	ASSERT_EQ(1, l.content_y);
+	ASSERT_EQ(19, l.content_height);
 	ASSERT_EQ(15, l.baseline);    /* vertically centered in actual GPU row */
 }
 
@@ -34,6 +38,8 @@ TEST(clamps_invalid_inputs)
 	ASSERT_EQ(80, l.width);
 	ASSERT_EQ(1, l.height);
 	ASSERT_EQ(1, l.row_height);
+	ASSERT_EQ(0, l.content_y);
+	ASSERT_EQ(1, l.content_height);
 	ASSERT_EQ(0, l.baseline);
 }
 
@@ -44,6 +50,8 @@ TEST(clamps_baseline_to_keep_descenders_visible)
 	ASSERT_EQ(10, l.y);
 	ASSERT_EQ(14, l.height);
 	ASSERT_EQ(2, l.row_height);
+	ASSERT_EQ(1, l.content_y);
+	ASSERT_EQ(1, l.content_height);
 	ASSERT_EQ(10, l.baseline); /* height - descent; avoids bottom clipping */
 }
 

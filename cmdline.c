@@ -127,6 +127,8 @@ static struct {
 	int saved_cursor;
 	int width, height;
 	int row_height;
+	int content_y;
+	int content_height;
 	int baseline;
 	int y;        /* y position in parent */
 	int loaded;
@@ -202,6 +204,8 @@ cmdline_compute_geometry(void)
 	cl.width = l.width;
 	cl.height = l.height;
 	cl.row_height = l.row_height;
+	cl.content_y = l.content_y;
+	cl.content_height = l.content_height;
 	cl.baseline = l.baseline;
 }
 
@@ -267,7 +271,8 @@ cmdline_redraw(void)
 	tx = win.cw / 2;
 
 	if (cl.state == CMDLINE_INPUT) {
-		int cheight = cl.row_height;
+		int cy = cl.content_y;
+		int cheight = cl.content_height;
 
 		/* Draw prefix character (:, /, or ?) */
 		XftDrawStringUtf8(cl.draw, &cl.fg, cl.font, tx, ty,
@@ -299,7 +304,7 @@ cmdline_redraw(void)
 			ex = tx + extents.xOff;
 
 			XftDrawRect(cl.draw, &cl.sel,
-			            sx, 0,
+			            sx, cy,
 			            ex - sx, cheight);
 		}
 
@@ -321,12 +326,12 @@ cmdline_redraw(void)
 		if (cl.cmd_mode == 0) {
 			/* Insert mode: thin bar cursor */
 			XftDrawRect(cl.draw, &cl.curcolor,
-			            cursor_x, 0,
+			            cursor_x, cy,
 			            2, cheight);
 		} else {
 			/* Normal/visual mode: block cursor with inverted char */
 			XftDrawRect(cl.draw, &cl.curcolor,
-			            cursor_x, 0,
+			            cursor_x, cy,
 			            win.cw, cheight);
 			if (cl.cursor < cl.input_len) {
 				int charlen = 1;
