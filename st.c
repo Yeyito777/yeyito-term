@@ -2628,13 +2628,16 @@ tputc(Rune u)
 		c[0] = u;
 		width = len = 1;
 	} else {
-		len = utf8encode(u, c);
+		len = 0;
 		if (!control && (width = wcwidth(u)) == -1)
 			width = 1;
 	}
 
-	if (IS_SET(MODE_PRINT))
+	if (IS_SET(MODE_PRINT)) {
+		if (len == 0)
+			len = utf8encode(u, c);
 		tprinter(c, len);
+	}
 
 	/*
 	 * STR sequence must be checked before anything else
@@ -2649,6 +2652,8 @@ tputc(Rune u)
 			term.esc |= ESC_STR_END;
 			goto check_control_code;
 		}
+		if (len == 0)
+			len = utf8encode(u, c);
 
 		if (strescseq.len+len >= strescseq.siz) {
 			/*
