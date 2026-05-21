@@ -7,3 +7,4 @@ tests/test_cwd
 tests/test_notif
 tests/test_persist
 tests/test_search
+tests/test_cmdline_layout

@@ -21,7 +21,7 @@ vimnav.o: st.h vimnav.h
 sshind.o: sshind.h
 notif.o: sshind.h notif.h
 persist.o: st.h persist.h
-cmdline.o: cmdline.h vimnav.h
+cmdline.o: cmdline.h cmdline_layout.h vimnav.h
 search.o: search.h st.h vimnav.h
 
 $(OBJ): config.h config.mk
@@ -41,7 +41,7 @@ dist: clean
 	mkdir -p st-$(VERSION)
 	mkdir -p st-$(VERSION)/render
 	cp -R FAQ LEGACY TODO LICENSE Makefile README config.mk\
-		config.def.h st.info st.1 arg.h st.h win.h vimnav.h sshind.h notif.h persist.h cmdline.h search.h $(SRC)\
+		config.def.h st.info st.1 arg.h st.h win.h vimnav.h sshind.h notif.h persist.h cmdline.h cmdline_layout.h search.h $(SRC)\
 		st-$(VERSION)
 	cp -R render/gpu.c render/README.md st-$(VERSION)/render
 	tar -cf - st-$(VERSION) | gzip > st-$(VERSION).tar.gz
@@ -127,10 +127,17 @@ tests/test_search.o: tests/test_search.c tests/test.h st.h search.h vimnav.h
 test_search: tests/test_search.o
 	$(CC) -o tests/test_search tests/test_search.o
 
+# cmdline geometry tests (pure helper, no X11 dependency)
+tests/test_cmdline_layout.o: tests/test_cmdline_layout.c tests/test.h cmdline_layout.h
+	$(CC) $(TESTFLAGS) -c tests/test_cmdline_layout.c -o tests/test_cmdline_layout.o
+
+test_cmdline_layout: tests/test_cmdline_layout.o
+	$(CC) -o tests/test_cmdline_layout tests/test_cmdline_layout.o
+
 test_gpu_regressions: st
 	@./tests/test_gpu_regressions.sh
 
-test: test_vimnav test_sshind test_scrollback test_cwd test_notif test_persist test_search
+test: test_vimnav test_sshind test_scrollback test_cwd test_notif test_persist test_search test_cmdline_layout
 	@echo "Running tests..."
 	@./tests/test_vimnav
 	@./tests/test_sshind
@@ -139,8 +146,9 @@ test: test_vimnav test_sshind test_scrollback test_cwd test_notif test_persist t
 	@./tests/test_notif
 	@./tests/test_persist
 	@./tests/test_search
+	@./tests/test_cmdline_layout
 
 clean-tests:
-	rm -f tests/*.o tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search
+	rm -f tests/*.o tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search tests/test_cmdline_layout
 
 .PHONY: all install-hint clean dist install uninstall test test_gpu_regressions clean-tests

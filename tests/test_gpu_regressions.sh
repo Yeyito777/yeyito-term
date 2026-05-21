@@ -130,4 +130,42 @@ if textish < 1800:
     raise SystemExit(f"initial rows vanished or rendered black after later redraw: only {textish} text-like pixels")
 PY
 
-echo "GPU regression tests passed: initial full-size mapping and preserved redraw content"
+# The vim-style command line is an Xft child overlay even when the grid is drawn
+# by the GPU.  It should align with the actual rendered bottom row, including
+# descenders, rather than stale integer-grid geometry.
+xenv -e "$env_name" key Shift+Escape >/dev/null
+sleep 0.1
+xenv -e "$env_name" type ':' >/dev/null
+sleep 0.1
+xenv -e "$env_name" type 'echo glyphs gjpqy' >/dev/null
+sleep 0.2
+cmdshot="$tmpdir/cmdline.png"
+xenv screenshot -e "$env_name" -o "$cmdshot" >/dev/null
+
+python3 - "$cmdshot" <<'PY'
+import sys
+from PIL import Image
+
+shot = sys.argv[1]
+im = Image.open(shot).convert('RGB')
+w, h = im.size
+
+def textish_in_band(y1, y2):
+    count = 0
+    for y in range(max(0, y1), min(h, y2)):
+        for x in range(8, min(w, 520)):
+            r, g, b = im.getpixel((x, y))
+            if r + g + b > 300 or (r > 120 and g < 100 and b < 100) or (g > 120 and r < 120):
+                count += 1
+    return count
+
+bottom42 = textish_in_band(h - 42, h)
+bottom14 = textish_in_band(h - 14, h)
+
+if bottom42 < 250:
+    raise SystemExit(f"cmdline text was not visible at the bottom: only {bottom42} text-like pixels")
+if bottom14 < 20:
+    raise SystemExit(f"cmdline descenders/bottom strokes look clipped: only {bottom14} low pixels")
+PY
+
+echo "GPU regression tests passed: initial full-size mapping, preserved redraw content, and cmdline bottom alignment"

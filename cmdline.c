@@ -11,6 +11,7 @@
 #include <X11/keysym.h>
 
 #include "cmdline.h"
+#include "cmdline_layout.h"
 #include "notif.h"
 #include "vimnav.h"
 
@@ -65,6 +66,8 @@ extern int debug_mode;
 extern int tisaltscreen(void);
 extern void xsetsel(char *str);
 extern void xclipcopy(void);
+extern int xdrawrowtop(int);
+extern int xdrawrowbottom(int);
 
 /* Minimal Term redeclaration for term.scr access (same pattern as vimnav.c) */
 typedef struct {
@@ -123,6 +126,8 @@ static struct {
 	int saved_len;
 	int saved_cursor;
 	int width, height;
+	int row_height;
+	int baseline;
 	int y;        /* y position in parent */
 	int loaded;
 	char prefix;  /* ':' for command, '/' for forward search, '?' for backward */
@@ -185,11 +190,19 @@ cmdline_load_resources(void)
 static void
 cmdline_compute_geometry(void)
 {
-	int bpx = (win.h - win.th) / 2;
+	int row = term.row > 0 ? term.row - 1 : 0;
+	CmdlineLayout l = cmdline_layout(win.w, win.h,
+	                                  xdrawrowtop(row),
+	                                  xdrawrowbottom(row),
+	                                  cl.font ? cl.font->ascent : win.ch,
+	                                  cl.font ? cl.font->descent : 0,
+	                                  cmdline_border_top);
 
-	cl.y = bpx + win.th - win.ch;
-	cl.width = win.w;
-	cl.height = win.h - cl.y;
+	cl.y = l.y;
+	cl.width = l.width;
+	cl.height = l.height;
+	cl.row_height = l.row_height;
+	cl.baseline = l.baseline;
 }
 
 void
@@ -250,11 +263,11 @@ cmdline_redraw(void)
 	/* Draw top border line */
 	XftDrawRect(cl.draw, &cl.border, 0, 0, cl.width, cmdline_border_top);
 
-	ty = cmdline_border_top + cl.font->ascent;
+	ty = cl.baseline;
 	tx = win.cw / 2;
 
 	if (cl.state == CMDLINE_INPUT) {
-		int cheight = cl.font->ascent + cl.font->descent;
+		int cheight = cl.row_height;
 
 		/* Draw prefix character (:, /, or ?) */
 		XftDrawStringUtf8(cl.draw, &cl.fg, cl.font, tx, ty,
@@ -286,7 +299,7 @@ cmdline_redraw(void)
 			ex = tx + extents.xOff;
 
 			XftDrawRect(cl.draw, &cl.sel,
-			            sx, cmdline_border_top,
+			            sx, 0,
 			            ex - sx, cheight);
 		}
 
@@ -308,12 +321,12 @@ cmdline_redraw(void)
 		if (cl.cmd_mode == 0) {
 			/* Insert mode: thin bar cursor */
 			XftDrawRect(cl.draw, &cl.curcolor,
-			            cursor_x, cmdline_border_top,
+			            cursor_x, 0,
 			            2, cheight);
 		} else {
 			/* Normal/visual mode: block cursor with inverted char */
 			XftDrawRect(cl.draw, &cl.curcolor,
-			            cursor_x, cmdline_border_top,
+			            cursor_x, 0,
 			            win.cw, cheight);
 			if (cl.cursor < cl.input_len) {
 				int charlen = 1;
@@ -372,6 +385,11 @@ cmdline_open_with_prefix(char prefix)
 	cl.pending_f = 0;
 	cl.prefix = prefix;
 
+	/* GPU initialization can happen after cmdline_init(), and the GPU renderer may
+	 * use scaled row geometry when the window size is not an exact cell multiple.
+	 * Recompute just before mapping so the overlay tracks the actual rendered
+	 * bottom row instead of the startup/default geometry. */
+	cmdline_resize();
 	XMapRaised(xw.dpy, cl.win);
 	cmdline_redraw();
 

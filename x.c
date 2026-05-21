@@ -403,6 +403,20 @@ xgpuenabled(void)
 }
 
 int
+xdrawrowtop(int row)
+{
+	LIMIT(row, 0, MAX(0, trow() - 1));
+	return gpu.active ? gpucelly(row) : borderpx + row * win.ch;
+}
+
+int
+xdrawrowbottom(int row)
+{
+	LIMIT(row, 0, MAX(0, trow() - 1));
+	return gpu.active ? gpurowbottom(row) : borderpx + (row + 1) * win.ch;
+}
+
+int
 evcol(XEvent *e)
 {
 	int x = e->xbutton.x - borderpx;
