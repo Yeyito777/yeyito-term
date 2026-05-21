@@ -51,6 +51,8 @@
 #define ISCONTROLC1(c)		(BETWEEN(c, 0x80, 0x9f))
 #define ISCONTROL(c)		(ISCONTROLC0(c) || ISCONTROLC1(c))
 #define ISDELIM(u)		(u && wcschr(worddelimiters, u))
+#define likely(x)		__builtin_expect(!!(x), 1)
+#define unlikely(x)		__builtin_expect(!!(x), 0)
 #define TLINE(y)		((y) < term.scr ? term.hist[((y) + term.histi - \
 				term.scr + HISTSIZE + 1) % HISTSIZE] : \
 				term.line[(y) - term.scr])
@@ -2816,8 +2818,8 @@ tputcfastascii(uchar u)
 {
 	Glyph *gp;
 
-	if (!BETWEEN(u, 0x20, 0x7e) || term.esc || IS_SET(MODE_PRINT) ||
-	    IS_SET(MODE_INSERT) || term.trantbl[term.charset] != CS_USA)
+	if (unlikely(!BETWEEN(u, 0x20, 0x7e) || term.esc || IS_SET(MODE_PRINT) ||
+	    IS_SET(MODE_INSERT) || term.trantbl[term.charset] != CS_USA))
 		return 0;
 
 	if (sel.ob.x != -1 && selected(term.c.x, term.c.y))
