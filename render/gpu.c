@@ -52,6 +52,7 @@ typedef struct {
 	double fontpx;
 	int ascent, descent;
 	GLuint atlas, catlas;
+	int catlasready;
 	int atlasw, atlash, penx, peny, rowh;
 	GpuGlyph *glyphs;
 	int glyphlen, glyphcap;
@@ -289,9 +290,7 @@ gpuatlasreset(void)
 	 * 16 MiB memset/upload makes first GPU draw and zoom much cheaper. */
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_ALPHA, gpu.atlasw, gpu.atlash, 0,
 	             GL_ALPHA, GL_UNSIGNED_BYTE, NULL);
-	glBindTexture(GL_TEXTURE_2D, gpu.catlas);
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, gpu.atlasw, gpu.atlash, 0,
-	             GL_BGRA, GL_UNSIGNED_BYTE, NULL);
+	gpu.catlasready = 0;
 	if (gpu.face[FRC_NORMAL]) {
 		gpu.ascent = gpu.face[FRC_NORMAL]->size->metrics.ascender >> 6;
 		gpu.descent = -(gpu.face[FRC_NORMAL]->size->metrics.descender >> 6);
@@ -667,6 +666,11 @@ gpuglyph(Rune rune, int mode)
 	if (g->color) {
 		unsigned char *tight = xmalloc(g->w * g->h * 4), *dst = tight;
 		int row;
+		if (!gpu.catlasready) {
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, gpu.atlasw, gpu.atlash, 0,
+			             GL_BGRA, GL_UNSIGNED_BYTE, NULL);
+			gpu.catlasready = 1;
+		}
 		for (row = 0; row < g->h; row++) {
 			const unsigned char *src = bm->buffer + (row + cropy) * bm->pitch;
 			if (bm->pitch < 0)
