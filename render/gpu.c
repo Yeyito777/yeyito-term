@@ -825,10 +825,6 @@ gpudrawline(Line line, int x1, int y, int x2)
 
 	gpucolor(defaultfg, dfg);
 	gpucolor(defaultbg, dbg);
-	if (gpu.clearedframe && !selactive && !searchactive &&
-	    !IS_SET(MODE_REVERSE) && !debug_mode && y != vimline &&
-	    tlinelen(y) == 0)
-		return;
 	for (x = x1; x < x2; x++) {
 		g = line[x];
 		if (g.mode == ATTR_WDUMMY)
