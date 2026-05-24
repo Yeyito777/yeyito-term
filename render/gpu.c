@@ -42,6 +42,7 @@ typedef struct {
 	int active, doublebuf;
 	int bufferage;
 	int needclear;
+	int clearedframe;
 	unsigned int backage;
 	int damageidx, damagerows;
 	uchar *damage[GPU_DAMAGE_HISTORY];
@@ -853,7 +854,8 @@ gpudrawline(Line line, int x1, int y, int x2)
 		} else if (gpucoloreq(runbg, bg)) {
 			runw += cellw;
 		} else {
-			gpubatchrect(&gpu.bg, runx, basey, runw, rowh, runbg);
+			if (!gpu.clearedframe || !gpucoloreq(runbg, dbg))
+				gpubatchrect(&gpu.bg, runx, basey, runw, rowh, runbg);
 			runx = cellx;
 			runw = cellw;
 			memcpy(runbg, bg, sizeof runbg);
@@ -884,7 +886,7 @@ gpudrawline(Line line, int x1, int y, int x2)
 			gpubatchrect(&gpu.deco, cellx, basey + rowh / 2,
 			             gpucellright(x, 0) - cellx, 1, fg);
 	}
-	if (haverun)
+	if (haverun && (!gpu.clearedframe || !gpucoloreq(runbg, dbg)))
 		gpubatchrect(&gpu.bg, runx, basey, runw, rowh, runbg);
 }
 
