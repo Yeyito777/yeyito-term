@@ -732,7 +732,7 @@ static GpuVertex *
 gpubatchalloc(GpuBatch *b, int n)
 {
 	if (b->len + n > b->cap) {
-		b->cap = MAX(b->cap * 2, b->len + n + 4096);
+		b->cap = MAX(b->cap * 2, b->len + n + 2048);
 		b->v = xrealloc(b->v, b->cap * sizeof *b->v);
 	}
 	GpuVertex *v = &b->v[b->len];
