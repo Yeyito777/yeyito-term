@@ -744,11 +744,17 @@ static void
 gpubatchquad(GpuBatch *b, double x, double y, double w, double h,
              double u1, double v1, double u2, double v2, float c[3])
 {
-	GpuVertex *v = gpubatchalloc(b, 4);
-	v[0] = (GpuVertex){ x,     y,     u1, v1, c[0], c[1], c[2], 1.0f };
-	v[1] = (GpuVertex){ x + w, y,     u2, v1, c[0], c[1], c[2], 1.0f };
-	v[2] = (GpuVertex){ x + w, y + h, u2, v2, c[0], c[1], c[2], 1.0f };
-	v[3] = (GpuVertex){ x,     y + h, u1, v2, c[0], c[1], c[2], 1.0f };
+	GpuVertex *v = gpubatchalloc(b, 6);
+	GpuVertex a = { x,     y,     u1, v1, c[0], c[1], c[2], 1.0f };
+	GpuVertex b0 = { x + w, y,     u2, v1, c[0], c[1], c[2], 1.0f };
+	GpuVertex c0 = { x + w, y + h, u2, v2, c[0], c[1], c[2], 1.0f };
+	GpuVertex d = { x,     y + h, u1, v2, c[0], c[1], c[2], 1.0f };
+	v[0] = a;
+	v[1] = b0;
+	v[2] = c0;
+	v[3] = a;
+	v[4] = c0;
+	v[5] = d;
 }
 
 static void
@@ -792,7 +798,7 @@ gpudrawbatch(GpuBatch *b, int textured)
 	glEnableClientState(GL_COLOR_ARRAY);
 	glVertexPointer(2, GL_FLOAT, sizeof(GpuVertex), voff);
 	glColorPointer(4, GL_FLOAT, sizeof(GpuVertex), coff);
-	glDrawArrays(GL_QUADS, 0, b->len);
+	glDrawArrays(GL_TRIANGLES, 0, b->len);
 	if (textured)
 		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 }
