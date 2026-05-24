@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# create-worktree — create an st worktree for isolated development/testing.
+#
+# Usage:
+#   create-worktree <name>
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source=./worktree-common.sh
+source "$SCRIPT_DIR/worktree-common.sh"
+
+NAME="${1:-}"
+[[ -n "$NAME" ]] || worktree_die "Usage: create-worktree <name>"
+[[ "$NAME" != */* ]] || worktree_die "Pass a worktree name, not a path: $NAME"
+[[ "$NAME" != .* ]] || worktree_die "Pass a branch-safe worktree name, not a hidden path: $NAME"
+
+WORKTREE_DIR="$ST_ROOT/.worktrees/$NAME"
+
+[[ ! -e "$WORKTREE_DIR" ]] || worktree_die "Already exists: $WORKTREE_DIR"
+if git -C "$ST_ROOT" show-ref --verify --quiet "refs/heads/$NAME"; then
+  worktree_die "Branch already exists: $NAME"
+fi
+
+mkdir -p "$ST_ROOT/.worktrees"
+ST_SKIP_POST_CHECKOUT=1 git -C "$ST_ROOT" worktree add "$WORKTREE_DIR" -b "$NAME" HEAD
+
+# Seed the local runtime layout used by scripts/dev/sttest.  Build artifacts are
+# intentionally not copied; st is small enough that each worktree can compile its
+# own binary and object files.
+prepare_isolated_home "$WORKTREE_DIR" >/dev/null
+
+cat <<EOF
+
+  ✓ Created worktree
+  name:   $NAME
+  path:   $WORKTREE_DIR
+  branch: $NAME
+
+  Next:
+    scripts/dev/sttest $NAME --unit
+    scripts/dev/sttest $NAME
+
+EOF

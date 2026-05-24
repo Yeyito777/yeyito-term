@@ -1,0 +1,14 @@
+#!/bin/sh
+# Keep local st checkouts/worktrees ready after branch switches.
+#
+# st tracks this project's config.h, but upstream/default st trees often generate
+# it from config.def.h.  This hook is intentionally tiny: it only fills config.h
+# when missing and avoids building or installing anything during checkout.
+
+[ "${ST_SKIP_POST_CHECKOUT:-}" = "1" ] && exit 0
+
+if [ ! -f config.h ] && [ -f config.def.h ]; then
+  cp config.def.h config.h
+fi
+
+exit 0

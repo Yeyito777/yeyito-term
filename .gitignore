@@ -1,5 +1,13 @@
+# Build output
 *.o
 st
+st-*.tar.gz
+
+# Worktrees and local test runtime
+.worktrees/
+.home/
+.runtime/
+
 tests/test_vimnav
 tests/test_sshind
 tests/test_scrollback

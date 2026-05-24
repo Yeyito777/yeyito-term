@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# sttest — build/test or launch an st worktree in an isolated nested X environment.
+#
+# Usage:
+#   sttest <worktree> [--unit|--gpu|--all] [-- <st-args>]
+#
+# <worktree> can be:
+#   - A bare name:       sttest fix-scrollback
+#   - A relative path:   sttest .worktrees/fix-scrollback
+#   - An absolute path:  sttest /home/.../st/.worktrees/fix-scrollback
+#
+# Modes:
+#   default   Build st, then launch it inside xenv with an isolated HOME.
+#   --unit    Run `make test` only.
+#   --gpu     Run `make test_gpu_regressions` only (uses xenv internally).
+#   --all     Run unit tests and GPU regression tests.
+#
+# Additional arguments after -- are passed to st in launch mode.  If no -e command
+# is supplied, st starts the user's SHELL (or /bin/sh) with HOME set to the
+# worktree-local .home so persistence files do not touch ~/.runtime/st.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source=./worktree-common.sh
+source "$SCRIPT_DIR/worktree-common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: sttest <worktree> [--unit|--gpu|--all] [-- <st-args>]
+EOF
+}
+
+INPUT="${1:-}"
+[[ -n "$INPUT" ]] || { usage >&2; exit 1; }
+shift || true
+
+MODE="launch"
+ST_ARGS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --unit)
+      MODE="unit"
+      shift
+      ;;
+    --gpu|--gpu-regressions)
+      MODE="gpu"
+      shift
+      ;;
+    --all)
+      MODE="all"
+      shift
+      ;;
+    --)
+      shift
+      ST_ARGS=("$@")
+      break
+      ;;
+    *)
+      ST_ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+
+WORKTREE_DIR="$(resolve_worktree_dir "$INPUT")"
+[[ -d "$WORKTREE_DIR" ]] || worktree_die "Not found: $WORKTREE_DIR"
+[[ -f "$WORKTREE_DIR/Makefile" ]] || worktree_die "No Makefile in $WORKTREE_DIR"
+[[ -f "$WORKTREE_DIR/st.c" ]] || worktree_die "No st.c in $WORKTREE_DIR"
+
+WT_NAME="$(basename "$WORKTREE_DIR")"
+
+printf '\n  sttest — %s\n  %s\n\n' "$WT_NAME" "$WORKTREE_DIR"
+
+case "$MODE" in
+  unit)
+    exec make -C "$WORKTREE_DIR" test
+    ;;
+  gpu)
+    exec make -C "$WORKTREE_DIR" test_gpu_regressions
+    ;;
+  all)
+    make -C "$WORKTREE_DIR" test
+    exec make -C "$WORKTREE_DIR" test_gpu_regressions
+    ;;
+esac
+
+command -v xenv >/dev/null 2>&1 || worktree_die "xenv is required for launch mode"
+
+make -C "$WORKTREE_DIR" st
+
+ST_HOME="$(prepare_isolated_home "$WORKTREE_DIR")"
+ENV_NAME="sttest-$WT_NAME-$$"
+
+cleanup() {
+  xenv stop "$ENV_NAME" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+printf '  HOME: %s\n' "$ST_HOME"
+printf '  xenv: %s\n\n' "$ENV_NAME"
+
+xenv start "$ENV_NAME" >/dev/null
+DISPLAY_VALUE="$(xenv display -e "$ENV_NAME")"
+
+if [[ ${#ST_ARGS[@]} -eq 0 ]]; then
+  ST_ARGS=(-e "${SHELL:-/bin/sh}")
+fi
+
+cd "$WORKTREE_DIR"
+export HOME="$ST_HOME"
+export XDG_CONFIG_HOME="$ST_HOME/.config"
+export ST_TEST_WORKTREE="$WORKTREE_DIR"
+env DISPLAY="$DISPLAY_VALUE" "$WORKTREE_DIR/st" "${ST_ARGS[@]}"
