@@ -786,6 +786,8 @@ gpudrawbatch(GpuBatch *b, int textured)
 	coff = &b->v[0].r;
 	if (textured) {
 		glEnable(GL_BLEND);
+		glEnable(GL_ALPHA_TEST);
+		glAlphaFunc(GL_GREATER, 0.0f);
 		glEnable(GL_TEXTURE_2D);
 		glBindTexture(GL_TEXTURE_2D, textured == 2 ? gpu.catlas : gpu.atlas);
 		glBlendFunc(textured == 2 ? GL_ONE : GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -793,6 +795,7 @@ gpudrawbatch(GpuBatch *b, int textured)
 		glTexCoordPointer(2, GL_FLOAT, sizeof(GpuVertex), toff);
 	} else {
 		glDisable(GL_BLEND);
+		glDisable(GL_ALPHA_TEST);
 		glDisable(GL_TEXTURE_2D);
 		glDisableClientState(GL_TEXTURE_COORD_ARRAY);
 	}
