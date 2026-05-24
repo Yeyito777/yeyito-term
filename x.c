@@ -1968,7 +1968,11 @@ xstartdraw(void)
 		gpu.clearedframe = 0;
 		if (gpu.needclear || (gpu.doublebuf && (!gpu.bufferage || gpu.backage == 0 || gpu.backage > GPU_DAMAGE_HISTORY))) {
 			gpucolor(IS_SET(MODE_REVERSE) ? defaultfg : defaultbg, bg);
-			glClearColor(bg[0], bg[1], bg[2], 1.0f);
+			if (!gpu.clearvalid || !gpucoloreq(gpu.clearcolor, bg)) {
+				memcpy(gpu.clearcolor, bg, sizeof gpu.clearcolor);
+				gpu.clearvalid = 1;
+				glClearColor(bg[0], bg[1], bg[2], 1.0f);
+			}
 			glClear(GL_COLOR_BUFFER_BIT);
 			gpu.clearedframe = 1;
 			/*

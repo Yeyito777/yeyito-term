@@ -55,6 +55,8 @@ typedef struct {
 	GLuint atlas, catlas;
 	int catlasready;
 	int atlasw, atlash, penx, peny, rowh;
+	int clearvalid;
+	float clearcolor[3];
 	GpuGlyph *glyphs;
 	int glyphlen, glyphcap;
 	int ascii[4][128];
