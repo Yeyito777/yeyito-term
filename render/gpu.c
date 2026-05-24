@@ -423,8 +423,8 @@ gpuinit(void)
 	gpu.active = 1;
 	gpu.needclear = 1;
 	gpu.fontpx = usedfontsize;
-	gpu.atlasw = 2048;
-	gpu.atlash = 2048;
+		gpu.atlasw = 1024;
+		gpu.atlash = 1024;
 	glGenTextures(1, &gpu.atlas);
 	glBindTexture(GL_TEXTURE_2D, gpu.atlas);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
