@@ -1,0 +1,821 @@
+{
+  "benchmark": "gpu-cpu-llvmpipe-performance",
+  "description": "CPU-backed GPU renderer via Mesa llvmpipe vs Xft",
+  "env": {
+    "LIBGL_ALWAYS_SOFTWARE": "1",
+    "GALLIUM_DRIVER": "llvmpipe",
+    "LP_NUM_THREADS": "1"
+  },
+  "weights": {
+    "wall": 0.7,
+    "cpu": 0.25,
+    "rss": 0.05
+  },
+  "workloads": [
+    {
+      "name": "cursor_updates",
+      "iterations": 120000,
+      "weight": 0.35
+    },
+    {
+      "name": "repaint",
+      "iterations": 1500,
+      "weight": 0.3
+    },
+    {
+      "name": "scroll_ascii",
+      "iterations": 80000,
+      "weight": 0.15
+    },
+    {
+      "name": "scroll_unicode",
+      "iterations": 60000,
+      "weight": 0.1
+    },
+    {
+      "name": "scroll_emoji",
+      "iterations": 25000,
+      "weight": 0.1
+    }
+  ],
+  "total_score": 0.8590552419974766,
+  "summary": [
+    {
+      "workload": "cursor_updates",
+      "iterations": 120000,
+      "weight": 0.35,
+      "xft_wall": 0.2720904649468139,
+      "xft_cpu": 0.130085,
+      "xft_rss": 179024,
+      "gpu_llvmpipe_wall": 0.32602205697912723,
+      "gpu_llvmpipe_cpu": 0.21678199999999997,
+      "gpu_llvmpipe_rss": 331060,
+      "gpu_wall_speedup": 0.8345768610503362,
+      "gpu_cpu_ratio": 1.6664642349233192,
+      "gpu_rss_ratio": 1.8492492626686925,
+      "score": 0.26644100803581877
+    },
+    {
+      "workload": "repaint",
+      "iterations": 1500,
+      "weight": 0.3,
+      "xft_wall": 0.35443488199962303,
+      "xft_cpu": 0.248106,
+      "xft_rss": 185416,
+      "gpu_llvmpipe_wall": 0.4327714859973639,
+      "gpu_llvmpipe_cpu": 0.307273,
+      "gpu_llvmpipe_rss": 339484,
+      "gpu_wall_speedup": 0.818988527358251,
+      "gpu_cpu_ratio": 1.2384746842075565,
+      "gpu_rss_ratio": 1.830931526944816,
+      "score": 0.24073850520303045
+    },
+    {
+      "workload": "scroll_ascii",
+      "iterations": 80000,
+      "weight": 0.15,
+      "xft_wall": 0.5428898659883998,
+      "xft_cpu": 0.444542,
+      "xft_rss": 178944,
+      "gpu_llvmpipe_wall": 0.5430079399957322,
+      "gpu_llvmpipe_cpu": 0.437853,
+      "gpu_llvmpipe_rss": 333852,
+      "gpu_wall_speedup": 0.9997825556522557,
+      "gpu_cpu_ratio": 0.9849530528049093,
+      "gpu_rss_ratio": 1.8656786480686696,
+      "score": 0.14707003387129614
+    },
+    {
+      "workload": "scroll_unicode",
+      "iterations": 60000,
+      "weight": 0.1,
+      "xft_wall": 0.5055459650466219,
+      "xft_cpu": 0.41063399999999994,
+      "xft_rss": 185664,
+      "gpu_llvmpipe_wall": 0.5423605589894578,
+      "gpu_llvmpipe_cpu": 0.439978,
+      "gpu_llvmpipe_rss": 339480,
+      "gpu_wall_speedup": 0.9321215502627441,
+      "gpu_cpu_ratio": 1.0714602297910063,
+      "gpu_rss_ratio": 1.828464322647363,
+      "score": 0.09131568759475328
+    },
+    {
+      "workload": "scroll_emoji",
+      "iterations": 25000,
+      "weight": 0.1,
+      "xft_wall": 0.4526814370183274,
+      "xft_cpu": 0.407205,
+      "xft_rss": 181132,
+      "gpu_llvmpipe_wall": 0.4022221800405532,
+      "gpu_llvmpipe_cpu": 0.31779199999999996,
+      "gpu_llvmpipe_rss": 338628,
+      "gpu_wall_speedup": 1.1254512045374692,
+      "gpu_cpu_ratio": 0.7804226372465957,
+      "gpu_rss_ratio": 1.8695095289623038,
+      "score": 0.11349000729257804
+    }
+  ],
+  "raw": [
+    {
+      "iter": 0,
+      "kept": false,
+      "impl": "gpu_llvmpipe",
+      "workload": "scroll_unicode",
+      "wall": 0.5512582249939442,
+      "cpu": 0.445314,
+      "maxrss": 339472,
+      "status": 0
+    },
+    {
+      "iter": 0,
+      "kept": false,
+      "impl": "gpu_llvmpipe",
+      "workload": "scroll_emoji",
+      "wall": 0.40277517901267856,
+      "cpu": 0.32132799999999995,
+      "maxrss": 338336,
+      "status": 0
+    },
+    {
+      "iter": 0,
+      "kept": false,
+      "impl": "gpu_llvmpipe",
+      "workload": "scroll_ascii",
+      "wall": 0.5693106749677099,
+      "cpu": 0.453229,
+      "maxrss": 333584,
+      "status": 0
+    },
+    {
+      "iter": 0,
+      "kept": false,
+      "impl": "xft",
+      "workload": "cursor_updates",
+      "wall": 0.2693818139960058,
+      "cpu": 0.128188,
+      "maxrss": 178776,
+      "status": 0
+    },
+    {
+      "iter": 0,
+      "kept": false,
+      "impl": "xft",
+      "workload": "repaint",
+      "wall": 0.3554828670457937,
+      "cpu": 0.251177,
+      "maxrss": 185324,
+      "status": 0
+    },
+    {
+      "iter": 0,
+      "kept": false,
+      "impl": "xft",
+      "workload": "scroll_ascii",
+      "wall": 0.5405363679747097,
+      "cpu": 0.440608,
+      "maxrss": 178968,
+      "status": 0
+    },
+    {
+      "iter": 0,
+      "kept": false,
+      "impl": "xft",
+      "workload": "scroll_unicode",
+      "wall": 0.5054982230067253,
+      "cpu": 0.40678,
+      "maxrss": 185468,
+      "status": 0
+    },
+    {
+      "iter": 0,
+      "kept": false,
+      "impl": "gpu_llvmpipe",
+      "workload": "cursor_updates",
+      "wall": 0.326376480050385,
+      "cpu": 0.21737,
+      "maxrss": 331128,
+      "status": 0
+    },
+    {
+      "iter": 0,
+      "kept": false,
+      "impl": "gpu_llvmpipe",
+      "workload": "repaint",
+      "wall": 0.41668718098662794,
+      "cpu": 0.297718,
+      "maxrss": 339436,
+      "status": 0
+    },
+    {
+      "iter": 0,
+      "kept": false,
+      "impl": "xft",
+      "workload": "scroll_emoji",
+      "wall": 0.4597336819861084,
+      "cpu": 0.413385,
+      "maxrss": 181136,
+      "status": 0
+    },
+    {
+      "iter": 1,
+      "kept": false,
+      "impl": "xft",
+      "workload": "scroll_unicode",
+      "wall": 0.5038977900403552,
+      "cpu": 0.40723,
+      "maxrss": 185620,
+      "status": 0
+    },
+    {
+      "iter": 1,
+      "kept": false,
+      "impl": "gpu_llvmpipe",
+      "workload": "scroll_ascii",
+      "wall": 0.5632445830269717,
+      "cpu": 0.452638,
+      "maxrss": 333972,
+      "status": 0
+    },
+    {
+      "iter": 1,
+      "kept": false,
+      "impl": "gpu_llvmpipe",
+      "workload": "cursor_updates",
+      "wall": 0.32922121399315074,
+      "cpu": 0.223459,
+      "maxrss": 330248,
+      "status": 0
+    },
+    {
+      "iter": 1,
+      "kept": false,
+      "impl": "xft",
+      "workload": "scroll_emoji",
+      "wall": 0.45578663097694516,
+      "cpu": 0.410644,
+      "maxrss": 181332,
+      "status": 0
+    },
+    {
+      "iter": 1,
+      "kept": false,
+      "impl": "xft",
+      "workload": "cursor_updates",
+      "wall": 0.2746941309887916,
+      "cpu": 0.131738,
+      "maxrss": 178988,
+      "status": 0
+    },
+    {
+      "iter": 1,
+      "kept": false,
+      "impl": "gpu_llvmpipe",
+      "workload": "scroll_emoji",
+      "wall": 0.41473004600265995,
+      "cpu": 0.33122399999999996,
+      "maxrss": 338756,
+      "status": 0
+    },
+    {
+      "iter": 1,
+      "kept": false,
+      "impl": "xft",
+      "workload": "repaint",
+      "wall": 0.360735961003229,
+      "cpu": 0.254515,
+      "maxrss": 185336,
+      "status": 0
+    },
+    {
+      "iter": 1,
+      "kept": false,
+      "impl": "gpu_llvmpipe",
+      "workload": "scroll_unicode",
+      "wall": 0.5361189210088924,
+      "cpu": 0.432986,
+      "maxrss": 339588,
+      "status": 0
+    },
+    {
+      "iter": 1,
+      "kept": false,
+      "impl": "xft",
+      "workload": "scroll_ascii",
+      "wall": 0.5484895220142789,
+      "cpu": 0.449944,
+      "maxrss": 178864,
+      "status": 0
+    },
+    {
+      "iter": 1,
+      "kept": false,
+      "impl": "gpu_llvmpipe",
+      "workload": "repaint",
+      "wall": 0.42519794404506683,
+      "cpu": 0.30627099999999996,
+      "maxrss": 339096,
+      "status": 0
+    },
+    {
+      "iter": 2,
+      "kept": true,
+      "impl": "xft",
+      "workload": "repaint",
+      "wall": 0.35158145701279864,
+      "cpu": 0.24534599999999998,
+      "maxrss": 185548,
+      "status": 0
+    },
+    {
+      "iter": 2,
+      "kept": true,
+      "impl": "xft",
+      "workload": "scroll_unicode",
+      "wall": 0.5055459650466219,
+      "cpu": 0.40442199999999995,
+      "maxrss": 185728,
+      "status": 0
+    },
+    {
+      "iter": 2,
+      "kept": true,
+      "impl": "gpu_llvmpipe",
+      "workload": "scroll_ascii",
+      "wall": 0.5527393739903346,
+      "cpu": 0.442279,
+      "maxrss": 333992,
+      "status": 0
+    },
+    {
+      "iter": 2,
+      "kept": true,
+      "impl": "gpu_llvmpipe",
+      "workload": "repaint",
+      "wall": 0.4202392890001647,
+      "cpu": 0.29904,
+      "maxrss": 339528,
+      "status": 0
+    },
+    {
+      "iter": 2,
+      "kept": true,
+      "impl": "gpu_llvmpipe",
+      "workload": "cursor_updates",
+      "wall": 0.32422196702100337,
+      "cpu": 0.21678199999999997,
+      "maxrss": 330992,
+      "status": 0
+    },
+    {
+      "iter": 2,
+      "kept": true,
+      "impl": "gpu_llvmpipe",
+      "workload": "scroll_unicode",
+      "wall": 0.5423605589894578,
+      "cpu": 0.435853,
+      "maxrss": 339612,
+      "status": 0
+    },
+    {
+      "iter": 2,
+      "kept": true,
+      "impl": "xft",
+      "workload": "cursor_updates",
+      "wall": 0.27343431900953874,
+      "cpu": 0.129876,
+      "maxrss": 179040,
+      "status": 0
+    },
+    {
+      "iter": 2,
+      "kept": true,
+      "impl": "gpu_llvmpipe",
+      "workload": "scroll_emoji",
+      "wall": 0.39500280999345705,
+      "cpu": 0.31114699999999995,
+      "maxrss": 338808,
+      "status": 0
+    },
+    {
+      "iter": 2,
+      "kept": true,
+      "impl": "xft",
+      "workload": "scroll_emoji",
+      "wall": 0.4564831839525141,
+      "cpu": 0.405578,
+      "maxrss": 181064,
+      "status": 0
+    },
+    {
+      "iter": 2,
+      "kept": true,
+      "impl": "xft",
+      "workload": "scroll_ascii",
+      "wall": 0.5412441719672643,
+      "cpu": 0.44457,
+      "maxrss": 178888,
+      "status": 0
+    },
+    {
+      "iter": 3,
+      "kept": true,
+      "impl": "xft",
+      "workload": "scroll_unicode",
+      "wall": 0.5128628179663792,
+      "cpu": 0.41229099999999996,
+      "maxrss": 185576,
+      "status": 0
+    },
+    {
+      "iter": 3,
+      "kept": true,
+      "impl": "gpu_llvmpipe",
+      "workload": "repaint",
+      "wall": 0.442016733053606,
+      "cpu": 0.31826,
+      "maxrss": 339548,
+      "status": 0
+    },
+    {
+      "iter": 3,
+      "kept": true,
+      "impl": "gpu_llvmpipe",
+      "workload": "scroll_unicode",
+      "wall": 0.5351448080036789,
+      "cpu": 0.560819,
+      "maxrss": 336804,
+      "status": 0
+    },
+    {
+      "iter": 3,
+      "kept": true,
+      "impl": "xft",
+      "workload": "repaint",
+      "wall": 0.35443488199962303,
+      "cpu": 0.248106,
+      "maxrss": 185416,
+      "status": 0
+    },
+    {
+      "iter": 3,
+      "kept": true,
+      "impl": "gpu_llvmpipe",
+      "workload": "cursor_updates",
+      "wall": 0.3290724289836362,
+      "cpu": 0.224038,
+      "maxrss": 331060,
+      "status": 0
+    },
+    {
+      "iter": 3,
+      "kept": true,
+      "impl": "xft",
+      "workload": "scroll_ascii",
+      "wall": 0.5456467180047184,
+      "cpu": 0.444542,
+      "maxrss": 178972,
+      "status": 0
+    },
+    {
+      "iter": 3,
+      "kept": true,
+      "impl": "xft",
+      "workload": "cursor_updates",
+      "wall": 0.2720904649468139,
+      "cpu": 0.131497,
+      "maxrss": 178976,
+      "status": 0
+    },
+    {
+      "iter": 3,
+      "kept": true,
+      "impl": "xft",
+      "workload": "scroll_emoji",
+      "wall": 0.44608532899292186,
+      "cpu": 0.40456499999999995,
+      "maxrss": 181060,
+      "status": 0
+    },
+    {
+      "iter": 3,
+      "kept": true,
+      "impl": "gpu_llvmpipe",
+      "workload": "scroll_emoji",
+      "wall": 0.4056752750184387,
+      "cpu": 0.31779199999999996,
+      "maxrss": 338628,
+      "status": 0
+    },
+    {
+      "iter": 3,
+      "kept": true,
+      "impl": "gpu_llvmpipe",
+      "workload": "scroll_ascii",
+      "wall": 0.5415724430349655,
+      "cpu": 0.43371499999999996,
+      "maxrss": 333764,
+      "status": 0
+    },
+    {
+      "iter": 4,
+      "kept": true,
+      "impl": "xft",
+      "workload": "scroll_emoji",
+      "wall": 0.4551466089906171,
+      "cpu": 0.40990099999999996,
+      "maxrss": 181228,
+      "status": 0
+    },
+    {
+      "iter": 4,
+      "kept": true,
+      "impl": "gpu_llvmpipe",
+      "workload": "scroll_emoji",
+      "wall": 0.4156856780173257,
+      "cpu": 0.326561,
+      "maxrss": 338728,
+      "status": 0
+    },
+    {
+      "iter": 4,
+      "kept": true,
+      "impl": "gpu_llvmpipe",
+      "workload": "scroll_ascii",
+      "wall": 0.5430079399957322,
+      "cpu": 0.437853,
+      "maxrss": 333460,
+      "status": 0
+    },
+    {
+      "iter": 4,
+      "kept": true,
+      "impl": "gpu_llvmpipe",
+      "workload": "scroll_unicode",
+      "wall": 0.5444995700381696,
+      "cpu": 0.43750100000000003,
+      "maxrss": 339480,
+      "status": 0
+    },
+    {
+      "iter": 4,
+      "kept": true,
+      "impl": "xft",
+      "workload": "repaint",
+      "wall": 0.36059992702212185,
+      "cpu": 0.253058,
+      "maxrss": 185440,
+      "status": 0
+    },
+    {
+      "iter": 4,
+      "kept": true,
+      "impl": "xft",
+      "workload": "cursor_updates",
+      "wall": 0.27139943197835237,
+      "cpu": 0.130085,
+      "maxrss": 179024,
+      "status": 0
+    },
+    {
+      "iter": 4,
+      "kept": true,
+      "impl": "xft",
+      "workload": "scroll_unicode",
+      "wall": 0.5088917550165206,
+      "cpu": 0.41063399999999994,
+      "maxrss": 185664,
+      "status": 0
+    },
+    {
+      "iter": 4,
+      "kept": true,
+      "impl": "gpu_llvmpipe",
+      "workload": "repaint",
+      "wall": 0.4327714859973639,
+      "cpu": 0.312353,
+      "maxrss": 339484,
+      "status": 0
+    },
+    {
+      "iter": 4,
+      "kept": true,
+      "impl": "gpu_llvmpipe",
+      "workload": "cursor_updates",
+      "wall": 0.32578451896551996,
+      "cpu": 0.215328,
+      "maxrss": 331352,
+      "status": 0
+    },
+    {
+      "iter": 4,
+      "kept": true,
+      "impl": "xft",
+      "workload": "scroll_ascii",
+      "wall": 0.5472042989567854,
+      "cpu": 0.450565,
+      "maxrss": 179248,
+      "status": 0
+    },
+    {
+      "iter": 5,
+      "kept": true,
+      "impl": "gpu_llvmpipe",
+      "workload": "scroll_emoji",
+      "wall": 0.40139612200437114,
+      "cpu": 0.373814,
+      "maxrss": 336160,
+      "status": 0
+    },
+    {
+      "iter": 5,
+      "kept": true,
+      "impl": "xft",
+      "workload": "repaint",
+      "wall": 0.3604993429617025,
+      "cpu": 0.254031,
+      "maxrss": 185396,
+      "status": 0
+    },
+    {
+      "iter": 5,
+      "kept": true,
+      "impl": "gpu_llvmpipe",
+      "workload": "scroll_unicode",
+      "wall": 0.5416933260275982,
+      "cpu": 0.439978,
+      "maxrss": 339596,
+      "status": 0
+    },
+    {
+      "iter": 5,
+      "kept": true,
+      "impl": "xft",
+      "workload": "scroll_unicode",
+      "wall": 0.5000587219838053,
+      "cpu": 0.403015,
+      "maxrss": 185880,
+      "status": 0
+    },
+    {
+      "iter": 5,
+      "kept": true,
+      "impl": "xft",
+      "workload": "scroll_ascii",
+      "wall": 0.5428898659883998,
+      "cpu": 0.444302,
+      "maxrss": 178944,
+      "status": 0
+    },
+    {
+      "iter": 5,
+      "kept": true,
+      "impl": "xft",
+      "workload": "cursor_updates",
+      "wall": 0.2746098680072464,
+      "cpu": 0.134361,
+      "maxrss": 178952,
+      "status": 0
+    },
+    {
+      "iter": 5,
+      "kept": true,
+      "impl": "gpu_llvmpipe",
+      "workload": "cursor_updates",
+      "wall": 0.32854348002001643,
+      "cpu": 0.217453,
+      "maxrss": 330960,
+      "status": 0
+    },
+    {
+      "iter": 5,
+      "kept": true,
+      "impl": "gpu_llvmpipe",
+      "workload": "repaint",
+      "wall": 0.4327881360077299,
+      "cpu": 0.307273,
+      "maxrss": 339136,
+      "status": 0
+    },
+    {
+      "iter": 5,
+      "kept": true,
+      "impl": "xft",
+      "workload": "scroll_emoji",
+      "wall": 0.4517333050025627,
+      "cpu": 0.407205,
+      "maxrss": 181408,
+      "status": 0
+    },
+    {
+      "iter": 5,
+      "kept": true,
+      "impl": "gpu_llvmpipe",
+      "workload": "scroll_ascii",
+      "wall": 0.5422645150101744,
+      "cpu": 0.438361,
+      "maxrss": 333996,
+      "status": 0
+    },
+    {
+      "iter": 6,
+      "kept": true,
+      "impl": "gpu_llvmpipe",
+      "workload": "scroll_ascii",
+      "wall": 0.5510580569971353,
+      "cpu": 0.43733500000000003,
+      "maxrss": 333852,
+      "status": 0
+    },
+    {
+      "iter": 6,
+      "kept": true,
+      "impl": "gpu_llvmpipe",
+      "workload": "cursor_updates",
+      "wall": 0.32602205697912723,
+      "cpu": 0.213388,
+      "maxrss": 331148,
+      "status": 0
+    },
+    {
+      "iter": 6,
+      "kept": true,
+      "impl": "gpu_llvmpipe",
+      "workload": "scroll_emoji",
+      "wall": 0.4022221800405532,
+      "cpu": 0.312864,
+      "maxrss": 338432,
+      "status": 0
+    },
+    {
+      "iter": 6,
+      "kept": true,
+      "impl": "xft",
+      "workload": "cursor_updates",
+      "wall": 0.27056305401492864,
+      "cpu": 0.129355,
+      "maxrss": 179348,
+      "status": 0
+    },
+    {
+      "iter": 6,
+      "kept": true,
+      "impl": "gpu_llvmpipe",
+      "workload": "repaint",
+      "wall": 0.4280201169895008,
+      "cpu": 0.305969,
+      "maxrss": 339380,
+      "status": 0
+    },
+    {
+      "iter": 6,
+      "kept": true,
+      "impl": "xft",
+      "workload": "scroll_unicode",
+      "wall": 0.501075356034562,
+      "cpu": 0.525129,
+      "maxrss": 185248,
+      "status": 0
+    },
+    {
+      "iter": 6,
+      "kept": true,
+      "impl": "xft",
+      "workload": "repaint",
+      "wall": 0.35137524001765996,
+      "cpu": 0.246619,
+      "maxrss": 185216,
+      "status": 0
+    },
+    {
+      "iter": 6,
+      "kept": true,
+      "impl": "gpu_llvmpipe",
+      "workload": "scroll_unicode",
+      "wall": 0.5489224970224313,
+      "cpu": 0.442061,
+      "maxrss": 339288,
+      "status": 0
+    },
+    {
+      "iter": 6,
+      "kept": true,
+      "impl": "xft",
+      "workload": "scroll_emoji",
+      "wall": 0.4526814370183274,
+      "cpu": 0.407829,
+      "maxrss": 181132,
+      "status": 0
+    },
+    {
+      "iter": 6,
+      "kept": true,
+      "impl": "xft",
+      "workload": "scroll_ascii",
+      "wall": 0.5363561389967799,
+      "cpu": 0.434983,
+      "maxrss": 178928,
+      "status": 0
+    }
+  ]
+}
