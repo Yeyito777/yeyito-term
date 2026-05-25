@@ -348,7 +348,7 @@ gpudamageensure(void)
 }
 
 static void
-gpudisablesync(void)
+gpusetswapinterval(void)
 {
 	typedef void (*SwapIntervalEXT)(Display *, GLXDrawable, int);
 	typedef int (*SwapIntervalMESA)(unsigned int);
@@ -356,19 +356,19 @@ gpudisablesync(void)
 	SwapIntervalEXT ext;
 	SwapIntervalMESA mesa;
 	SwapIntervalSGI sgi;
+	int interval = gpuvsync ? 1 : 0;
 
-	/* Terminal throughput should not be capped by compositor/Xephyr vsync. */
 	ext = (SwapIntervalEXT)glXGetProcAddressARB((const GLubyte *)"glXSwapIntervalEXT");
 	if (ext) {
-		ext(xw.dpy, xw.win, 0);
+		ext(xw.dpy, xw.win, interval);
 		return;
 	}
 	mesa = (SwapIntervalMESA)glXGetProcAddressARB((const GLubyte *)"glXSwapIntervalMESA");
-	if (mesa && mesa(0) == 0)
+	if (mesa && mesa(interval) == 0)
 		return;
 	sgi = (SwapIntervalSGI)glXGetProcAddressARB((const GLubyte *)"glXSwapIntervalSGI");
 	if (sgi)
-		sgi(0);
+		sgi(interval);
 }
 
 static int
@@ -446,7 +446,7 @@ gpuinit(void)
 	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
 	glEnable(GL_BLEND);
 	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-	gpudisablesync();
+	gpusetswapinterval();
 	gpuatlasreset();
 	gpuresize();
 }

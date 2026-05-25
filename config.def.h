@@ -31,6 +31,9 @@ static float chscale = 1.0;
 /* Use the experimental OpenGL/FreeType renderer for the terminal grid. */
 static int gpudraw = 1;
 
+/* Request synchronized GLX swaps when the server exposes swap-control. */
+static int gpuvsync = 1;
+
 /*
  * word delimiter string
  *
