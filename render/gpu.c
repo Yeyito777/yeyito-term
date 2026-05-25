@@ -39,13 +39,6 @@ typedef struct {
 } GpuBatch;
 
 typedef struct {
-	char *libglalwayssoftware;
-	char *galliumdriver;
-	int hadlibglalwayssoftware;
-	int hadgalliumdriver;
-} GpuSoftwareEnv;
-
-typedef struct {
 	int active, doublebuf;
 	int bufferage;
 	int needclear;
@@ -385,47 +378,8 @@ gpucoloreq(const float a[3], const float b[3])
 }
 
 static void
-gpuforcesoftwarebegin(GpuSoftwareEnv *env)
-{
-	const char *value;
-
-	memset(env, 0, sizeof *env);
-	if ((value = getenv("LIBGL_ALWAYS_SOFTWARE"))) {
-		env->hadlibglalwayssoftware = 1;
-		env->libglalwayssoftware = xstrdup(value);
-	}
-	if ((value = getenv("GALLIUM_DRIVER"))) {
-		env->hadgalliumdriver = 1;
-		env->galliumdriver = xstrdup(value);
-	}
-
-	/* Force this terminal's GLX context onto Mesa's CPU renderer so GPU drawing
-	 * can be tested on machines that also have hardware OpenGL available.  Restore
-	 * the process environment after context creation so child shells/apps launched
-	 * from st do not inherit software-GL settings. */
-	setenv("LIBGL_ALWAYS_SOFTWARE", "1", 1);
-	setenv("GALLIUM_DRIVER", "llvmpipe", 1);
-}
-
-static void
-gpuforcesoftwareend(GpuSoftwareEnv *env)
-{
-	if (env->hadlibglalwayssoftware)
-		setenv("LIBGL_ALWAYS_SOFTWARE", env->libglalwayssoftware, 1);
-	else
-		unsetenv("LIBGL_ALWAYS_SOFTWARE");
-	if (env->hadgalliumdriver)
-		setenv("GALLIUM_DRIVER", env->galliumdriver, 1);
-	else
-		unsetenv("GALLIUM_DRIVER");
-	free(env->libglalwayssoftware);
-	free(env->galliumdriver);
-}
-
-static void
 gpuinit(void)
 {
-	GpuSoftwareEnv swenv;
 	XVisualInfo templ, *vi;
 	int nvi = 0;
 	long vid;
@@ -433,15 +387,14 @@ gpuinit(void)
 
 	if (!gpudraw)
 		return;
-	gpuforcesoftwarebegin(&swenv);
 	vid = XVisualIDFromVisual(xw.vis);
 	templ.visualid = vid;
 	vi = XGetVisualInfo(xw.dpy, VisualIDMask, &templ, &nvi);
 	if (!vi)
-		goto done;
+		return;
 	if (glXGetConfig(xw.dpy, vi, GLX_USE_GL, &usegl) || !usegl) {
 		XFree(vi);
-		goto done;
+		return;
 	}
 	glXGetConfig(xw.dpy, vi, GLX_DOUBLEBUFFER, &gpu.doublebuf);
 	{
@@ -451,24 +404,24 @@ gpuinit(void)
 	gpu.ctx = glXCreateContext(xw.dpy, vi, NULL, True);
 	XFree(vi);
 	if (!gpu.ctx)
-		goto done;
+		return;
 	/* GLX swaps can clobber the X event mask on some servers/Xephyr; restore
 	 * the st mask after creating the context so keyboard/mouse input stays live. */
 	XChangeWindowAttributes(xw.dpy, xw.win, CWEventMask, &xw.attrs);
 	if (!glXMakeCurrent(xw.dpy, xw.win, gpu.ctx)) {
 		glXDestroyContext(xw.dpy, gpu.ctx);
 		memset(&gpu, 0, sizeof gpu);
-		goto done;
+		return;
 	}
 	if (FT_Init_FreeType(&gpu.ft)) {
 		glXDestroyContext(xw.dpy, gpu.ctx);
 		memset(&gpu, 0, sizeof gpu);
-		goto done;
+		return;
 	}
 	gpu.face[FRC_NORMAL] = gpuloadface(&dc.font);
 	if (!gpu.face[FRC_NORMAL]) {
 		gpudestroy();
-		goto done;
+		return;
 	}
 	gpu.active = 1;
 	gpu.needclear = 1;
@@ -496,9 +449,6 @@ gpuinit(void)
 	gpudisablesync();
 	gpuatlasreset();
 	gpuresize();
-
-done:
-	gpuforcesoftwareend(&swenv);
 }
 
 static void
