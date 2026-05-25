@@ -817,7 +817,7 @@ gpudrawline(Line line, int x1, int y, int x2)
 	int x, haverun = 0, searchactive = search_active(), selactive = selection_active();
 	int basey = gpucelly(y), rowh = gpurowbottom(y) - basey;
 	int baseline = gpubaseline(y), runx = 0, runw = 0;
-	int vimline = vimnav_curline_y();
+	int vimline = vimnav.mode ? vimnav_curline_y() : -1;
 	Glyph g;
 	float fg[3], bg[3], dfg[3], dbg[3], runbg[3], white[3] = {1.0f, 1.0f, 1.0f};
 	GpuGlyph *gg;
