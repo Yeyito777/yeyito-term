@@ -2,6 +2,7 @@
 *.o
 st
 st-*.tar.gz
+.build/
 
 # Worktrees and local test runtime
 .worktrees/

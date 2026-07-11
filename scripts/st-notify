@@ -71,6 +71,34 @@ if [ -z "$pid" ] || [ -z "$msg" ]; then
     usage
 fi
 
+# Native macOS backend: walk from the supplied process (usually $$ in the
+# shell) up to its st parent and send the existing wire payload over the
+# per-instance Unix socket. No XQuartz, xdotool, or xprop is involved.
+if [ "$(uname -s)" = "Darwin" ]; then
+    target="$pid"
+    socket=""
+    while [ -n "$target" ] && [ "$target" -gt 1 ] 2>/dev/null; do
+        candidate="$HOME/.runtime/st/st-$target/control.sock"
+        if [ -S "$candidate" ]; then
+            socket="$candidate"
+            break
+        fi
+        target=$(ps -o ppid= -p "$target" 2>/dev/null | tr -d ' ')
+    done
+    if [ -z "$socket" ]; then
+        echo "No native st control socket found for PID $pid" >&2
+        exit 1
+    fi
+
+    if [ -n "$meta" ]; then
+        val="$(printf '%s\x1e%s' "$meta" "$msg")"
+    else
+        val="$msg"
+    fi
+    printf 'notify\n%s' "$val" | nc -U "$socket"
+    exit $?
+fi
+
 # Find X window with matching _NET_WM_PID
 wid=$(xdotool search --pid "$pid" 2>/dev/null | head -1)
 

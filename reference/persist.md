@@ -177,7 +177,8 @@ On restore, `persist_restore()` deletes the consumed save directory after readin
 void persist_init(pid_t pid);          // mkdir runtime dir, redirect stderr, set initialized
 void persist_register(void);           // XChangeProperty _DWM_SAVE_ARGV
 void persist_save(void);               // write scrollback + generic data files
-void persist_restore(const char *dir, int *out_col, int *out_row); // read saved state, populate term buffers, output saved dims, rm dir
+void persist_restore(const char *dir, unsigned int *out_col,
+                     unsigned int *out_row); // read saved state, populate term buffers, output saved dims, rm dir
 void persist_cleanup(void);            // rm -rf runtime dir
 int  persist_active(void);             // whether persist_init() was called
 void persist_set_cwd(const char *cwd);    // store CWD in memory (NULL clears)

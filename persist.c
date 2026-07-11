@@ -276,7 +276,8 @@ persist_save(void)
 }
 
 void
-persist_restore(const char *dir, int *out_col, int *out_row)
+persist_restore(const char *dir, unsigned int *out_col,
+		unsigned int *out_row)
 {
 	char path[PATH_MAX];
 	FILE *f;

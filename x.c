@@ -2209,6 +2209,12 @@ xbell(void)
 }
 
 void
+xcleanup(void)
+{
+	gpudestroy();
+}
+
+void
 focus(XEvent *ev)
 {
 	XFocusChangeEvent *e = &ev->xfocus;

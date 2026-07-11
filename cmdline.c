@@ -4,17 +4,24 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
+#ifdef ST_NATIVE_MACOS
+#include "macos/keysyms.h"
+#include "macos/native.h"
+#else
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
 #include <X11/Xft/Xft.h>
 #include <X11/keysym.h>
+#endif
 
 #include "cmdline.h"
 #include "cmdline_layout.h"
 #include "notif.h"
 #include "vimnav.h"
 
+#ifndef ST_NATIVE_MACOS
 typedef XftDraw *Draw;
 typedef XftColor Color;
 
@@ -62,6 +69,7 @@ extern TermWindow win;
 extern DC dc;
 extern char *usedfont;
 extern double usedfontsize;
+#endif
 extern int debug_mode;
 extern int tisaltscreen(void);
 extern void xsetsel(char *str);
@@ -99,12 +107,14 @@ enum {
 };
 
 static struct {
+#ifndef ST_NATIVE_MACOS
 	Window win;
 	Drawable buf;
 	XftDraw *draw;
 	GC gc;
 	XftFont *font;
 	XftColor fg, bg, err, curcolor, border, sel;
+#endif
 	int state;
 	int cmd_mode; /* 0 = insert, 1 = normal, 2 = visual */
 	int anchor;   /* visual mode anchor (byte offset) */
@@ -137,6 +147,7 @@ static struct {
 	int search_vim_x, search_vim_y, search_scr;
 } cl;
 
+#ifndef ST_NATIVE_MACOS
 /* Open font at terminal's native pixel size */
 static XftFont *
 cmdline_load_font(void)
@@ -165,6 +176,7 @@ cmdline_load_font(void)
 		FcPatternDestroy(match);
 	return f;
 }
+#endif
 
 static int
 cmdline_load_resources(void)
@@ -172,6 +184,10 @@ cmdline_load_resources(void)
 	if (cl.loaded)
 		return 1;
 
+#ifdef ST_NATIVE_MACOS
+	cl.loaded = 1;
+	return 1;
+#else
 	cl.font = cmdline_load_font();
 	if (!cl.font) {
 		fprintf(stderr, "cmdline: can't open font\n");
@@ -187,17 +203,24 @@ cmdline_load_resources(void)
 
 	cl.loaded = 1;
 	return 1;
+#endif
 }
 
 static void
 cmdline_compute_geometry(void)
 {
 	int row = term.row > 0 ? term.row - 1 : 0;
+#ifdef ST_NATIVE_MACOS
+	int ascent = (int)ceil(mac_renderer_ascent());
+	int descent = (int)ceil(mac_renderer_descent());
+#else
+	int ascent = cl.font ? cl.font->ascent : win.ch;
+	int descent = cl.font ? cl.font->descent : 0;
+#endif
 	CmdlineLayout l = cmdline_layout(win.w, win.h,
 	                                  xdrawrowtop(row),
 	                                  xdrawrowbottom(row),
-	                                  cl.font ? cl.font->ascent : win.ch,
-	                                  cl.font ? cl.font->descent : 0,
+	                                  ascent, descent,
 	                                  cmdline_border_top);
 
 	cl.y = l.y;
@@ -212,14 +235,17 @@ cmdline_compute_geometry(void)
 void
 cmdline_init(void)
 {
+#ifndef ST_NATIVE_MACOS
 	XSetWindowAttributes attrs;
 	XGCValues gcvalues;
+#endif
 
 	if (!cmdline_load_resources())
 		return;
 
 	cmdline_compute_geometry();
 
+#ifndef ST_NATIVE_MACOS
 	attrs.background_pixel = cl.bg.pixel;
 	attrs.border_pixel = cl.bg.pixel;
 	attrs.override_redirect = True;
@@ -243,6 +269,7 @@ cmdline_init(void)
 
 	gcvalues.graphics_exposures = False;
 	cl.gc = XCreateGC(xw.dpy, cl.win, GCGraphicsExposures, &gcvalues);
+#endif
 
 	cl.state = CMDLINE_HIDDEN;
 
@@ -254,6 +281,9 @@ cmdline_init(void)
 static void
 cmdline_redraw(void)
 {
+#ifdef ST_NATIVE_MACOS
+	macos_request_redraw();
+#else
 	int tx, ty;
 	int cursor_x;
 	XGlyphInfo extents;
@@ -354,6 +384,7 @@ cmdline_redraw(void)
 	/* Copy buffer to window */
 	XCopyArea(xw.dpy, cl.buf, cl.win, cl.gc,
 	          0, 0, cl.width, cl.height, 0, 0);
+#endif
 }
 
 static void
@@ -395,7 +426,9 @@ cmdline_open_with_prefix(char prefix)
 	 * Recompute just before mapping so the overlay tracks the actual rendered
 	 * bottom row instead of the startup/default geometry. */
 	cmdline_resize();
+#ifndef ST_NATIVE_MACOS
 	XMapRaised(xw.dpy, cl.win);
+#endif
 	cmdline_redraw();
 
 	if (debug_mode)
@@ -463,7 +496,10 @@ cmdline_close(void)
 	cl.pending_op = 0;
 	cl.pending_textobj = 0;
 	cl.pending_f = 0;
+#ifndef ST_NATIVE_MACOS
 	XUnmapWindow(xw.dpy, cl.win);
+#endif
+	cmdline_redraw();
 
 	if (debug_mode)
 		fprintf(stderr, "cmdline: closed\n");
@@ -1950,8 +1986,30 @@ cmdline_handle_key(unsigned long ksym, unsigned int state,
 void
 cmdline_draw(void)
 {
-	if (cl.state != CMDLINE_HIDDEN)
+	if (cl.state != CMDLINE_HIDDEN) {
+#ifdef ST_NATIVE_MACOS
+		MacCmdlineSnapshot snapshot = {
+			.state = cl.state,
+			.mode = cl.cmd_mode,
+			.prefix = cl.prefix,
+			.input = cl.input,
+			.input_len = cl.input_len,
+			.cursor = cl.cursor,
+			.anchor = cl.anchor,
+			.error = cl.errmsg,
+			.x = 0,
+			.y = cl.y,
+			.width = cl.width,
+			.height = cl.height,
+			.content_y = cl.content_y,
+			.content_height = cl.content_height,
+			.baseline = cl.baseline,
+		};
+		macos_draw_cmdline_snapshot(&snapshot);
+#else
 		cmdline_redraw();
+#endif
+	}
 }
 
 void
@@ -1964,6 +2022,7 @@ cmdline_resize(void)
 	cmdline_compute_geometry();
 
 	if (cl.y != old_y || cl.width != old_w || cl.height != old_h) {
+#ifndef ST_NATIVE_MACOS
 		XMoveResizeWindow(xw.dpy, cl.win, 0, cl.y, cl.width, cl.height);
 
 		if (cl.draw)
@@ -1974,6 +2033,7 @@ cmdline_resize(void)
 		cl.buf = XCreatePixmap(xw.dpy, cl.win, cl.width, cl.height,
 		                        XDefaultDepth(xw.dpy, xw.scr));
 		cl.draw = XftDrawCreate(xw.dpy, cl.buf, xw.vis, xw.cmap);
+#endif
 
 		if (debug_mode)
 			fprintf(stderr, "cmdline: resized (y=%d, %dx%d)\n",

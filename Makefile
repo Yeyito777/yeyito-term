@@ -4,8 +4,17 @@
 
 include config.mk
 
+DIST_SRC = st.c x.c vimnav.c sshind.c notif.c persist.c cmdline.c search.c
+
+ifeq ($(UNAME_S),Darwin)
+SRC = st.c vimnav.c persist.c cmdline.c search.c
+OBJC_SRC = macos/backend.m macos/renderer.m
+OBJ = $(SRC:.c=.o) $(OBJC_SRC:.m=.o)
+else
 SRC = st.c x.c vimnav.c sshind.c notif.c persist.c cmdline.c search.c
 OBJ = $(SRC:.c=.o)
+endif
+APP = .build/st.app
 
 all: st install-hint
 
@@ -15,8 +24,13 @@ config.h:
 .c.o:
 	$(CC) $(STCFLAGS) -c $<
 
+.m.o:
+	$(CC) $(STOBJCFLAGS) -c $< -o $@
+
 st.o: config.h st.h win.h vimnav.h persist.h
 x.o: arg.h config.h st.h win.h sshind.h notif.h persist.h cmdline.h search.h render/gpu.c
+macos/backend.o: macos/backend.m macos/native.h macos/renderer.h macos/keysyms.h config.h st.h win.h
+macos/renderer.o: macos/renderer.m macos/renderer.h
 vimnav.o: st.h vimnav.h
 sshind.o: sshind.h
 notif.o: sshind.h notif.h
@@ -29,21 +43,58 @@ $(OBJ): config.h config.mk
 st: $(OBJ)
 	$(CC) -o $@ $(OBJ) $(STLDFLAGS)
 
+app: st macos/Info.plist macos/st.icns
+	rm -rf $(APP)
+	mkdir -p $(APP)/Contents/MacOS $(APP)/Contents/Resources/bin
+	cp -f st $(APP)/Contents/MacOS/st
+	chmod 755 $(APP)/Contents/MacOS/st
+	cp -f macos/Info.plist $(APP)/Contents/Info.plist
+	cp -f macos/st.icns $(APP)/Contents/Resources/st.icns
+	cp -f scripts/st-notify scripts/st-save-cmd $(APP)/Contents/Resources/bin/
+	chmod 755 $(APP)/Contents/Resources/bin/st-notify $(APP)/Contents/Resources/bin/st-save-cmd
+	codesign --force --deep --sign - $(APP)
+
+install-app: app
+	mkdir -p $(HOME)/Applications
+	@if [ -d $(HOME)/Applications/st.app ]; then \
+		/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -u $(HOME)/Applications/st.app; \
+	fi
+	rm -rf $(HOME)/Applications/st.app
+	ditto $(APP) $(HOME)/Applications/st.app
+	touch $(HOME)/Applications/st.app
+	/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f $(HOME)/Applications/st.app
+	mdimport $(HOME)/Applications/st.app
+	rm -rf $(APP)
+	@echo "Installed $(HOME)/Applications/st.app"
+
+uninstall-app:
+	@if [ -d $(HOME)/Applications/st.app ]; then \
+		/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -u $(HOME)/Applications/st.app; \
+	fi
+	rm -rf $(HOME)/Applications/st.app
+
 install-hint:
-	@echo "Build complete. Install changes with: sudo make install"
+	@$(if $(filter Darwin,$(UNAME_S)),echo "Build complete. Install the native app with: make install-app",echo "Build complete. Install changes with: sudo make install")
 
 clean:
 	rm -f st $(OBJ) st-$(VERSION).tar.gz
+	rm -f x.o sshind.o notif.o macos/backend.o macos/renderer.o
 	rm -f a.out
 	rm -f tests/*.o tests/test_vimnav
+	rm -rf .build
 
 dist: clean
 	mkdir -p st-$(VERSION)
 	mkdir -p st-$(VERSION)/render
-	cp -R FAQ LEGACY TODO LICENSE Makefile README config.mk\
-		config.def.h st.info st.1 arg.h st.h win.h vimnav.h sshind.h notif.h persist.h cmdline.h cmdline_layout.h search.h $(SRC)\
+	mkdir -p st-$(VERSION)/macos st-$(VERSION)/scripts
+	cp -R CLAUDE.md Makefile README.md TODO.md config.mk\
+		config.def.h st.info st.1 arg.h st.h win.h vimnav.h sshind.h notif.h persist.h cmdline.h cmdline_layout.h search.h $(DIST_SRC)\
 		st-$(VERSION)
 	cp -R render/gpu.c render/README.md st-$(VERSION)/render
+	cp -R macos/README.md macos/Info.plist macos/backend.m macos/keysyms.h macos/native.h\
+		macos/renderer.h macos/renderer.m macos/st-icon.png macos/st.icns\
+		st-$(VERSION)/macos
+	cp -R scripts/st-notify scripts/st-save-cmd st-$(VERSION)/scripts
 	tar -cf - st-$(VERSION) | gzip > st-$(VERSION).tar.gz
 	rm -rf st-$(VERSION)
 
@@ -63,6 +114,8 @@ install: st
 
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/st
+	rm -f $(DESTDIR)$(PREFIX)/bin/st-notify
+	rm -f $(DESTDIR)$(PREFIX)/bin/st-save-cmd
 	rm -f $(DESTDIR)$(MANPREFIX)/man1/st.1
 
 # Testing
@@ -151,4 +204,4 @@ test: test_vimnav test_sshind test_scrollback test_cwd test_notif test_persist t
 clean-tests:
 	rm -f tests/*.o tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search tests/test_cmdline_layout
 
-.PHONY: all install-hint clean dist install uninstall test test_gpu_regressions clean-tests
+.PHONY: all app install-app uninstall-app install-hint clean dist install uninstall test test_gpu_regressions clean-tests

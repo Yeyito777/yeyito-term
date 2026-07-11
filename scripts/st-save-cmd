@@ -2,8 +2,9 @@
 # st-save-cmd - Tell an st terminal what command to use for persist restore
 # Usage: st-save-cmd <st-pid> "command to restore"
 #
-# Sets the _ST_SAVE_CMD X11 property on the st window. When st saves state
-# for dwm persist, it uses this command instead of the shell-reported altcmd.
+# Uses the native per-instance control socket on macOS and the _ST_SAVE_CMD
+# X11 property on Linux. When st saves state, it uses this command instead of
+# the shell-reported altcmd.
 # This lets programs like Claude Code specify their own restore command
 # (e.g. "claude --resume <session-id>") without st needing to know about them.
 
@@ -30,6 +31,25 @@ cmd="$2"
 
 if [ -z "$pid" ] || [ -z "$cmd" ]; then
     usage
+fi
+
+if [ "$(uname -s)" = "Darwin" ]; then
+    target="$pid"
+    socket=""
+    while [ -n "$target" ] && [ "$target" -gt 1 ] 2>/dev/null; do
+        candidate="$HOME/.runtime/st/st-$target/control.sock"
+        if [ -S "$candidate" ]; then
+            socket="$candidate"
+            break
+        fi
+        target=$(ps -o ppid= -p "$target" 2>/dev/null | tr -d ' ')
+    done
+    if [ -z "$socket" ]; then
+        echo "No native st control socket found for PID $pid" >&2
+        exit 1
+    fi
+    printf 'savecmd\n%s' "$cmd" | nc -U "$socket"
+    exit $?
 fi
 
 # Find X window with matching _NET_WM_PID

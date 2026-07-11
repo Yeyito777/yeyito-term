@@ -796,6 +796,7 @@ reapchild(void)
 		return;
 
 	/* Shell exited — save and cleanup persist dir */
+	xcleanup();
 	persist_save();
 	persist_cleanup();
 
@@ -910,6 +911,7 @@ ttyread(void)
 			/* Linux ptys report EIO when the slave side closes.  This can
 			 * arrive before SIGCHLD is observed; treat it as normal child exit
 			 * instead of turning short-lived -e commands into terminal errors. */
+			xcleanup();
 			persist_save();
 			persist_cleanup();
 			exit(0);

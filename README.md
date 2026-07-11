@@ -1,4 +1,40 @@
-# To make this terminal work it needs to work well with zsh. Put this in your .zshrc:
+# Building
+
+On Linux, install the X11, Xft, Fontconfig, FreeType, and OpenGL development
+packages for your distribution, then run:
+
+```sh
+make clean
+make
+```
+
+On macOS, `st` uses a native AppKit window, CoreText font shaping, and a Metal
+GPU renderer. XQuartz is not used or required. Xcode's command-line tools are
+the only build dependency:
+
+The native backend defaults to the same typography as the local Terminal
+`Basic` profile: SF Mono Regular at 11 points with Terminal's standard cell
+spacing. Passing `-f` still overrides the native font for an individual launch.
+
+```sh
+make clean
+make
+```
+
+To create a signed macOS application bundle and install it for the current
+user, run:
+
+```sh
+make install-app
+```
+
+The app is installed at `~/Applications/st.app`, appears in Spotlight as `st`,
+uses an ordinary macOS window that tiling managers can control, and bundles the
+`st-notify` and `st-save-cmd` helper scripts.
+
+# Zsh integration
+
+To make this terminal work well with zsh, put this in your `.zshrc`:
 
 ```zsh
 bindkey -v
@@ -85,7 +121,7 @@ bindkey -M vicmd 'K' up-line-or-history
 # Make zsh's visual mode highlight invisible (st renders the selection instead)
 zle_highlight=(region:none)
 
-# Report cwd to st (exposed as _ST_CWD X property)
+# Report cwd to st (native window metadata on macOS, _ST_CWD on X11)
 function chpwd {
   printf '\033]779;%s\a' "$PWD"
 }
