@@ -8,6 +8,9 @@ not use XQuartz or link against X11.
   the local control socket used by the bundled helper scripts.
 - `renderer.m` and `renderer.h` implement the Metal renderer and CoreText glyph
   atlas/font metrics.
+- `pty.m` and `pty.h` provide ordered, nonblocking PTY output. AppKit input
+  handlers enqueue bytes here so a child that stops reading cannot freeze the
+  window.
 - `native.h` is the small C bridge used by platform-neutral modules such as the
   command-line overlay.
 - `keysyms.h` provides the minimal X11-compatible key values needed by shared

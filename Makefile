@@ -8,7 +8,7 @@ DIST_SRC = st.c x.c vimnav.c sshind.c notif.c persist.c cmdline.c search.c
 
 ifeq ($(UNAME_S),Darwin)
 SRC = st.c vimnav.c persist.c cmdline.c search.c
-OBJC_SRC = macos/backend.m macos/renderer.m
+OBJC_SRC = macos/backend.m macos/renderer.m macos/pty.m
 OBJ = $(SRC:.c=.o) $(OBJC_SRC:.m=.o)
 else
 SRC = st.c x.c vimnav.c sshind.c notif.c persist.c cmdline.c search.c
@@ -29,8 +29,9 @@ config.h:
 
 st.o: config.h st.h win.h vimnav.h persist.h
 x.o: arg.h config.h st.h win.h sshind.h notif.h persist.h cmdline.h search.h render/gpu.c
-macos/backend.o: macos/backend.m macos/native.h macos/renderer.h macos/keysyms.h config.h st.h win.h
+macos/backend.o: macos/backend.m macos/native.h macos/renderer.h macos/pty.h macos/keysyms.h config.h st.h win.h
 macos/renderer.o: macos/renderer.m macos/renderer.h
+macos/pty.o: macos/pty.m macos/pty.h
 vimnav.o: st.h vimnav.h
 sshind.o: sshind.h
 notif.o: sshind.h notif.h
@@ -92,7 +93,7 @@ dist: clean
 		st-$(VERSION)
 	cp -R render/gpu.c render/README.md st-$(VERSION)/render
 	cp -R macos/README.md macos/Info.plist macos/backend.m macos/keysyms.h macos/native.h\
-		macos/renderer.h macos/renderer.m macos/st-icon.png macos/st.icns\
+		macos/renderer.h macos/renderer.m macos/pty.h macos/pty.m macos/st-icon.png macos/st.icns\
 		st-$(VERSION)/macos
 	cp -R scripts/st-notify scripts/st-save-cmd st-$(VERSION)/scripts
 	tar -cf - st-$(VERSION) | gzip > st-$(VERSION).tar.gz
@@ -187,10 +188,21 @@ tests/test_cmdline_layout.o: tests/test_cmdline_layout.c tests/test.h cmdline_la
 test_cmdline_layout: tests/test_cmdline_layout.o
 	$(CC) -o tests/test_cmdline_layout tests/test_cmdline_layout.o
 
+ifeq ($(UNAME_S),Darwin)
+tests/test_macos_pty.o: tests/test_macos_pty.m tests/test.h macos/pty.h
+	$(CC) $(STOBJCFLAGS) -c tests/test_macos_pty.m -o tests/test_macos_pty.o
+
+test_macos_pty: tests/test_macos_pty.o macos/pty.o
+	$(CC) -o tests/test_macos_pty tests/test_macos_pty.o macos/pty.o -framework Foundation
+endif
+
 test_gpu_regressions: st
 	@./tests/test_gpu_regressions.sh
 
 test: test_vimnav test_sshind test_scrollback test_cwd test_notif test_persist test_search test_cmdline_layout
+ifeq ($(UNAME_S),Darwin)
+test: test_macos_pty
+endif
 	@echo "Running tests..."
 	@./tests/test_vimnav
 	@./tests/test_sshind
@@ -200,8 +212,11 @@ test: test_vimnav test_sshind test_scrollback test_cwd test_notif test_persist t
 	@./tests/test_persist
 	@./tests/test_search
 	@./tests/test_cmdline_layout
+ifeq ($(UNAME_S),Darwin)
+	@./tests/test_macos_pty
+endif
 
 clean-tests:
-	rm -f tests/*.o tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search tests/test_cmdline_layout
+	rm -f tests/*.o tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search tests/test_cmdline_layout tests/test_macos_pty
 
-.PHONY: all app install-app uninstall-app install-hint clean dist install uninstall test test_gpu_regressions clean-tests
+.PHONY: all app install-app uninstall-app install-hint clean dist install uninstall test test_gpu_regressions test_macos_pty clean-tests

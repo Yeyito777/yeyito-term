@@ -22,6 +22,10 @@
 #include "win.h"
 #include "vimnav.h"
 
+#ifdef ST_NATIVE_MACOS
+#include "macos/pty.h"
+#endif
+
 /* X11 modifier masks (from X11/X.h) */
 #define ShiftMask   (1<<0)
 #define ControlMask (1<<2)
@@ -907,6 +911,8 @@ ttyread(void)
 	case 0:
 		reapchild();
 	case -1:
+		if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
+			return 0;
 		if (errno == EIO) {
 			/* Linux ptys report EIO when the slave side closes.  This can
 			 * arrive before SIGCHLD is observed; treat it as normal child exit
@@ -962,6 +968,9 @@ ttywrite(const char *s, size_t n, int may_echo)
 void
 ttywriteraw(const char *s, size_t n)
 {
+#ifdef ST_NATIVE_MACOS
+	macos_pty_write(s, n);
+#else
 	fd_set wfd, rfd;
 	ssize_t r;
 	size_t lim = 256;
@@ -1014,6 +1023,7 @@ ttywriteraw(const char *s, size_t n)
 
 write_error:
 	die("write error on tty: %s\n", strerror(errno));
+#endif
 }
 
 void

@@ -36,6 +36,7 @@ char *argv0;
 #include "../search.h"
 #include "keysyms.h"
 #include "native.h"
+#include "pty.h"
 
 typedef struct {
 	uint mod;
@@ -615,6 +616,7 @@ xsettitle(char *title)
 void
 xcleanup(void)
 {
+	macos_pty_stop();
 	stopControlSocket();
 }
 
@@ -2016,6 +2018,9 @@ run:
 	persist_register();
 	selinit();
 	ttyfd = ttynew(opt_line, shell, opt_io, opt_cmd);
+	if (macos_pty_start(ttyfd) < 0)
+		die("couldn't configure nonblocking PTY output: %s\n",
+		    strerror(errno));
 	nativeResize(nativeView.bounds.size.width, nativeView.bounds.size.height);
 	cmdline_init();
 	if (opt_fromsave && persist_get_altcmd()[0] && !persist_is_ephemeral()) {
