@@ -1,0 +1,48 @@
+#!/bin/sh
+
+set -u
+
+aerospace="${AEROSPACE_BIN:-/opt/homebrew/bin/aerospace}"
+st_binary="${ST_BINARY:-$HOME/Applications/st.app/Contents/MacOS/st}"
+poll_interval="${ST_AEROSPACE_POLL_INTERVAL:-0.05}"
+max_attempts="${ST_AEROSPACE_MAX_ATTEMPTS:-80}"
+
+if [ ! -x "$aerospace" ]; then
+	printf 'AeroSpace is not installed at %s\n' "$aerospace" >&2
+	exit 1
+fi
+if [ ! -x "$st_binary" ]; then
+	printf 'st is not installed at %s\n' "$st_binary" >&2
+	exit 1
+fi
+
+target_workspace=$("$aerospace" list-workspaces --focused | sed -n '1p')
+if [ -z "$target_workspace" ]; then
+	printf 'Could not determine the focused AeroSpace workspace\n' >&2
+	exit 1
+fi
+
+cd "$HOME" || exit 1
+nohup "$st_binary" </dev/null >/dev/null 2>&1 &
+st_pid=$!
+
+window_id=
+attempt=0
+while [ "$attempt" -lt "$max_attempts" ]; do
+	window_id=$("$aerospace" list-windows --monitor all --pid "$st_pid" \
+		--format '%{window-id}' 2>/dev/null | sed -n '1p')
+	if [ -n "$window_id" ]; then
+		break
+	fi
+	attempt=$((attempt + 1))
+	sleep "$poll_interval"
+done
+
+if [ -z "$window_id" ]; then
+	printf 'AeroSpace did not register the st window for PID %s\n' "$st_pid" >&2
+	exit 1
+fi
+
+"$aerospace" move-node-to-workspace --window-id "$window_id" \
+	"$target_workspace" >/dev/null
+"$aerospace" focus --window-id "$window_id" >/dev/null

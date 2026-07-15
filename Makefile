@@ -51,8 +51,9 @@ app: st macos/Info.plist macos/st.icns
 	chmod 755 $(APP)/Contents/MacOS/st
 	cp -f macos/Info.plist $(APP)/Contents/Info.plist
 	cp -f macos/st.icns $(APP)/Contents/Resources/st.icns
-	cp -f scripts/st-notify scripts/st-save-cmd $(APP)/Contents/Resources/bin/
-	chmod 755 $(APP)/Contents/Resources/bin/st-notify $(APP)/Contents/Resources/bin/st-save-cmd
+	cp -f scripts/st-notify scripts/st-save-cmd scripts/st-aerospace-launch $(APP)/Contents/Resources/bin/
+	chmod 755 $(APP)/Contents/Resources/bin/st-notify $(APP)/Contents/Resources/bin/st-save-cmd \
+		$(APP)/Contents/Resources/bin/st-aerospace-launch
 	codesign --force --deep --sign - $(APP)
 
 install-app: app
@@ -199,7 +200,10 @@ endif
 test_gpu_regressions: st
 	@./tests/test_gpu_regressions.sh
 
-test: test_vimnav test_sshind test_scrollback test_cwd test_notif test_persist test_search test_cmdline_layout
+test_aerospace_launcher:
+	@./tests/test_aerospace_launcher.sh
+
+test: test_vimnav test_sshind test_scrollback test_cwd test_notif test_persist test_search test_cmdline_layout test_aerospace_launcher
 ifeq ($(UNAME_S),Darwin)
 test: test_macos_pty
 endif
@@ -219,4 +223,4 @@ endif
 clean-tests:
 	rm -f tests/*.o tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search tests/test_cmdline_layout tests/test_macos_pty
 
-.PHONY: all app install-app uninstall-app install-hint clean dist install uninstall test test_gpu_regressions test_macos_pty clean-tests
+.PHONY: all app install-app uninstall-app install-hint clean dist install uninstall test test_gpu_regressions test_aerospace_launcher test_macos_pty clean-tests

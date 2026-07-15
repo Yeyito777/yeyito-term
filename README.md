@@ -30,7 +30,22 @@ make install-app
 
 The app is installed at `~/Applications/st.app`, appears in Spotlight as `st`,
 uses an ordinary macOS window that tiling managers can control, and bundles the
-`st-notify` and `st-save-cmd` helper scripts.
+`st-notify`, `st-save-cmd`, and `st-aerospace-launch` helper scripts.
+
+## AeroSpace launch integration
+
+To open `st` on the currently focused AeroSpace workspace, bind a key to the
+bundled launcher. Replace `/Users/you` with your home directory because
+AeroSpace bindings do not expand `~` in executable paths:
+
+```toml
+alt-shift-enter = 'exec-and-forget /Users/you/Applications/st.app/Contents/Resources/bin/st-aerospace-launch'
+```
+
+The helper records the new `st` process ID and asks AeroSpace for the window
+owned by that exact process before moving and focusing it. This remains
+deterministic when the key is pressed repeatedly: overlapping launches cannot
+mistake another terminal's window for their own.
 
 # Zsh integration
 
