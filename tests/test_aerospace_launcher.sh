@@ -8,6 +8,9 @@ tmp=${TMPDIR:-/tmp}/st-aerospace-launcher-test.$$
 mkdir -p "$tmp/home" "$tmp/bin"
 log=$tmp/aerospace.log
 pids=$tmp/st.pids
+ready=$tmp/ready
+reveal_log=$tmp/reveal.log
+mkdir -p "$ready"
 
 cleanup()
 {
@@ -22,8 +25,13 @@ trap cleanup EXIT INT TERM
 
 cat > "$tmp/bin/st" <<'EOF'
 #!/bin/sh
+printf 'managed %s %s\n' "$$" "${ST_AEROSPACE_MANAGED:-}" >> "$FAKE_REVEAL_LOG"
+trap 'printf "reveal %s\n" "$$" >> "$FAKE_REVEAL_LOG"' USR1
 printf '%s\n' "$$" >> "$FAKE_ST_PIDS"
-sleep 2
+: > "$FAKE_ST_READY_DIR/$$"
+while :; do
+	sleep 0.05
+done
 EOF
 
 cat > "$tmp/bin/aerospace" <<'EOF'
@@ -47,7 +55,8 @@ case "$command" in
 		done
 		[ -n "$pid" ] || exit 64
 		printf 'query %s\n' "$pid" >> "$FAKE_AEROSPACE_LOG"
-		kill -0 "$pid" 2>/dev/null && printf '%s\n' "$pid"
+		[ -f "$FAKE_ST_READY_DIR/$pid" ] && kill -0 "$pid" 2>/dev/null &&
+			printf '%s\n' "$pid"
 		;;
 	move-node-to-workspace)
 		[ "$1" = --window-id ]
@@ -66,6 +75,8 @@ EOF
 chmod +x "$tmp/bin/st" "$tmp/bin/aerospace"
 export FAKE_ST_PIDS="$pids"
 export FAKE_AEROSPACE_LOG="$log"
+export FAKE_ST_READY_DIR="$ready"
+export FAKE_REVEAL_LOG="$reveal_log"
 
 run_launcher()
 {
@@ -88,6 +99,15 @@ for launcher_pid in $launcher_pids; do
 	wait "$launcher_pid"
 done
 
+attempt=0
+while [ "$attempt" -lt 200 ]; do
+	reveal_count=$(awk '$1 == "reveal" { count++ } END { print count + 0 }' \
+		"$reveal_log")
+	[ "$reveal_count" -eq "$launch_count" ] && break
+	attempt=$((attempt + 1))
+	sleep 0.01
+done
+
 focus_ids=$(awk '$1 == "focus" { print $2 }' "$log")
 focus_count=$(printf '%s\n' "$focus_ids" | awk 'NF { count++ } END { print count + 0 }')
 unique_focus_count=$(printf '%s\n' "$focus_ids" | sort -u | awk 'NF { count++ } END { print count + 0 }')
@@ -106,6 +126,16 @@ for window_id in $focus_ids; do
 		printf 'focused window %s was not selected by its owning PID\n' "$window_id" >&2
 		exit 1
 	fi
+	if ! grep -q "^managed $window_id 1$" "$reveal_log"; then
+		printf 'st process %s was not started in managed reveal mode\n' \
+			"$window_id" >&2
+		exit 1
+	fi
+	if ! grep -q "^reveal $window_id$" "$reveal_log"; then
+		printf 'st process %s did not receive its reveal handshake\n' \
+			"$window_id" >&2
+		exit 1
+	fi
 done
 
-printf 'AeroSpace launcher concurrency test passed\n'
+printf 'AeroSpace launcher concurrency and reveal handshake test passed\n'

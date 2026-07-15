@@ -29,7 +29,7 @@ config.h:
 
 st.o: config.h st.h win.h vimnav.h persist.h
 x.o: arg.h config.h st.h win.h sshind.h notif.h persist.h cmdline.h search.h render/gpu.c
-macos/backend.o: macos/backend.m macos/native.h macos/renderer.h macos/pty.h macos/keysyms.h config.h st.h win.h
+macos/backend.o: macos/backend.m macos/native.h macos/renderer.h macos/pty.h macos/keysyms.h macos/reveal.h config.h st.h win.h
 macos/renderer.o: macos/renderer.m macos/renderer.h
 macos/pty.o: macos/pty.m macos/pty.h
 vimnav.o: st.h vimnav.h
@@ -93,10 +93,10 @@ dist: clean
 		config.def.h st.info st.1 arg.h st.h win.h vimnav.h sshind.h notif.h persist.h cmdline.h cmdline_layout.h search.h $(DIST_SRC)\
 		st-$(VERSION)
 	cp -R render/gpu.c render/README.md st-$(VERSION)/render
-	cp -R macos/README.md macos/Info.plist macos/backend.m macos/keysyms.h macos/native.h\
+	cp -R macos/README.md macos/Info.plist macos/backend.m macos/keysyms.h macos/native.h macos/reveal.h\
 		macos/renderer.h macos/renderer.m macos/pty.h macos/pty.m macos/st-icon.png macos/st.icns\
 		st-$(VERSION)/macos
-	cp -R scripts/st-notify scripts/st-save-cmd st-$(VERSION)/scripts
+	cp -R scripts/st-notify scripts/st-save-cmd scripts/st-aerospace-launch st-$(VERSION)/scripts
 	tar -cf - st-$(VERSION) | gzip > st-$(VERSION).tar.gz
 	rm -rf st-$(VERSION)
 
@@ -195,6 +195,12 @@ tests/test_macos_pty.o: tests/test_macos_pty.m tests/test.h macos/pty.h
 
 test_macos_pty: tests/test_macos_pty.o macos/pty.o
 	$(CC) -o tests/test_macos_pty tests/test_macos_pty.o macos/pty.o -framework Foundation
+
+tests/test_macos_reveal.o: tests/test_macos_reveal.c tests/test.h macos/reveal.h
+	$(CC) $(TESTFLAGS) -c tests/test_macos_reveal.c -o tests/test_macos_reveal.o
+
+test_macos_reveal: tests/test_macos_reveal.o
+	$(CC) -o tests/test_macos_reveal tests/test_macos_reveal.o
 endif
 
 test_gpu_regressions: st
@@ -205,7 +211,7 @@ test_aerospace_launcher:
 
 test: test_vimnav test_sshind test_scrollback test_cwd test_notif test_persist test_search test_cmdline_layout test_aerospace_launcher
 ifeq ($(UNAME_S),Darwin)
-test: test_macos_pty
+test: test_macos_pty test_macos_reveal
 endif
 	@echo "Running tests..."
 	@./tests/test_vimnav
@@ -218,9 +224,10 @@ endif
 	@./tests/test_cmdline_layout
 ifeq ($(UNAME_S),Darwin)
 	@./tests/test_macos_pty
+	@./tests/test_macos_reveal
 endif
 
 clean-tests:
-	rm -f tests/*.o tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search tests/test_cmdline_layout tests/test_macos_pty
+	rm -f tests/*.o tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search tests/test_cmdline_layout tests/test_macos_pty tests/test_macos_reveal
 
-.PHONY: all app install-app uninstall-app install-hint clean dist install uninstall test test_gpu_regressions test_aerospace_launcher test_macos_pty clean-tests
+.PHONY: all app install-app uninstall-app install-hint clean dist install uninstall test test_gpu_regressions test_aerospace_launcher test_macos_pty test_macos_reveal clean-tests

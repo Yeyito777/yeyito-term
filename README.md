@@ -45,7 +45,10 @@ alt-shift-enter = 'exec-and-forget /Users/you/Applications/st.app/Contents/Resou
 The helper records the new `st` process ID and asks AeroSpace for the window
 owned by that exact process before moving and focusing it. This remains
 deterministic when the key is pressed repeatedly: overlapping launches cannot
-mistake another terminal's window for their own.
+mistake another terminal's window for their own. An `st` started by this helper
+also remains transparent until AeroSpace has completed its layout and native
+focus pass, so its initial centered frame is never shown before the tiled one.
+Direct launches keep the normal standalone reveal behavior.
 
 # Zsh integration
 

@@ -37,6 +37,7 @@ char *argv0;
 #include "keysyms.h"
 #include "native.h"
 #include "pty.h"
+#include "reveal.h"
 
 typedef struct {
 	uint mod;
@@ -106,6 +107,8 @@ static double defaultFontSize;
 static double fontWidthSpacing = 1.0;
 static int windowRevealed;
 static NSUInteger windowRevealGeneration;
+static int managedWindowReveal;
+static int managedWindowRevealRequested;
 static const char macosDefaultFont[] = "SFMono-Regular:size=11";
 static const double macosDefaultFontWidthSpacing = 1.004032258064516;
 static dispatch_source_t ttySource;
@@ -117,6 +120,7 @@ static dispatch_source_t interruptSource;
 static dispatch_source_t hangupSource;
 static dispatch_source_t quitSource;
 static dispatch_source_t controlSource;
+static dispatch_source_t revealSource;
 static int controlFD = -1;
 static char controlPath[sizeof(((struct sockaddr_un *)0)->sun_path)];
 
@@ -167,6 +171,7 @@ static void stopControlSocket(void);
 static void cleanupNative(void);
 static void buildMenu(void);
 static void scheduleWindowReveal(void);
+static void updateWindowReveal(void);
 
 static double
 parseFontSize(const char *description)
@@ -1360,6 +1365,21 @@ scheduleWindowReveal(void)
 	});
 }
 
+static void
+updateWindowReveal(void)
+{
+	if (!managedWindowReveal) {
+		scheduleWindowReveal();
+		return;
+	}
+	if (!nativeWindow || windowRevealed ||
+	    !macos_managed_reveal_ready(managedWindowRevealRequested,
+	        nativeWindow.isKeyWindow))
+		return;
+	nativeWindow.alphaValue = 1.0;
+	windowRevealed = 1;
+}
+
 @interface STAppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate>
 @end
 
@@ -1373,20 +1393,20 @@ scheduleWindowReveal(void)
 - (void)windowWillClose:(NSNotification *)note
 { (void)note; if (!shuttingDown) [NSApp terminate:nil]; }
 - (void)windowDidBecomeKey:(NSNotification *)note
-{ (void)note; nativeFocus(1); }
+{ (void)note; nativeFocus(1); updateWindowReveal(); }
 - (void)windowDidResignKey:(NSNotification *)note
 { (void)note; nativeFocus(0); }
 - (void)windowDidMove:(NSNotification *)note
-{ (void)note; scheduleWindowReveal(); }
+{ (void)note; updateWindowReveal(); }
 - (void)windowDidResize:(NSNotification *)note
-{ (void)note; scheduleWindowReveal(); }
+{ (void)note; updateWindowReveal(); }
 - (void)windowDidChangeBackingProperties:(NSNotification *)note
 {
 	(void)note;
 	mac_renderer_set_scale(nativeWindow.backingScaleFactor);
 	updateCellMetrics();
 	nativeResize(nativeView.bounds.size.width, nativeView.bounds.size.height);
-	scheduleWindowReveal();
+	updateWindowReveal();
 }
 @end
 
@@ -1765,7 +1785,7 @@ initializeNativeWindow(int columns, int rows)
 	if (NSApp.isActive)
 		[nativeWindow makeKeyWindow];
 	[nativeWindow makeFirstResponder:nativeView];
-	scheduleWindowReveal();
+	updateWindowReveal();
 	setenv("WINDOWID", [[NSString stringWithFormat:@"%ld",
 	    nativeWindow.windowNumber] UTF8String], 1);
 }
@@ -1799,6 +1819,21 @@ terminationSource(int number)
 	dispatch_source_set_event_handler(source, ^{ [NSApp terminate:nil]; });
 	dispatch_resume(source);
 	return source;
+}
+
+static void
+setupManagedWindowRevealSource(void)
+{
+	if (!managedWindowReveal)
+		return;
+	signal(SIGUSR1, SIG_IGN);
+	revealSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_SIGNAL, SIGUSR1,
+	    0, dispatch_get_main_queue());
+	dispatch_source_set_event_handler(revealSource, ^{
+		managedWindowRevealRequested = 1;
+		updateWindowReveal();
+	});
+	dispatch_resume(revealSource);
 }
 
 static void
@@ -2003,6 +2038,8 @@ run:
 
 	[NSApplication sharedApplication];
 	[NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+	managedWindowReveal = getenv("ST_AEROSPACE_MANAGED") != NULL;
+	setupManagedWindowRevealSource();
 	appDelegate = [STAppDelegate new];
 	NSApp.delegate = appDelegate;
 	buildMenu();

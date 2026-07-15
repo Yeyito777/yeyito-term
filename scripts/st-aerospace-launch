@@ -23,7 +23,7 @@ if [ -z "$target_workspace" ]; then
 fi
 
 cd "$HOME" || exit 1
-nohup "$st_binary" </dev/null >/dev/null 2>&1 &
+ST_AEROSPACE_MANAGED=1 nohup "$st_binary" </dev/null >/dev/null 2>&1 &
 st_pid=$!
 
 window_id=
@@ -39,10 +39,28 @@ while [ "$attempt" -lt "$max_attempts" ]; do
 done
 
 if [ -z "$window_id" ]; then
+	kill "$st_pid" 2>/dev/null || true
 	printf 'AeroSpace did not register the st window for PID %s\n' "$st_pid" >&2
 	exit 1
 fi
 
-"$aerospace" move-node-to-workspace --window-id "$window_id" \
-	"$target_workspace" >/dev/null
-"$aerospace" focus --window-id "$window_id" >/dev/null
+if ! "$aerospace" move-node-to-workspace --window-id "$window_id" \
+	"$target_workspace" >/dev/null 2>&1; then
+	kill "$st_pid" 2>/dev/null || true
+	printf 'AeroSpace could not move st window %s to workspace %s\n' \
+		"$window_id" "$target_workspace" >&2
+	exit 1
+fi
+
+if ! "$aerospace" focus --window-id "$window_id" >/dev/null 2>&1; then
+	kill "$st_pid" 2>/dev/null || true
+	printf 'AeroSpace could not focus st window %s\n' "$window_id" >&2
+	exit 1
+fi
+
+# Managed st windows stay transparent until AeroSpace has finished both layout
+# and native focus. SIGUSR1 completes that handshake without a timing guess.
+if ! kill -USR1 "$st_pid" 2>/dev/null; then
+	printf 'st process %s exited before its window could be revealed\n' "$st_pid" >&2
+	exit 1
+fi
