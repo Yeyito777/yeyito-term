@@ -24,6 +24,19 @@ enum win_mode {
 	                  |MODE_MOUSEMANY,
 };
 
+/* Modes selected by terminal applications rather than by the window system.
+ * Clear these when an application boundary is lost (for example, when SSH
+ * disconnects before a remote TUI can emit its normal teardown sequences). */
+#define MODE_APPRESET (MODE_APPKEYPAD | MODE_MOUSE | MODE_REVERSE | \
+	MODE_KBDLOCK | MODE_HIDE | MODE_APPCURSOR | MODE_MOUSESGR | MODE_8BIT | \
+	MODE_KITTYKBD | MODE_FOCUS | MODE_BRCKTPASTE)
+
+static inline unsigned int
+winmoderestore(unsigned int mode)
+{
+	return mode & ~MODE_APPRESET;
+}
+
 void xbell(void);
 void xcleanup(void);
 void xclipcopy(void);
@@ -41,6 +54,7 @@ int xgetcursor(void);
 int xsetcursor(int);
 int xgpuactive(void);
 void xsetmode(int, unsigned int);
+void xresetmode(void);
 int xgpuenabled(void);
 int xdrawrowtop(int);
 int xdrawrowbottom(int);

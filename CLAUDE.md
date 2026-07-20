@@ -87,7 +87,7 @@ Used to show/hide the SSH connection indicator overlay.
 | Sequence | Direction | Description |
 |----------|-----------|-------------|
 | `\033]778;ssh;HOSTNAME\a` | shell → st | Show SSH indicator with hostname |
-| `\033]778;ssh;exit\a` | shell → st | Hide SSH indicator |
+| `\033]778;ssh;exit\a` | shell → st | Hide SSH indicator and reset remote application input modes |
 
 ### Custom X11 properties
 

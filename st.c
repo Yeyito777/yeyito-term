@@ -2205,9 +2205,10 @@ strhandle(void)
 			return;
 		case 778: /* st custom: SSH indicator */
 			if (narg >= 3 && !strcmp(strescseq.args[1], "ssh")) {
-				if (!strcmp(strescseq.args[2], "exit"))
+				if (!strcmp(strescseq.args[2], "exit")) {
 					sshind_hide();
-				else
+					xresetmode();
+				} else
 					sshind_show(strescseq.args[2]);
 			}
 			return;
@@ -2601,7 +2602,7 @@ eschandle(uchar ascii)
 		treset();
 		resettitle();
 		xloadcols();
-		xsetmode(0, MODE_HIDE);
+		xresetmode();
 		break;
 	case '=': /* DECPAM -- Application keypad */
 		xsetmode(1, MODE_APPKEYPAD);

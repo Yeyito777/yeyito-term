@@ -592,6 +592,13 @@ xsetmode(int set, unsigned int flags)
 		xsetmousecursor(IS_SET(MODE_MOUSE) ? 1 : 0);
 }
 
+void
+xresetmode(void)
+{
+	xsetpointermotion(0);
+	xsetmode(0, win.mode ^ winmoderestore(win.mode));
+}
+
 void xsetpointermotion(int set) { (void)set; }
 
 void

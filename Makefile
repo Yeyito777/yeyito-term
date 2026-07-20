@@ -189,6 +189,12 @@ tests/test_cmdline_layout.o: tests/test_cmdline_layout.c tests/test.h cmdline_la
 test_cmdline_layout: tests/test_cmdline_layout.o
 	$(CC) -o tests/test_cmdline_layout tests/test_cmdline_layout.o
 
+tests/test_mode_reset.o: tests/test_mode_reset.c tests/test.h win.h
+	$(CC) $(TESTFLAGS) -c tests/test_mode_reset.c -o tests/test_mode_reset.o
+
+test_mode_reset: tests/test_mode_reset.o
+	$(CC) -o tests/test_mode_reset tests/test_mode_reset.o
+
 ifeq ($(UNAME_S),Darwin)
 tests/test_macos_pty.o: tests/test_macos_pty.m tests/test.h macos/pty.h
 	$(CC) $(STOBJCFLAGS) -c tests/test_macos_pty.m -o tests/test_macos_pty.o
@@ -209,7 +215,7 @@ test_gpu_regressions: st
 test_aerospace_launcher:
 	@./tests/test_aerospace_launcher.sh
 
-test: test_vimnav test_sshind test_scrollback test_cwd test_notif test_persist test_search test_cmdline_layout test_aerospace_launcher
+test: test_vimnav test_sshind test_scrollback test_cwd test_notif test_persist test_search test_cmdline_layout test_mode_reset test_aerospace_launcher
 ifeq ($(UNAME_S),Darwin)
 test: test_macos_pty test_macos_reveal
 endif
@@ -222,12 +228,13 @@ endif
 	@./tests/test_persist
 	@./tests/test_search
 	@./tests/test_cmdline_layout
+	@./tests/test_mode_reset
 ifeq ($(UNAME_S),Darwin)
 	@./tests/test_macos_pty
 	@./tests/test_macos_reveal
 endif
 
 clean-tests:
-	rm -f tests/*.o tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search tests/test_cmdline_layout tests/test_macos_pty tests/test_macos_reveal
+	rm -f tests/*.o tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search tests/test_cmdline_layout tests/test_mode_reset tests/test_macos_pty tests/test_macos_reveal
 
-.PHONY: all app install-app uninstall-app install-hint clean dist install uninstall test test_gpu_regressions test_aerospace_launcher test_macos_pty test_macos_reveal clean-tests
+.PHONY: all app install-app uninstall-app install-hint clean dist install uninstall test test_gpu_regressions test_aerospace_launcher test_mode_reset test_macos_pty test_macos_reveal clean-tests

@@ -150,6 +150,8 @@ ssh() {
   printf '\033]778;ssh;%s\007' "$host"
   command ssh "$@"
   local ret=$?
+  # Also tells st to discard remote TUI input modes if SSH disconnected
+  # before the remote application could restore them.
   printf '\033]778;ssh;exit\007'
   return $ret
 }
