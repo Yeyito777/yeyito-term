@@ -36,6 +36,7 @@ char *argv0;
 #include "../search.h"
 #include "keysyms.h"
 #include "native.h"
+#include "locale.h"
 #include "pty.h"
 #include "reveal.h"
 
@@ -2034,7 +2035,8 @@ run:
 		}
 	}
 	if (!opt_title) opt_title = (opt_line || !opt_cmd) ? "st" : opt_cmd[0];
-	setlocale(LC_CTYPE, "");
+	if (!macos_init_utf8_locale())
+		die("st: could not initialize a UTF-8 locale\n");
 	cols = MAX(cols, 1); rows = MAX(rows, 1);
 	tnew(cols, rows);
 	if (opt_fromorphan && !opt_fromsave) {
