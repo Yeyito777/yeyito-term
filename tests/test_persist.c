@@ -635,6 +635,24 @@ TEST(ephemeral_set_and_get)
 	persist_set_ephemeral(0);
 }
 
+TEST(altcmd_reexecution_requires_restore)
+{
+	/* Initial -e launches capture their command before run() starts.  It must
+	 * never be written back into the pty while that command is already running. */
+	persist_set_altcmd("exec nvim '/tmp/notes.md'");
+	persist_set_ephemeral(0);
+	ASSERT_EQ(0, persist_should_reexecute_altcmd(0));
+	ASSERT_EQ(1, persist_should_reexecute_altcmd(1));
+
+	/* Restored ephemeral commands are launched by execsh(), not pty injection. */
+	persist_set_ephemeral(1);
+	ASSERT_EQ(0, persist_should_reexecute_altcmd(1));
+
+	persist_set_altcmd(NULL);
+	persist_set_ephemeral(0);
+	ASSERT_EQ(0, persist_should_reexecute_altcmd(1));
+}
+
 TEST(ephemeral_saved_and_restored)
 {
 	char restoredir[PATH_MAX];
@@ -855,6 +873,7 @@ TEST_SUITE(save_cmd)
 TEST_SUITE(ephemeral)
 {
 	RUN_TEST(ephemeral_set_and_get);
+	RUN_TEST(altcmd_reexecution_requires_restore);
 	RUN_TEST(ephemeral_saved_and_restored);
 	RUN_TEST(non_ephemeral_not_saved);
 }

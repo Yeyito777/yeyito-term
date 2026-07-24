@@ -2652,8 +2652,10 @@ run(void)
 	/* Initialize command-line child window (needs geometry from cresize) */
 	cmdline_init();
 
-	/* Re-execute altscreen command from save (skip if ephemeral — execsh handles it) */
-	if (persist_get_altcmd()[0] && !persist_is_ephemeral()) {
+	/* Re-execute an altscreen command only when restoring a saved terminal.
+	 * Initial -e launches also capture altcmd, but that command is already
+	 * running; writing it to the pty here would feed it into the application. */
+	if (persist_should_reexecute_altcmd(opt_fromsave != NULL)) {
 		if (debug_mode)
 			fprintf(stderr, "[persist] re-executing altcmd: %s\n",
 					persist_get_altcmd());
@@ -2880,13 +2882,10 @@ main(int argc, char *argv[])
 run:
 	if (argc > 0) { /* eat all remaining arguments */
 		opt_cmd = argv;
-		/* Short-lived -e helper commands used by scripts/benchmarks often exit
-		 * before the terminal has finished its initial resize.  Persisting those
-		 * processes from SIGCHLD can race with allocation and is not useful.
-		 * Keep persistence for interactive shell restores, but skip ephemeral -e
-		 * sessions unless they were explicitly launched from a saved directory. */
-		if (opt_fromsave)
-			persist_set_ephemeral(1);
+		/* A command supplied with -e owns the terminal lifetime.  Preserve that
+		 * behavior across restore instead of starting a durable shell and typing
+		 * the captured command into it. */
+		persist_set_ephemeral(1);
 
 		/*
 		 * Save -e command for ephemeral persist restore.

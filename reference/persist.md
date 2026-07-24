@@ -102,7 +102,7 @@ The shell reports the current command via OSC 780 (sent from zsh's `preexec` hoo
 
 For ephemeral terminals (`st -e`), the `-e` args are also captured as the altcmd at startup in `main()` (x.c). This is necessary because `preexec` / OSC 780 does not fire for `zsh -c` commands. The code detects the `shell -c cmd` / `shell -ic cmd` pattern and extracts the inner command string (since the ephemeral restore already wraps with `$SHELL -ic <altcmd>`). For other `-e` patterns (e.g. `st -e htop`), the args are joined with spaces.
 
-On save, `persist_save_generic()` writes `altcmd=` when `MODE_ALTSCREEN` is active (meaning a fullscreen program like htop, nvim is running), **or** when the terminal is ephemeral. The ephemeral exception is needed because we always want to restore the `-e` command regardless of whether the program uses the alternate screen buffer. On restore, the command is read from `generic-data.save` and after `ttynew()` spawns the shell, `run()` sends it to the pty via `ttywrite()` as if the user typed it.
+On save, `persist_save_generic()` writes `altcmd=` when `MODE_ALTSCREEN` is active (meaning a fullscreen program like htop, nvim is running), **or** when the terminal is ephemeral. The ephemeral exception is needed because we always want to restore the `-e` command regardless of whether the program uses the alternate screen buffer. On restore, a non-ephemeral command is read from `generic-data.save` and, after `ttynew()` spawns the shell, `run()` sends it to the pty via `ttywrite()` as if the user typed it. This injection is strictly gated on `--from-save`: an initial `st -e ...` launch also captures its command, but that command is already running and must never be written back into the application.
 
 ## Periodic save timer
 
@@ -187,6 +187,7 @@ void persist_set_altcmd(const char *cmd); // store altscreen command (NULL clear
 const char *persist_get_altcmd(void);     // retrieve stored command (empty string if unset)
 void persist_set_ephemeral(int val);      // mark terminal as ephemeral (launched with -e)
 int  persist_is_ephemeral(void);          // whether terminal was launched with -e
+int  persist_should_reexecute_altcmd(int from_save); // gate pty injection to restored, non-ephemeral commands
 const char *persist_get_dir(void);        // return runtime dir path
 const char *persist_find_orphan(void);    // scan ~/.runtime/st/ for first orphan dir, return path or NULL
 ```
@@ -199,4 +200,4 @@ const char *persist_find_orphan(void);    // scan ~/.runtime/st/ for first orpha
 
 ## Testing
 
-`make test_persist` — 20 tests covering CWD tracking, altcmd tracking (set/get, save with altscreen, no save without altscreen), save_cmd override, ephemeral flag (set/get, save/restore roundtrip, non-ephemeral not saved), full save/restore roundtrip (including cursor_y), empty history, cursor_y restore, bad magic rejection, and DWM registration. The test compiles `persist.c` separately into `tests/persist.o` and links with `tests/test_persist.o` (which provides its own Term definition and mock functions).
+`make test_persist` — 23 tests covering CWD tracking, altcmd tracking (set/get, save with altscreen, no save without altscreen, restore-only re-execution), save_cmd override, ephemeral flag (set/get, save/restore roundtrip, non-ephemeral not saved), full save/restore roundtrip (including cursor_y), empty history, cursor_y restore, bad magic rejection, and DWM registration. The test compiles `persist.c` separately into `tests/persist.o` and links with `tests/test_persist.o` (which provides its own Term definition and mock functions).

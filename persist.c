@@ -462,6 +462,15 @@ persist_is_ephemeral(void)
 	return persist_ephemeral;
 }
 
+int
+persist_should_reexecute_altcmd(int from_save)
+{
+	/* Capturing an initial -e command must not write it back into the pty:
+	 * that command is already running.  Only a restored, non-ephemeral shell
+	 * needs the saved command typed into it. */
+	return from_save && persist_altcmd_buf[0] && !persist_ephemeral;
+}
+
 const char *
 persist_get_dir(void)
 {
