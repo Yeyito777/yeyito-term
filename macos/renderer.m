@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "glyph_layout.h"
 #include "renderer.h"
 
 #define ATLAS_SIZE 4096
@@ -29,6 +30,7 @@ typedef struct {
 @interface STGlyph : NSObject
 @property(nonatomic) float u0, v0, u1, v1;
 @property(nonatomic) float left, top, width, height, advance;
+@property(nonatomic) float inkWidth, inkHeight;
 @property(nonatomic) BOOL colorGlyph;
 @end
 
@@ -236,11 +238,11 @@ static CTFontRef
 styledFont(unsigned int style)
 {
 	int index = 0;
-	if ((style & 1U) && (style & 2U))
+	if ((style & MAC_FONT_BOLD) && (style & MAC_FONT_ITALIC))
 		index = 3;
-	else if (style & 1U)
+	else if (style & MAC_FONT_BOLD)
 		index = 1;
-	else if (style & 2U)
+	else if (style & MAC_FONT_ITALIC)
 		index = 2;
 	return r.fonts[index] ?: r.fonts[0];
 }
@@ -338,6 +340,8 @@ glyphEntry(CTFontRef font, CGGlyph glyph)
 	entry.top = bounds.origin.y + bounds.size.height + GLYPH_PAD;
 	entry.width = width;
 	entry.height = height;
+	entry.inkWidth = bounds.size.width;
+	entry.inkHeight = bounds.size.height;
 	entry.colorGlyph = (CTFontGetSymbolicTraits(font) &
 	    kCTFontColorGlyphsTrait) != 0;
 
@@ -349,8 +353,8 @@ glyphEntry(CTFontRef font, CGGlyph glyph)
 
 static void
 drawGlyph(enum MacRenderLayer layer, CTFontRef font, CGGlyph glyph,
-		double xPixels, double baselinePixels, double maxWidthPixels,
-		double maxHeightPixels, MacColor color)
+		double xPixels, double topPixels, double baselinePixels,
+		double maxWidthPixels, double maxHeightPixels, MacColor color)
 {
 	STGlyph *entry = glyphEntry(font, glyph);
 	if (!entry || entry.width <= 0 || entry.height <= 0)
@@ -360,13 +364,13 @@ drawGlyph(enum MacRenderLayer layer, CTFontRef font, CGGlyph glyph,
 	double width = entry.width;
 	double height = entry.height;
 	if (entry.colorGlyph && maxWidthPixels > 0 && maxHeightPixels > 0) {
-		double scale = MIN(maxWidthPixels / width, maxHeightPixels / height);
-		scale = MIN(1.0, scale) * 0.94;
-		width *= scale;
-		height *= scale;
-		x = xPixels + (maxWidthPixels - width) / 2.0;
-		y = baselinePixels - maxHeightPixels +
-		    (maxHeightPixels - height) / 2.0;
+		MacGlyphRect rect = macos_color_glyph_rect(xPixels, topPixels,
+		    maxWidthPixels, maxHeightPixels, width, height,
+		    entry.inkWidth, entry.inkHeight);
+		x = rect.x;
+		y = rect.y;
+		width = rect.width;
+		height = rect.height;
 	}
 	quad(layer, x, y, width, height, entry.u0, entry.v0,
 	    entry.u1, entry.v1, color, entry.colorGlyph ? 2.0f : 1.0f);
@@ -518,12 +522,12 @@ mac_renderer_rect(enum MacRenderLayer layer, double x, double y,
 
 void
 mac_renderer_rune(enum MacRenderLayer layer, uint32_t rune,
-		unsigned int style, double x, double baseline, double maxWidth,
-		double maxHeight, MacColor color)
+		unsigned int style, double x, double top, double baseline,
+		double maxWidth, double maxHeight, MacColor color)
 {
 	if (!rune || !r.fonts[0])
 		return;
-	uint8_t bytes[5] = {0};
+	uint8_t bytes[8] = {0};
 	int len;
 	if (rune < 0x80) {
 		bytes[0] = rune; len = 1;
@@ -539,6 +543,11 @@ mac_renderer_rune(enum MacRenderLayer layer, uint32_t rune,
 		bytes[1] = 0x80 | ((rune >> 12) & 0x3f);
 		bytes[2] = 0x80 | ((rune >> 6) & 0x3f);
 		bytes[3] = 0x80 | (rune & 0x3f); len = 4;
+	}
+	if (style & MAC_FONT_EMOJI) {
+		bytes[len++] = 0xef;
+		bytes[len++] = 0xb8;
+		bytes[len++] = 0x8f;
 	}
 	NSString *string = [[NSString alloc] initWithBytes:bytes length:len
 	    encoding:NSUTF8StringEncoding];
@@ -557,7 +566,8 @@ mac_renderer_rune(enum MacRenderLayer layer, uint32_t rune,
 		CTRunGetGlyphs(run, CFRangeMake(0, count), glyphs);
 		CTRunGetPositions(run, CFRangeMake(0, count), positions);
 		for (CFIndex j = 0; j < count; j++)
-			drawGlyph(layer, font, glyphs[j], x * r.scale + positions[j].x,
+			drawGlyph(layer, font, glyphs[j],
+			    x * r.scale + positions[j].x, top * r.scale,
 			    baseline * r.scale - positions[j].y,
 			    maxWidth * r.scale, maxHeight * r.scale, color);
 		free(glyphs);
@@ -592,7 +602,7 @@ mac_renderer_text(enum MacRenderLayer layer, const char *text, size_t len,
 		CTRunGetPositions(run, CFRangeMake(0, count), positions);
 		for (CFIndex j = 0; j < count; j++)
 			drawGlyph(layer, font, glyphs[j], x * r.scale + positions[j].x,
-			    baseline * r.scale - positions[j].y, 0, 0, color);
+			    0, baseline * r.scale - positions[j].y, 0, 0, color);
 		free(glyphs);
 		free(positions);
 	}

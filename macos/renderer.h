@@ -18,6 +18,12 @@ enum MacRenderLayer {
 	MAC_LAYER_COUNT
 };
 
+enum MacFontStyle {
+	MAC_FONT_BOLD = 1 << 0,
+	MAC_FONT_ITALIC = 1 << 1,
+	MAC_FONT_EMOJI = 1 << 2,
+};
+
 int mac_renderer_init(void *mtkview, const char *font_name,
 		double font_size);
 void mac_renderer_destroy(void);
@@ -37,8 +43,8 @@ int mac_renderer_begin(MacColor clear_color);
 void mac_renderer_rect(enum MacRenderLayer layer, double x, double y,
 		double width, double height, MacColor color);
 void mac_renderer_rune(enum MacRenderLayer layer, uint32_t rune,
-		unsigned int style, double x, double baseline, double max_width,
-		double max_height, MacColor color);
+		unsigned int style, double x, double top, double baseline,
+		double max_width, double max_height, MacColor color);
 void mac_renderer_text(enum MacRenderLayer layer, const char *text,
 		size_t len, double x, double baseline, double font_scale,
 		MacColor color);

@@ -7,7 +7,7 @@ include config.mk
 DIST_SRC = st.c x.c vimnav.c sshind.c notif.c persist.c cmdline.c search.c
 
 ifeq ($(UNAME_S),Darwin)
-SRC = st.c vimnav.c persist.c cmdline.c search.c macos/locale.c
+SRC = st.c vimnav.c persist.c cmdline.c search.c macos/locale.c macos/emoji.c
 OBJC_SRC = macos/backend.m macos/renderer.m macos/pty.m
 OBJ = $(SRC:.c=.o) $(OBJC_SRC:.m=.o)
 else
@@ -27,12 +27,14 @@ config.h:
 .m.o:
 	$(CC) $(STOBJCFLAGS) -c $< -o $@
 
-st.o: config.h st.h win.h vimnav.h persist.h
+st.o: config.h st.h win.h vimnav.h persist.h macos/emoji.h
 x.o: arg.h config.h st.h win.h sshind.h notif.h persist.h cmdline.h search.h render/gpu.c
 macos/backend.o: macos/backend.m macos/native.h macos/renderer.h macos/pty.h macos/keysyms.h macos/reveal.h config.h st.h win.h
 macos/locale.o: macos/locale.c macos/locale.h
 	$(CC) $(STCFLAGS) -c macos/locale.c -o macos/locale.o
-macos/renderer.o: macos/renderer.m macos/renderer.h
+macos/emoji.o: macos/emoji.c macos/emoji.h st.h
+	$(CC) $(STCFLAGS) -c macos/emoji.c -o macos/emoji.o
+macos/renderer.o: macos/renderer.m macos/renderer.h macos/glyph_layout.h
 macos/pty.o: macos/pty.m macos/pty.h
 vimnav.o: st.h vimnav.h
 sshind.o: sshind.h
@@ -96,7 +98,8 @@ dist: clean
 		st-$(VERSION)
 	cp -R render/gpu.c render/README.md st-$(VERSION)/render
 	cp -R macos/README.md macos/Info.plist macos/backend.m macos/keysyms.h macos/native.h macos/reveal.h\
-		macos/renderer.h macos/renderer.m macos/pty.h macos/pty.m macos/locale.h macos/locale.c\
+		macos/renderer.h macos/renderer.m macos/glyph_layout.h macos/emoji.h macos/emoji.c\
+		macos/pty.h macos/pty.m macos/locale.h macos/locale.c\
 		macos/st-icon.png macos/st.icns\
 		st-$(VERSION)/macos
 	cp -R scripts/st-notify scripts/st-save-cmd scripts/st-aerospace-launch st-$(VERSION)/scripts
@@ -216,6 +219,21 @@ tests/test_macos_locale.o: tests/test_macos_locale.c tests/test.h macos/locale.h
 
 test_macos_locale: tests/test_macos_locale.o macos/locale.o
 	$(CC) -o tests/test_macos_locale tests/test_macos_locale.o macos/locale.o
+
+tests/test_macos_glyph_layout.o: tests/test_macos_glyph_layout.c tests/test.h macos/glyph_layout.h
+	$(CC) $(TESTFLAGS) -c tests/test_macos_glyph_layout.c -o tests/test_macos_glyph_layout.o
+
+test_macos_glyph_layout: tests/test_macos_glyph_layout.o
+	$(CC) -o tests/test_macos_glyph_layout tests/test_macos_glyph_layout.o
+
+tests/test_macos_emoji.o: tests/test_macos_emoji.c tests/test.h macos/emoji.h st.h
+	$(CC) $(TESTFLAGS) -c tests/test_macos_emoji.c -o tests/test_macos_emoji.o
+
+tests/macos_emoji.o: macos/emoji.c macos/emoji.h st.h
+	$(CC) $(TESTFLAGS) -c macos/emoji.c -o tests/macos_emoji.o
+
+test_macos_emoji: tests/test_macos_emoji.o tests/macos_emoji.o
+	$(CC) -o tests/test_macos_emoji tests/test_macos_emoji.o tests/macos_emoji.o
 endif
 
 test_gpu_regressions: st
@@ -226,7 +244,7 @@ test_aerospace_launcher:
 
 test: test_vimnav test_sshind test_scrollback test_cwd test_notif test_persist test_search test_cmdline_layout test_mode_reset test_aerospace_launcher
 ifeq ($(UNAME_S),Darwin)
-test: test_macos_pty test_macos_reveal test_macos_locale
+test: test_macos_pty test_macos_reveal test_macos_locale test_macos_glyph_layout test_macos_emoji
 endif
 	@echo "Running tests..."
 	@./tests/test_vimnav
@@ -242,9 +260,11 @@ ifeq ($(UNAME_S),Darwin)
 	@./tests/test_macos_pty
 	@./tests/test_macos_reveal
 	@./tests/test_macos_locale
+	@./tests/test_macos_glyph_layout
+	@./tests/test_macos_emoji
 endif
 
 clean-tests:
-	rm -f tests/*.o tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search tests/test_cmdline_layout tests/test_mode_reset tests/test_macos_pty tests/test_macos_reveal tests/test_macos_locale
+	rm -f tests/*.o tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search tests/test_cmdline_layout tests/test_mode_reset tests/test_macos_pty tests/test_macos_reveal tests/test_macos_locale tests/test_macos_glyph_layout tests/test_macos_emoji
 
-.PHONY: all app install-app uninstall-app install-hint clean dist install uninstall test test_gpu_regressions test_aerospace_launcher test_mode_reset test_macos_pty test_macos_reveal test_macos_locale clean-tests
+.PHONY: all app install-app uninstall-app install-hint clean dist install uninstall test test_gpu_regressions test_aerospace_launcher test_mode_reset test_macos_pty test_macos_reveal test_macos_locale test_macos_glyph_layout test_macos_emoji clean-tests

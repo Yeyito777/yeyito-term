@@ -439,9 +439,10 @@ drawCell(Glyph glyph, int x, int y, int overlay, int applyHighlights)
 	mac_renderer_rect(bgLayer, left, top, width, height, bg);
 	if (glyph.u != ' ' && glyph.u != 0) {
 		unsigned int style = 0;
-		if (glyph.mode & ATTR_BOLD) style |= 1;
-		if (glyph.mode & ATTR_ITALIC) style |= 2;
-		mac_renderer_rune(textLayer, glyph.u, style, left,
+		if (glyph.mode & ATTR_BOLD) style |= MAC_FONT_BOLD;
+		if (glyph.mode & ATTR_ITALIC) style |= MAC_FONT_ITALIC;
+		if (glyph.mode & ATTR_EMOJI) style |= MAC_FONT_EMOJI;
+		mac_renderer_rune(textLayer, glyph.u, style, left, top,
 		    rowBaseline(y), width, height, fg);
 	}
 	if (glyph.mode & ATTR_UNDERLINE)
@@ -503,7 +504,7 @@ xdrawcursor(int cx, int cy, Glyph glyph, int ox, int oy, Glyph oldGlyph)
 	double height = rowBottom(cy) - top;
 	MacColor color;
 	glyph.mode &= ATTR_BOLD | ATTR_ITALIC | ATTR_UNDERLINE |
-	    ATTR_STRUCK | ATTR_WIDE;
+	    ATTR_STRUCK | ATTR_WIDE | ATTR_EMOJI;
 	if (vimnav.forced) {
 		glyph.fg = defaultbg;
 		glyph.bg = TRUECOLOR(0xff, 0x6b, 0x6b);

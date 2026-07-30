@@ -23,6 +23,7 @@
 #include "vimnav.h"
 
 #ifdef ST_NATIVE_MACOS
+#include "macos/emoji.h"
 #include "macos/pty.h"
 #endif
 
@@ -2739,6 +2740,30 @@ check_control_code:
 		 */
 		return;
 	}
+#ifdef ST_NATIVE_MACOS
+	if (u == MACOS_TEXT_PRESENTATION_SELECTOR ||
+	    u == MACOS_EMOJI_PRESENTATION_SELECTOR) {
+		int column = macos_apply_presentation_selector(
+		    term.line[term.c.y], term.col, term.c.x,
+		    term.c.state & CURSOR_WRAPNEXT, u);
+		if (column >= 0) {
+			if (u == MACOS_EMOJI_PRESENTATION_SELECTOR &&
+			    !(term.c.state & CURSOR_WRAPNEXT) &&
+			    term.c.x == column + 1 &&
+			    macos_expand_emoji_width(term.line[term.c.y],
+			    term.col, column)) {
+				if (column + 2 < term.col)
+					tmoveto(column + 2, term.c.y);
+				else {
+					term.c.x = column;
+					term.c.state |= CURSOR_WRAPNEXT;
+				}
+			}
+			term.dirty[term.c.y] = 1;
+		}
+		return;
+	}
+#endif
 	if (selected(term.c.x, term.c.y))
 		selclear();
 

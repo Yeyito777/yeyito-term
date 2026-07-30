@@ -8,6 +8,10 @@ not use XQuartz or link against X11.
   the local control socket used by the bundled helper scripts.
 - `renderer.m` and `renderer.h` implement the Metal renderer and CoreText glyph
   atlas/font metrics.
+- `glyph_layout.h` keeps color-font glyphs sized and centered by their visible
+  ink bounds instead of the atlas padding or text baseline.
+- `emoji.c` and `emoji.h` preserve macOS emoji-presentation selectors and their
+  two-column terminal layout.
 - `pty.m` and `pty.h` provide ordered, nonblocking PTY output. AppKit input
   handlers enqueue bytes here so a child that stops reading cannot freeze the
   window.
