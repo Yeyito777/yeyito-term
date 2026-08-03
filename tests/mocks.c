@@ -200,6 +200,8 @@ selstart(int x, int y, int snap)
 	sel.snap = snap;
 	sel.oe.x = sel.ob.x = x;
 	sel.oe.y = sel.ob.y = y;
+	sel.nb.x = sel.ne.x = x;
+	sel.nb.y = sel.ne.y = y;
 }
 
 void
@@ -213,6 +215,17 @@ selextend(int x, int y, int type, int done)
 
 	sel.oe.x = x;
 	sel.oe.y = y;
+	/* Match st's ordering: normalize using the active selection type, then
+	 * install the type requested by this extension. */
+	if (sel.type == SEL_REGULAR && sel.ob.y != sel.oe.y) {
+		sel.nb.x = sel.ob.y < sel.oe.y ? sel.ob.x : sel.oe.x;
+		sel.ne.x = sel.ob.y < sel.oe.y ? sel.oe.x : sel.ob.x;
+	} else {
+		sel.nb.x = sel.ob.x < sel.oe.x ? sel.ob.x : sel.oe.x;
+		sel.ne.x = sel.ob.x < sel.oe.x ? sel.oe.x : sel.ob.x;
+	}
+	sel.nb.y = sel.ob.y < sel.oe.y ? sel.ob.y : sel.oe.y;
+	sel.ne.y = sel.ob.y < sel.oe.y ? sel.oe.y : sel.ob.y;
 	sel.type = type;
 
 	if (done)
@@ -232,11 +245,11 @@ selected(int x, int y)
 		return 0;
 
 	if (sel.type == SEL_RECTANGULAR) {
-		/* Rectangular: normalize and check rectangle bounds */
-		minx = sel.ob.x < sel.oe.x ? sel.ob.x : sel.oe.x;
-		maxx = sel.ob.x < sel.oe.x ? sel.oe.x : sel.ob.x;
-		miny = sel.ob.y < sel.oe.y ? sel.ob.y : sel.oe.y;
-		maxy = sel.ob.y < sel.oe.y ? sel.oe.y : sel.ob.y;
+		/* Rectangular: use the bounds normalized by selextend(). */
+		minx = sel.nb.x;
+		maxx = sel.ne.x;
+		miny = sel.nb.y;
+		maxy = sel.ne.y;
 		return (y >= miny && y <= maxy && x >= minx && x <= maxx);
 	}
 

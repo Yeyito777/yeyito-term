@@ -3652,6 +3652,62 @@ TEST(vimnav_block_selection_uses_rectangular)
 	mock_term_free();
 }
 
+/* Test: block mode can move through virtual columns past short-line text */
+TEST(vimnav_block_cursor_uses_virtual_columns)
+{
+	mock_term_init(8, 24);
+	mock_set_line(5, "blah");
+	term.c.x = 0;
+	term.c.y = 5;
+
+	vimnav_force_enter();
+	vimnav_handle_key('v', 4);
+
+	for (int i = 0; i < 12; i++)
+		vimnav_handle_key('l', 0);
+
+	ASSERT_EQ(12, vimnav.x);
+	ASSERT_EQ(12, vimnav.savedx);
+	ASSERT_EQ(1, selected(12, 5));
+
+	/* Virtual movement remains bounded by the terminal grid. */
+	for (int i = 0; i < 24; i++)
+		vimnav_handle_key('l', 0);
+	ASSERT_EQ(23, vimnav.x);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Test the motivating case: a short line can define a full-width rectangle. */
+TEST(vimnav_block_yank_from_short_line_spans_long_line)
+{
+	mock_term_init(8, 40);
+	mock_set_line(4, "bleh bleh bleh bleh bleh");
+	mock_set_line(5, "blah");
+	term.c.x = 0;
+	term.c.y = 5;
+
+	vimnav_force_enter();
+	vimnav_handle_key('v', 4);
+	for (int i = 0; i < 23; i++)
+		vimnav_handle_key('l', 0);
+	vimnav_handle_key('k', 0);
+
+	ASSERT_EQ(4, vimnav.y);
+	ASSERT_EQ(23, vimnav.x);
+	ASSERT_EQ(0, sel.nb.x);
+	ASSERT_EQ(23, sel.ne.x);
+	ASSERT_EQ(1, selected(23, 4));
+	ASSERT_EQ(1, selected(23, 5));
+
+	vimnav_handle_key('y', 0);
+	ASSERT_STR_EQ("bleh bleh bleh bleh bleh\nblah", mock_state.last_xsetsel);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
 /* Test: v switches from block to char visual */
 TEST(vimnav_v_switches_from_block_to_char)
 {
@@ -4038,6 +4094,8 @@ TEST_SUITE(vimnav)
 	RUN_TEST(vimnav_ctrl_v_enters_block_mode);
 	RUN_TEST(vimnav_ctrl_v_toggles_off);
 	RUN_TEST(vimnav_block_selection_uses_rectangular);
+	RUN_TEST(vimnav_block_cursor_uses_virtual_columns);
+	RUN_TEST(vimnav_block_yank_from_short_line_spans_long_line);
 	RUN_TEST(vimnav_v_switches_from_block_to_char);
 	RUN_TEST(vimnav_ctrl_v_switches_from_char_to_block);
 	RUN_TEST(vimnav_V_switches_from_block_to_line);

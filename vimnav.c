@@ -295,9 +295,34 @@ vimnav_update_selection(void)
 		selextend(term.col - 1, screen_y, SEL_REGULAR, 0);
 	} else if (vimnav.mode == VIMNAV_VISUAL_BLOCK) {
 		selstart(vimnav.anchor_x, anchor_screen_y, 0);
+		/* selstart() defaults to regular selection; set the type before
+		 * normalization so upward rectangles keep ordered x bounds. */
+		sel.type = SEL_RECTANGULAR;
 		selextend(vimnav.x, screen_y, SEL_RECTANGULAR, 0);
 	}
 	tfulldirt();
+}
+
+/* Rectangular selections use virtual columns so their cursor can cross short
+ * lines without collapsing the selected width. Other modes stay text-bound. */
+static int
+vimnav_max_x_for_line(int y)
+{
+	int linelen;
+
+	if (vimnav.mode == VIMNAV_VISUAL_BLOCK)
+		return MAX(term.col - 1, 0);
+
+	linelen = tlinelen(y);
+	return linelen > 0 ? linelen - 1 : 0;
+}
+
+static void
+vimnav_restore_saved_column(void)
+{
+	vimnav.x = MIN(vimnav.savedx, vimnav_max_x_for_line(vimnav_screen_y()));
+	if (vimnav.x < 0)
+		vimnav.x = 0;
 }
 
 static void
@@ -313,8 +338,9 @@ vimnav_move_left(void)
 static void
 vimnav_move_right(void)
 {
-	int linelen = tlinelen(vimnav_screen_y());
-	if (vimnav.x < linelen - 1 && vimnav.x < term.col - 1) {
+	int max_x = vimnav_max_x_for_line(vimnav_screen_y());
+
+	if (vimnav.x < max_x) {
 		vimnav.x++;
 		vimnav.savedx = vimnav.x;
 	}
@@ -354,7 +380,6 @@ vimnav_scroll_up(int n)
 	int old_scr = term.scr;
 	int scrolled, remaining;
 	int i;
-	int linelen;
 
 	/* Scroll up incrementally, checking for content in history */
 	for (i = 0; i < n && term.scr < HISTSIZE - 1; i++) {
@@ -378,9 +403,7 @@ vimnav_scroll_up(int n)
 			vimnav.y = 0;
 	}
 
-	/* Clamp x to line length */
-	linelen = tlinelen(vimnav.y);
-	vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
+	vimnav_restore_saved_column();
 
 	/* Update selection if in visual mode */
 	vimnav_update_selection();
@@ -392,7 +415,6 @@ vimnav_scroll_down(int n)
 	int scrolled;
 	int max_scroll;
 	int requested = n;  /* Save original request before capping */
-	int linelen;
 
 	/* Don't scroll past where the prompt currently is */
 	max_scroll = term.scr;  /* Can scroll down at most term.scr lines */
@@ -426,9 +448,7 @@ vimnav_scroll_down(int n)
 		}
 	}
 
-	/* Clamp x to line length */
-	linelen = tlinelen(vimnav.y);
-	vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
+	vimnav_restore_saved_column();
 
 	/* Update selection if in visual mode */
 	vimnav_update_selection();
@@ -437,7 +457,6 @@ vimnav_scroll_down(int n)
 static void
 vimnav_move_up(void)
 {
-	int linelen;
 	int old_scr = term.scr;
 	int was_in_prompt_space = vimnav_is_prompt_space(vimnav.y);
 
@@ -471,16 +490,13 @@ vimnav_move_up(void)
 		}
 	}
 
-	linelen = tlinelen(vimnav.y);
-	vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
+	vimnav_restore_saved_column();
 	vimnav_update_selection();
 }
 
 static void
 vimnav_move_down(void)
 {
-	int linelen;
-
 	if (vimnav.forced && IS_SET(MODE_ALTSCREEN)) {
 		/* Forced mode on alt screen: full screen is navigable */
 		if (vimnav.y < term.row - 1)
@@ -525,8 +541,7 @@ vimnav_move_down(void)
 		vimnav.savedx = vimnav.x;
 		vimnav.last_shell_x = vimnav.x;
 	} else {
-		linelen = tlinelen(vimnav.y);
-		vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
+		vimnav_restore_saved_column();
 	}
 	vimnav_update_selection();
 }
@@ -1115,7 +1130,6 @@ vimnav_handle_textobj(ulong ksym, int inner)
 static void
 vimnav_move_top(void)
 {
-	int linelen;
 	int was_in_prompt_space = vimnav_is_prompt_space(vimnav.y);
 
 	/* Scroll to top of history, stopping at blank lines */
@@ -1136,28 +1150,20 @@ vimnav_move_top(void)
 		}
 	}
 
-	linelen = tlinelen(vimnav.y);
-	vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
-	if (vimnav.x < 0)
-		vimnav.x = 0;
+	vimnav_restore_saved_column();
 	vimnav_update_selection();
 }
 
 static void
 vimnav_move_bottom(void)
 {
-	int linelen;
-
 	/* Scroll back to show current prompt */
 	if (term.scr > 0) {
 		kscrolldown(&(Arg){ .i = term.scr });
 	}
 	vimnav.y = term.c.y;  /* Use current shell cursor position */
 
-	linelen = tlinelen(vimnav.y);
-	vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
-	if (vimnav.x < 0)
-		vimnav.x = 0;
+	vimnav_restore_saved_column();
 
 	/* Sync cursor to zsh position when entering prompt space */
 	vimnav_sync_to_zsh_cursor();
@@ -1197,19 +1203,13 @@ vimnav_move_prev_prompt(void)
 
 	/* No prompt found above. Move to top of reachable history (like gg). */
 	vimnav.y = 0;
-	{
-		int linelen = tlinelen(vimnav.y);
-		vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
-	}
+	vimnav_restore_saved_column();
 	tfulldirt();
 	goto handoff;
 
 found:
 	vimnav.y = y;
-	{
-		int linelen = tlinelen(vimnav.y);
-		vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
-	}
+	vimnav_restore_saved_column();
 	tfulldirt();
 
 handoff:
@@ -1263,10 +1263,7 @@ found:
 	}
 
 	vimnav.y = y;
-	{
-		int linelen = tlinelen(vimnav.y);
-		vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
-	}
+	vimnav_restore_saved_column();
 
 	/* If we landed in the current prompt space, sync to zsh cursor */
 	if (vimnav_is_prompt_space(vimnav.y))
@@ -1280,12 +1277,8 @@ found:
 static void
 vimnav_move_screen_top(void)
 {
-	int linelen;
-
 	vimnav.y = 0;
-
-	linelen = tlinelen(vimnav.y);
-	vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
+	vimnav_restore_saved_column();
 	vimnav_update_selection();
 }
 
@@ -1293,7 +1286,6 @@ vimnav_move_screen_top(void)
 static void
 vimnav_move_screen_bottom(void)
 {
-	int linelen;
 	int bottom_y;
 
 	if (vimnav.forced && IS_SET(MODE_ALTSCREEN)) {
@@ -1305,9 +1297,7 @@ vimnav_move_screen_bottom(void)
 	}
 
 	vimnav.y = bottom_y;
-
-	linelen = tlinelen(vimnav.y);
-	vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
+	vimnav_restore_saved_column();
 
 	/* Sync cursor to zsh position if we landed in prompt space */
 	if (vimnav_is_prompt_space(vimnav.y))
@@ -1319,7 +1309,6 @@ vimnav_move_screen_bottom(void)
 static void
 vimnav_move_screen_middle(void)
 {
-	int linelen;
 	int bottom_y;
 
 	if (vimnav.forced && IS_SET(MODE_ALTSCREEN)) {
@@ -1331,9 +1320,7 @@ vimnav_move_screen_middle(void)
 	}
 
 	vimnav.y = bottom_y / 2;
-
-	linelen = tlinelen(vimnav.y);
-	vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
+	vimnav_restore_saved_column();
 	vimnav_update_selection();
 }
 
@@ -1341,7 +1328,6 @@ vimnav_move_screen_middle(void)
 static void
 vimnav_move_screen_percent(int percent)
 {
-	int linelen;
 	int target_y;
 
 	target_y = ((term.row - 1) * percent + 50) / 100;
@@ -1354,9 +1340,7 @@ vimnav_move_screen_percent(int percent)
 	}
 
 	vimnav.y = target_y;
-
-	linelen = tlinelen(vimnav.y);
-	vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
+	vimnav_restore_saved_column();
 
 	if (vimnav_is_prompt_space(vimnav.y))
 		vimnav_sync_to_zsh_cursor();
@@ -1366,6 +1350,8 @@ vimnav_move_screen_percent(int percent)
 static void
 vimnav_toggle_visual_char(void)
 {
+	int was_block = vimnav.mode == VIMNAV_VISUAL_BLOCK;
+
 	if (vimnav.mode == VIMNAV_VISUAL) {
 		vimnav.mode = VIMNAV_NORMAL;
 		vimnav_notify_zsh_visual_end();
@@ -1378,6 +1364,8 @@ vimnav_toggle_visual_char(void)
 			vimnav.anchor_abs_y = vimnav_screen_y() - term.scr;
 		}
 		vimnav.mode = VIMNAV_VISUAL;
+		if (was_block)
+			vimnav_restore_saved_column();
 		selstart(vimnav.anchor_x, vimnav.anchor_abs_y + term.scr, 0);
 		selextend(vimnav.x, vimnav_screen_y(), SEL_REGULAR, 0);
 	}
@@ -1388,6 +1376,7 @@ static void
 vimnav_toggle_visual_line(void)
 {
 	int screen_y = vimnav_screen_y();
+	int was_block = vimnav.mode == VIMNAV_VISUAL_BLOCK;
 
 	if (vimnav.mode == VIMNAV_VISUAL_LINE) {
 		vimnav.mode = VIMNAV_NORMAL;
@@ -1399,6 +1388,8 @@ vimnav_toggle_visual_line(void)
 		if (vimnav.mode != VIMNAV_VISUAL && vimnav.mode != VIMNAV_VISUAL_BLOCK)
 			vimnav.anchor_abs_y = screen_y - term.scr;
 		vimnav.mode = VIMNAV_VISUAL_LINE;
+		if (was_block)
+			vimnav_restore_saved_column();
 		selstart(0, vimnav.anchor_abs_y + term.scr, 0);
 		sel.snap = SNAP_LINE;
 		selextend(term.col - 1, screen_y, SEL_REGULAR, 0);
@@ -1411,6 +1402,7 @@ vimnav_toggle_visual_block(void)
 {
 	if (vimnav.mode == VIMNAV_VISUAL_BLOCK) {
 		vimnav.mode = VIMNAV_NORMAL;
+		vimnav_restore_saved_column();
 		vimnav_notify_zsh_visual_end();
 		selclear();
 		vimnav_sync_to_zsh_cursor();
@@ -1422,6 +1414,7 @@ vimnav_toggle_visual_block(void)
 		}
 		vimnav.mode = VIMNAV_VISUAL_BLOCK;
 		selstart(vimnav.anchor_x, vimnav.anchor_abs_y + term.scr, 0);
+		sel.type = SEL_RECTANGULAR;
 		selextend(vimnav.x, vimnav_screen_y(), SEL_RECTANGULAR, 0);
 	}
 	tfulldirt();
@@ -1765,7 +1758,6 @@ vimnav_handle_key(ulong ksym, uint state)
 
 	/* Handle Ctrl+scroll commands */
 	if (state & ControlMask) {
-		int linelen;
 		int max_valid_y;
 		int old_scr, old_y, old_x;
 		switch (ksym) {
@@ -1778,8 +1770,7 @@ vimnav_handle_key(ulong ksym, uint state)
 				/* Scroll happened - move cursor up to keep it on the same content line */
 				if (vimnav.y > 0) {
 					vimnav.y--;
-					linelen = tlinelen(vimnav.y);
-					vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
+					vimnav_restore_saved_column();
 					vimnav_update_selection();
 				}
 			} else {
@@ -1798,8 +1789,7 @@ vimnav_handle_key(ulong ksym, uint state)
 				max_valid_y = term.scr + term.c.y;
 				if (vimnav.y < max_valid_y && vimnav.y < term.row - 1) {
 					vimnav.y++;
-					linelen = tlinelen(vimnav.y);
-					vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
+					vimnav_restore_saved_column();
 					vimnav_update_selection();
 				}
 			} else {
@@ -1819,16 +1809,14 @@ vimnav_handle_key(ulong ksym, uint state)
 			/* Move cursor to bottom of screen */
 			max_valid_y = term.scr + term.c.y;
 			vimnav.y = MIN(term.row - 1, max_valid_y);
-			linelen = tlinelen(vimnav.y);
-			vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
+			vimnav_restore_saved_column();
 			vimnav_update_selection();
 			return 1;
 		case 'f':
 			vimnav_scroll_down(term.row - 4);
 			/* Move cursor to top of screen */
 			vimnav.y = 0;
-			linelen = tlinelen(vimnav.y);
-			vimnav.x = MIN(vimnav.savedx, linelen > 0 ? linelen - 1 : 0);
+			vimnav_restore_saved_column();
 			vimnav_update_selection();
 			return 1;
 		case 'v':
@@ -2050,9 +2038,13 @@ vimnav_handle_key(ulong ksym, uint state)
 	/* Yank */
 	case 'y':
 		if (vimnav_is_visual()) {
+			int was_block = vimnav.mode == VIMNAV_VISUAL_BLOCK;
+
 			/* In visual mode, yank selection */
 			vimnav_yank_selection();
 			vimnav.mode = VIMNAV_NORMAL;
+			if (was_block)
+				vimnav_restore_saved_column();
 			vimnav_notify_zsh_visual_end();  /* Tell zsh to exit visual mode */
 			selclear();
 			vimnav_sync_to_zsh_cursor();  /* Sync cursor if in prompt space */
@@ -2084,7 +2076,11 @@ vimnav_handle_key(ulong ksym, uint state)
 	/* Escape: clear visual selection or stay in normal mode */
 	case 0xff1b: /* XK_Escape */
 		if (vimnav_is_visual()) {
+			int was_block = vimnav.mode == VIMNAV_VISUAL_BLOCK;
+
 			vimnav.mode = VIMNAV_NORMAL;
+			if (was_block)
+				vimnav_restore_saved_column();
 			if (!vimnav.forced)
 				vimnav_notify_zsh_visual_end();  /* Tell zsh to exit visual mode */
 			selclear();
