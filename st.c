@@ -2133,11 +2133,7 @@ strhandle(void)
 			if (narg == 3) {
 				Clip5522Request request;
 				if (clip5522_parse_read(strescseq.args[1], strescseq.args[2], &request)) {
-#ifndef ST_NATIVE_MACOS
 					xclip5522read(&request);
-#else
-					osc5522_error();
-#endif
 					clip5522_request_free(&request);
 				} else {
 					osc5522_error();

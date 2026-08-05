@@ -39,6 +39,7 @@ char *argv0;
 #include "locale.h"
 #include "pty.h"
 #include "reveal.h"
+#include "pasteboard5522.h"
 
 typedef struct {
 	uint mod;
@@ -104,6 +105,7 @@ static int cursorKind;
 static int imeCol, imeRow;
 static uint pressedButtons;
 static char *primarySelection;
+static STPasteboard5522 *pasteboard5522;
 static double defaultFontSize;
 static double fontWidthSpacing = 1.0;
 static int windowRevealed;
@@ -587,6 +589,8 @@ xsetmode(int set, unsigned int flags)
 {
 	int old = win.mode;
 	MODBIT(win.mode, set, flags);
+	if (!set && (flags & MODE_PASTEEVENT))
+		[pasteboard5522 invalidate];
 	if ((old ^ win.mode) & (MODE_REVERSE | MODE_MOUSE | MODE_HIDE)) {
 		tfulldirt();
 		macos_request_redraw();
@@ -699,6 +703,35 @@ writePaste(const char *text)
 }
 
 static void
+pasteboard5522Write(const char *data, size_t length, void *context)
+{
+	(void)context;
+	ttywrite(data, length, 0);
+}
+
+static STPasteboard5522 *
+nativePasteboard5522(void)
+{
+	if (!pasteboard5522)
+		pasteboard5522 = [[STPasteboard5522 alloc]
+		    initWithPasteboard:NSPasteboard.generalPasteboard
+		    writer:pasteboard5522Write context:NULL];
+	return pasteboard5522;
+}
+
+void
+xclip5522read(const Clip5522Request *request)
+{
+	[nativePasteboard5522() readRequest:request];
+}
+
+static void
+x5522paste(void)
+{
+	[nativePasteboard5522() beginPasteEvent];
+}
+
+static void
 clipcopy(const Arg *unused)
 {
 	(void)unused;
@@ -716,6 +749,10 @@ void
 clippaste(const Arg *unused)
 {
 	(void)unused;
+	if (IS_SET(MODE_PASTEEVENT)) {
+		x5522paste();
+		return;
+	}
 	NSString *value = [NSPasteboard.generalPasteboard
 	    stringForType:NSPasteboardTypeString];
 	writePaste(value.UTF8String);
@@ -948,6 +985,13 @@ handleKeyEvent(KeySym symbol, uint state, const char *buffer, int length,
 		case XK_minus: insert = "\xe2\x80\x94"; break;
 		}
 		if (insert) { ttywrite(insert, strlen(insert), 1); return 1; }
+	}
+	/* A TUI that enabled DEC 5522 owns bare Ctrl+V as a rich paste event. */
+	if (IS_SET(MODE_PASTEEVENT) && (symbol == 'v' || symbol == 'V') &&
+	    (state & (ControlMask | ShiftMask)) == ControlMask &&
+	    !(state & ~(ControlMask | LockMask | Mod2Mask))) {
+		x5522paste();
+		return 1;
 	}
 	if ((state & Mod4Mask) && (symbol == 'c' || symbol == 'C')) {
 		clipcopy(NULL); return 1;

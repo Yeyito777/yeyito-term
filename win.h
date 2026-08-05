@@ -68,6 +68,4 @@ void xsetsel(char *);
 int xstartdraw(void);
 void xximspot(int, int);
 void xsetdwmsaveargv(const char *);
-#ifndef ST_NATIVE_MACOS
 void xclip5522read(const Clip5522Request *);
-#endif

@@ -6,6 +6,8 @@ not use XQuartz or link against X11.
 - `backend.m` implements the AppKit application/window lifecycle, keyboard and
   mouse input, clipboard integration, terminal drawing adapter, overlays, and
   the local control socket used by the bundled helper scripts.
+- `pasteboard5522.m` and `pasteboard5522.h` bridge native `NSPasteboard` image
+  and text types to Kitty's authenticated OSC 5522 paste-event protocol.
 - `renderer.m` and `renderer.h` implement the Metal renderer and CoreText glyph
   atlas/font metrics.
 - `glyph_layout.h` keeps color-font glyphs sized and centered by their visible

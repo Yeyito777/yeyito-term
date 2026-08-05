@@ -8,7 +8,7 @@ DIST_SRC = st.c x.c clipboard5522.c clipboard5522.h vimnav.c sshind.c notif.c pe
 
 ifeq ($(UNAME_S),Darwin)
 SRC = st.c clipboard5522.c vimnav.c persist.c cmdline.c search.c macos/locale.c macos/emoji.c
-OBJC_SRC = macos/backend.m macos/renderer.m macos/pty.m
+OBJC_SRC = macos/backend.m macos/renderer.m macos/pty.m macos/pasteboard5522.m
 OBJ = $(SRC:.c=.o) $(OBJC_SRC:.m=.o)
 else
 SRC = st.c x.c clipboard5522.c vimnav.c sshind.c notif.c persist.c cmdline.c search.c
@@ -30,7 +30,8 @@ config.h:
 st.o: config.h st.h win.h vimnav.h persist.h macos/emoji.h
 x.o: arg.h config.h st.h win.h clipboard5522.h sshind.h notif.h persist.h cmdline.h search.h render/gpu.c
 clipboard5522.o: clipboard5522.c clipboard5522.h
-macos/backend.o: macos/backend.m macos/native.h macos/renderer.h macos/pty.h macos/keysyms.h macos/reveal.h config.h st.h win.h
+macos/backend.o: macos/backend.m macos/native.h macos/renderer.h macos/pty.h macos/pasteboard5522.h macos/keysyms.h macos/reveal.h config.h st.h win.h
+macos/pasteboard5522.o: macos/pasteboard5522.m macos/pasteboard5522.h clipboard5522.h
 macos/locale.o: macos/locale.c macos/locale.h
 	$(CC) $(STCFLAGS) -c macos/locale.c -o macos/locale.o
 macos/emoji.o: macos/emoji.c macos/emoji.h st.h
@@ -85,7 +86,7 @@ install-hint:
 
 clean:
 	rm -f st $(OBJ) st-$(VERSION).tar.gz
-	rm -f x.o sshind.o notif.o macos/backend.o macos/renderer.o
+	rm -f x.o sshind.o notif.o macos/backend.o macos/renderer.o macos/pasteboard5522.o
 	rm -f a.out
 	$(MAKE) clean-tests
 	rm -rf .build
@@ -98,7 +99,7 @@ dist: clean
 		config.def.h st.info st.1 arg.h st.h win.h vimnav.h sshind.h notif.h persist.h cmdline.h cmdline_layout.h search.h $(DIST_SRC)\
 		st-$(VERSION)
 	cp -R render/gpu.c render/README.md st-$(VERSION)/render
-	cp -R macos/README.md macos/Info.plist macos/backend.m macos/keysyms.h macos/native.h macos/reveal.h\
+	cp -R macos/README.md macos/Info.plist macos/backend.m macos/pasteboard5522.h macos/pasteboard5522.m macos/keysyms.h macos/native.h macos/reveal.h\
 		macos/renderer.h macos/renderer.m macos/glyph_layout.h macos/emoji.h macos/emoji.c\
 		macos/pty.h macos/pty.m macos/locale.h macos/locale.c\
 		macos/st-icon.png macos/st.icns\
@@ -241,6 +242,12 @@ tests/macos_emoji.o: macos/emoji.c macos/emoji.h st.h
 
 test_macos_emoji: tests/test_macos_emoji.o tests/macos_emoji.o
 	$(CC) -o tests/test_macos_emoji tests/test_macos_emoji.o tests/macos_emoji.o
+
+tests/test_macos_pasteboard5522.o: tests/test_macos_pasteboard5522.m tests/test.h macos/pasteboard5522.h clipboard5522.h
+	$(CC) $(STOBJCFLAGS) -c tests/test_macos_pasteboard5522.m -o tests/test_macos_pasteboard5522.o
+
+test_macos_pasteboard5522: tests/test_macos_pasteboard5522.o macos/pasteboard5522.o clipboard5522.o
+	$(CC) -o tests/test_macos_pasteboard5522 tests/test_macos_pasteboard5522.o macos/pasteboard5522.o clipboard5522.o -framework AppKit
 endif
 
 test_gpu_regressions: st
@@ -251,7 +258,7 @@ test_aerospace_launcher:
 
 test: test_vimnav test_sshind test_scrollback test_cwd test_notif test_persist test_search test_cmdline_layout test_mode_reset test_clipboard5522 test_aerospace_launcher
 ifeq ($(UNAME_S),Darwin)
-test: test_macos_pty test_macos_reveal test_macos_locale test_macos_glyph_layout test_macos_emoji
+test: test_macos_pty test_macos_reveal test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522
 endif
 	@echo "Running tests..."
 	@./tests/test_vimnav
@@ -270,9 +277,10 @@ ifeq ($(UNAME_S),Darwin)
 	@./tests/test_macos_locale
 	@./tests/test_macos_glyph_layout
 	@./tests/test_macos_emoji
+	@./tests/test_macos_pasteboard5522
 endif
 
 clean-tests:
-	rm -f tests/*.o tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search tests/test_cmdline_layout tests/test_mode_reset tests/test_clipboard5522 tests/test_macos_pty tests/test_macos_reveal tests/test_macos_locale tests/test_macos_glyph_layout tests/test_macos_emoji
+	rm -f tests/*.o tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search tests/test_cmdline_layout tests/test_mode_reset tests/test_clipboard5522 tests/test_macos_pty tests/test_macos_reveal tests/test_macos_locale tests/test_macos_glyph_layout tests/test_macos_emoji tests/test_macos_pasteboard5522
 
-.PHONY: all app install-app uninstall-app install-hint clean dist install uninstall test test_gpu_regressions test_aerospace_launcher test_mode_reset test_macos_pty test_macos_reveal test_macos_locale test_macos_glyph_layout test_macos_emoji clean-tests
+.PHONY: all app install-app uninstall-app install-hint clean dist install uninstall test test_gpu_regressions test_aerospace_launcher test_mode_reset test_macos_pty test_macos_reveal test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522 clean-tests
