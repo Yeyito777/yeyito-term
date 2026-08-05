@@ -56,6 +56,7 @@ int xgpuactive(void);
 void xsetmode(int, unsigned int);
 void xresetmode(void);
 int xgpuenabled(void);
+void xsetgraphicsmode(int);
 int xdrawrowtop(int);
 int xdrawrowbottom(int);
 void xsetpointermotion(int);

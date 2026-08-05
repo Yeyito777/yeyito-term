@@ -565,6 +565,7 @@ xfinishdraw(void)
 
 int xgpuactive(void) { return 1; }
 int xgpuenabled(void) { return 1; }
+void xsetgraphicsmode(int set) { (void)set; }
 
 int
 xgetcursor(void)

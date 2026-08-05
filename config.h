@@ -29,7 +29,18 @@ char *vtiden = "\033[?6c";
 
 /* Kerning / character bounding-box multipliers */
 static float cwscale = 1.0;
+/* Preserve the normal text geometry. Applications can temporarily request the
+ * graphics scale below while presenting aspect-sensitive half-block art. */
 static float chscale = 1.0;
+#ifdef __APPLE__
+static float graphicschscale = 1.0;
+#else
+static float graphicschscale = 0.8;
+#endif
+
+/* Draw filled block elements as exact cell rectangles instead of font glyphs.
+ * This prevents hairline seams between U+2580/U+2584/U+2588 cells. */
+static int blockdraw = 1;
 
 /* Use the experimental OpenGL/FreeType renderer for the terminal grid. */
 static int gpudraw = 1;

@@ -766,6 +766,24 @@ gpubatchrect(GpuBatch *b, double x, double y, double w, double h, float c[3])
 	gpubatchquad(b, x, y, w, h, 0, 0, 0, 0, c);
 }
 
+static int
+gpubatchfilledblock(GpuBatch *b, Rune rune, int x, int y, int w, int h,
+                    float color[3])
+{
+	int blocky = y, blockh = h;
+
+	if (!isfilledblock(rune))
+		return 0;
+	if (rune == 0x2580)
+		blockh = (h + 1) / 2;
+	else if (rune == 0x2584) {
+		blocky += h / 2;
+		blockh -= h / 2;
+	}
+	gpubatchrect(b, x, blocky, w, blockh, color);
+	return 1;
+}
+
 static void
 gpubatchglyph(GpuBatch *b, double x, double y, double w, double h,
               GpuGlyph *g, float c[3])
@@ -863,21 +881,24 @@ gpudrawline(Line line, int x1, int y, int x2)
 			memcpy(runbg, bg, sizeof runbg);
 		}
 		if (g.u != ' ') {
-			gg = gpuglyph(g.u, g.mode);
-			if (gg && gg->valid && gg->w > 0 && gg->h > 0) {
-				if (gg->color) {
-					double fitw = MAX(cellw, rowh);
-					double scale = MIN(fitw / MAX(1, gg->ow), (double)rowh / MAX(1, gg->oh));
-					scale *= 0.94;
-					int dw = MAX(1, gpuround(gg->w * scale));
-					int dh = MAX(1, gpuround(gg->h * scale));
-					int dx = cellx + (cellw - dw) / 2;
-					int dy = basey + (rowh - dh) / 2;
-					gpubatchglyph(&gpu.ctext, dx, dy, dw, dh, gg, white);
-				} else {
-					int dx = cellx + gg->left;
-					int dy = baseline - gg->top;
-					gpubatchglyph(&gpu.text, dx, dy, gg->w, gg->h, gg, fg);
+			if (!gpubatchfilledblock(&gpu.deco, g.u, cellx, basey,
+			                         cellw, rowh, fg)) {
+				gg = gpuglyph(g.u, g.mode);
+				if (gg && gg->valid && gg->w > 0 && gg->h > 0) {
+					if (gg->color) {
+						double fitw = MAX(cellw, rowh);
+						double scale = MIN(fitw / MAX(1, gg->ow), (double)rowh / MAX(1, gg->oh));
+						scale *= 0.94;
+						int dw = MAX(1, gpuround(gg->w * scale));
+						int dh = MAX(1, gpuround(gg->h * scale));
+						int dx = cellx + (cellw - dw) / 2;
+						int dy = basey + (rowh - dh) / 2;
+						gpubatchglyph(&gpu.ctext, dx, dy, dw, dh, gg, white);
+					} else {
+						int dx = cellx + gg->left;
+						int dy = baseline - gg->top;
+						gpubatchglyph(&gpu.text, dx, dy, gg->w, gg->h, gg, fg);
+					}
 				}
 			}
 		}
@@ -916,21 +937,23 @@ gpudrawcell(Glyph g, int x, int y, int overlay)
 	cellw = gpucellright(x, g.mode & ATTR_WIDE) - cellx;
 	gpubatchrect(bb, cellx, celly, cellw, cellh, bg);
 	if (g.u != ' ') {
-		gg = gpuglyph(g.u, g.mode);
-		if (gg && gg->valid && gg->w > 0 && gg->h > 0) {
-			if (gg->color) {
-				double fitw = MAX(cellw, cellh);
-				double scale = MIN(fitw / MAX(1, gg->ow), (double)cellh / MAX(1, gg->oh));
-				scale *= 0.94;
-				int dw = MAX(1, gpuround(gg->w * scale));
-				int dh = MAX(1, gpuround(gg->h * scale));
-				int dx = cellx + (cellw - dw) / 2;
-				int dy = celly + (cellh - dh) / 2;
-				gpubatchglyph(ctb, dx, dy, dw, dh, gg, white);
-			} else {
-				int dx = cellx + gg->left;
-				int dy = baseline - gg->top;
-				gpubatchglyph(tb, dx, dy, gg->w, gg->h, gg, fg);
+		if (!gpubatchfilledblock(db, g.u, cellx, celly, cellw, cellh, fg)) {
+			gg = gpuglyph(g.u, g.mode);
+			if (gg && gg->valid && gg->w > 0 && gg->h > 0) {
+				if (gg->color) {
+					double fitw = MAX(cellw, cellh);
+					double scale = MIN(fitw / MAX(1, gg->ow), (double)cellh / MAX(1, gg->oh));
+					scale *= 0.94;
+					int dw = MAX(1, gpuround(gg->w * scale));
+					int dh = MAX(1, gpuround(gg->h * scale));
+					int dx = cellx + (cellw - dw) / 2;
+					int dy = celly + (cellh - dh) / 2;
+					gpubatchglyph(ctb, dx, dy, dw, dh, gg, white);
+				} else {
+					int dx = cellx + gg->left;
+					int dy = baseline - gg->top;
+					gpubatchglyph(tb, dx, dy, gg->w, gg->h, gg, fg);
+				}
 			}
 		}
 	}

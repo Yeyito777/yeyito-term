@@ -2199,10 +2199,12 @@ strhandle(void)
 				 * \033]777;mouseshape;pointer\a  →  left_ptr    (1)
 				 * \033]777;mouseshape;hand\a     →  hand2       (2) */
 				int shape = 0;
-				if (!strcmp(strescseq.args[2], "pointer")) shape = 1;
-				else if (!strcmp(strescseq.args[2], "hand")) shape = 2;
-				xsetmousecursor(shape);
-			}
+					if (!strcmp(strescseq.args[2], "pointer")) shape = 1;
+					else if (!strcmp(strescseq.args[2], "hand")) shape = 2;
+					xsetmousecursor(shape);
+				} else if (narg >= 3 && !strcmp(strescseq.args[1], "graphics-cells")) {
+					xsetgraphicsmode(!strcmp(strescseq.args[2], "enter"));
+				}
 			return;
 		case 778: /* st custom: SSH indicator */
 			if (narg >= 3 && !strcmp(strescseq.args[1], "ssh")) {

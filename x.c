@@ -91,6 +91,12 @@ static void ttysend(const Arg *);
 #define TRUEGREEN(x)		(((x) & 0xff00))
 #define TRUEBLUE(x)		(((x) & 0xff) << 8)
 
+static int
+isfilledblock(Rune rune)
+{
+	return blockdraw && (rune == 0x2580 || rune == 0x2584 || rune == 0x2588);
+}
+
 typedef XftDraw *Draw;
 typedef XftColor Color;
 typedef XftGlyphFontSpec GlyphFontSpec;
@@ -382,6 +388,27 @@ zoomreset(const Arg *arg)
 		larg.f = defaultfontsize;
 		zoomabs(&larg);
 	}
+}
+
+void
+xsetgraphicsmode(int set)
+{
+	static float textchscale;
+	static int active;
+	Arg larg;
+
+	set = !!set;
+	if (set == active)
+		return;
+	if (set) {
+		textchscale = chscale;
+		chscale = graphicschscale;
+	} else {
+		chscale = textchscale;
+	}
+	active = set;
+	larg.f = usedfontsize;
+	zoomabs(&larg);
 }
 
 void
@@ -1745,7 +1772,18 @@ xdrawglyphfontspecs(const XftGlyphFontSpec *specs, Glyph base, int len, int x, i
 
 	if (dmode & DRAW_FG) {
 		/* Render the glyphs. */
-		XftDrawGlyphFontSpec(xw.draw, fg, specs, len);
+		if (isfilledblock(base.u)) {
+			int blocky = winy, blockh = win.ch;
+			if (base.u == 0x2580)
+				blockh = (win.ch + 1) / 2;
+			else if (base.u == 0x2584) {
+				blocky += win.ch / 2;
+				blockh -= win.ch / 2;
+			}
+			XftDrawRect(xw.draw, fg, winx, blocky, width, blockh);
+		} else {
+			XftDrawGlyphFontSpec(xw.draw, fg, specs, len);
+		}
 
 		/* Render underline and strikethrough. */
 		if (base.mode & ATTR_UNDERLINE) {
@@ -2026,7 +2064,8 @@ xdrawline(Line line, int x1, int y1, int x2)
 				new.mode |= ATTR_SELECTED;
 			if (search_matched(x, y1))
 				new.mode |= ATTR_MATCH;
-			if (i > 0 && ATTRCMP(base, new)) {
+			if (i > 0 && (ATTRCMP(base, new) ||
+			    isfilledblock(base.u) || isfilledblock(new.u))) {
 				xdrawglyphfontspecs(specs, base, i, ox, y1, dmode);
 				specs += i;
 				numspecs -= i;
