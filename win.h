@@ -1,4 +1,5 @@
 /* See LICENSE for license details. */
+#include "clipboard5522.h"
 
 enum win_mode {
 	MODE_VISIBLE     = 1 << 0,
@@ -20,6 +21,7 @@ enum win_mode {
 	MODE_MOUSEMANY   = 1 << 15,
 	MODE_BRCKTPASTE  = 1 << 16,
 	MODE_NUMLOCK     = 1 << 17,
+	MODE_PASTEEVENT  = 1 << 19,
 	MODE_MOUSE       = MODE_MOUSEBTN|MODE_MOUSEMOTION|MODE_MOUSEX10\
 	                  |MODE_MOUSEMANY,
 };
@@ -29,7 +31,7 @@ enum win_mode {
  * disconnects before a remote TUI can emit its normal teardown sequences). */
 #define MODE_APPRESET (MODE_APPKEYPAD | MODE_MOUSE | MODE_REVERSE | \
 	MODE_KBDLOCK | MODE_HIDE | MODE_APPCURSOR | MODE_MOUSESGR | MODE_8BIT | \
-	MODE_KITTYKBD | MODE_FOCUS | MODE_BRCKTPASTE)
+	MODE_KITTYKBD | MODE_FOCUS | MODE_BRCKTPASTE | MODE_PASTEEVENT)
 
 static inline unsigned int
 winmoderestore(unsigned int mode)
@@ -54,6 +56,7 @@ int xgetcursor(void);
 int xsetcursor(int);
 int xgpuactive(void);
 void xsetmode(int, unsigned int);
+int xismode(unsigned int);
 void xresetmode(void);
 int xgpuenabled(void);
 void xsetgraphicsmode(int);
@@ -65,3 +68,6 @@ void xsetsel(char *);
 int xstartdraw(void);
 void xximspot(int, int);
 void xsetdwmsaveargv(const char *);
+#ifndef ST_NATIVE_MACOS
+void xclip5522read(const Clip5522Request *);
+#endif

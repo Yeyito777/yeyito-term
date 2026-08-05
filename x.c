@@ -1,5 +1,6 @@
 /* See LICENSE for license details. */
 #include <errno.h>
+#include <fcntl.h>
 #include <math.h>
 #include <limits.h>
 #include <locale.h>
@@ -32,6 +33,7 @@ char *argv0;
 #include "st.h"
 #include "win.h"
 #include "persist.h"
+#include "clipboard5522.h"
 
 /* types used in config.h */
 typedef struct {
@@ -130,7 +132,7 @@ typedef struct {
 	Window win;
 	Drawable buf;
 	GlyphFontSpec *specbuf; /* font spec buffer used for rendering */
-	Atom xembed, wmdeletewin, netwmname, netwmiconname, netwmpid, stcwd, stnotify, stsavecmd;
+	Atom xembed, wmdeletewin, netwmname, netwmiconname, netwmpid, stcwd, stnotify, stsavecmd, clip5522;
 	struct {
 		XIM xim;
 		XIC xic;
@@ -236,6 +238,10 @@ static void mousesel(XEvent *, int);
 static void mousereport(XEvent *);
 static char *kmap(KeySym, uint);
 static int match(uint, uint);
+static int clip5522_selnotify(XSelectionEvent *);
+static int clip5522_propnotify(XPropertyEvent *);
+static void clip5522_paste(Atom);
+static void clip5522_tick(const struct timespec *);
 
 static void run(void);
 static void usage(void);
@@ -272,6 +278,41 @@ DC dc;               /* non-static for sshind.c access */
 XWindow xw;          /* non-static for sshind.c access */
 static XSelection xsel;
 TermWindow win;      /* non-static for sshind.c access */
+
+/* A single X selection transfer is active at once.  Keeping it streaming is
+ * important: images must never pass through st's text-paste path or be held
+ * wholesale in terminal memory. */
+enum Clip5522Operation {
+	CLIP5522_IDLE,
+	CLIP5522_EVENT_TARGETS,
+	CLIP5522_LIST_TARGETS,
+	CLIP5522_READ,
+};
+
+typedef struct {
+	enum Clip5522Operation operation;
+	Atom selection;
+	Atom text_target;
+	char **mimes;
+	size_t nmimes, next, bytes;
+	int incr, sent_ok;
+	struct timespec deadline;
+} Clip5522Transfer;
+
+typedef struct {
+	char value[128];             /* base64 encoded, safe for OSC metadata */
+	Atom selection;
+	Atom text_target;
+	struct timespec expiry;
+	int valid;
+} Clip5522Token;
+
+static Clip5522Transfer clip5522_transfer;
+static Clip5522Token clip5522_token;
+
+#define CLIP5522_MAX_BYTES (32U * 1024U * 1024U)
+#define CLIP5522_MAX_TARGETS 128
+#define CLIP5522_TIMEOUT 15
 
 /* Mouse cursors: text I-beam (default), pointer arrow, and hand (clickable) */
 static Cursor xcursortext;
@@ -318,6 +359,375 @@ static int opt_fromorphan = 0;
 
 static uint buttons; /* bit field of pressed buttons */
 
+static void
+clip5522_write(const char *data, size_t length, void *context)
+{
+	(void)context;
+	ttywrite(data, length, 0);
+}
+
+static void
+clip5522_clear_transfer(void)
+{
+	size_t i;
+	for (i = 0; i < clip5522_transfer.nmimes; i++)
+		free(clip5522_transfer.mimes[i]);
+	free(clip5522_transfer.mimes);
+	memset(&clip5522_transfer, 0, sizeof(clip5522_transfer));
+}
+
+static void
+clip5522_finish(void)
+{
+	if (clip5522_transfer.sent_ok)
+		clip5522_status(clip5522_write, NULL, "DONE", 0, NULL);
+	clip5522_clear_transfer();
+}
+
+static void
+clip5522_error(const char *status)
+{
+	clip5522_status(clip5522_write, NULL, status, 0, NULL);
+}
+
+static void
+clip5522_abort_read(const char *status)
+{
+	clip5522_error(status);
+	clip5522_clear_transfer();
+}
+
+static void
+clip5522_deadline(struct timespec *deadline)
+{
+	clock_gettime(CLOCK_MONOTONIC, deadline);
+	deadline->tv_sec += CLIP5522_TIMEOUT;
+}
+
+static int
+clip5522_expired(const struct timespec *now, const struct timespec *deadline)
+{
+	return now->tv_sec > deadline->tv_sec ||
+		(now->tv_sec == deadline->tv_sec && now->tv_nsec > deadline->tv_nsec);
+}
+
+static int
+clip5522_make_token(Atom selection)
+{
+	unsigned char raw[24];
+	int fd;
+	ssize_t got;
+	char *encoded = NULL;
+
+	fd = open("/dev/urandom", O_RDONLY);
+	if (fd < 0)
+		return 0;
+	got = read(fd, raw, sizeof(raw));
+	close(fd);
+	if (got != sizeof(raw) || !clip5522_base64(raw, sizeof(raw), &encoded))
+		return 0;
+	if (strlen(encoded) >= sizeof(clip5522_token.value)) {
+		free(encoded);
+		return 0;
+	}
+	strcpy(clip5522_token.value, encoded);
+	free(encoded);
+	clip5522_token.selection = selection;
+	clip5522_token.text_target = clip5522_transfer.text_target;
+	clip5522_deadline(&clip5522_token.expiry);
+	clip5522_token.valid = 1;
+	return 1;
+}
+
+static int
+clip5522_add_mime(const char *mime)
+{
+	size_t i;
+	char **mimes;
+	if (!clip5522_mime_is_valid(mime))
+		return 1;
+	for (i = 0; i < clip5522_transfer.nmimes; i++)
+		if (!strcmp(clip5522_transfer.mimes[i], mime))
+			return 1;
+	if (clip5522_transfer.nmimes == CLIP5522_MAX_TARGETS)
+		return 0;
+	mimes = realloc(clip5522_transfer.mimes,
+		(clip5522_transfer.nmimes + 1) * sizeof(*mimes));
+	if (!mimes)
+		return 0;
+	clip5522_transfer.mimes = mimes;
+	clip5522_transfer.mimes[clip5522_transfer.nmimes] = xstrdup(mime);
+	clip5522_transfer.nmimes++;
+	return 1;
+}
+
+static void
+clip5522_send_targets(void)
+{
+	char *list;
+	int primary = clip5522_transfer.selection == XA_PRIMARY;
+
+	list = clip5522_join_mimes(clip5522_transfer.mimes,
+		clip5522_transfer.nmimes);
+	if (!list) {
+		clip5522_clear_transfer();
+		return;
+	}
+	if (clip5522_transfer.operation == CLIP5522_EVENT_TARGETS) {
+		if (clip5522_make_token(clip5522_transfer.selection)) {
+			clip5522_status(clip5522_write, NULL, "OK", primary,
+				clip5522_token.value);
+			clip5522_data(clip5522_write, NULL, ".",
+				(const unsigned char *)list, strlen(list), clip5522_token.value);
+			clip5522_status(clip5522_write, NULL, "DONE", 0,
+				clip5522_token.value);
+		}
+	} else {
+		clip5522_status(clip5522_write, NULL, "OK", 0, NULL);
+		clip5522_data(clip5522_write, NULL, ".",
+			(const unsigned char *)list, strlen(list), NULL);
+		clip5522_status(clip5522_write, NULL, "DONE", 0, NULL);
+	}
+	free(list);
+	clip5522_clear_transfer();
+}
+
+static void
+clip5522_collect_targets(Atom property)
+{
+	Atom type;
+	int format;
+	unsigned long nitems, remaining, offset = 0;
+	unsigned char *data = NULL;
+	Atom utf8 = XInternAtom(xw.dpy, "UTF8_STRING", False);
+	Atom text = XInternAtom(xw.dpy, "TEXT", False);
+	Atom compound = XInternAtom(xw.dpy, "COMPOUND_TEXT", False);
+
+	do {
+		if (XGetWindowProperty(xw.dpy, xw.win, property, offset, 1024,
+			False, XA_ATOM, &type, &format, &nitems, &remaining, &data) != Success ||
+			type != XA_ATOM || format != 32)
+			break;
+		for (unsigned long i = 0; i < nitems; i++) {
+			Atom atom = ((Atom *)data)[i];
+			char *name = XGetAtomName(xw.dpy, atom);
+			if (atom == utf8 || atom == text || atom == compound || atom == XA_STRING)
+				clip5522_transfer.text_target = atom;
+			if (name) {
+				clip5522_add_mime(name);
+				XFree(name);
+			}
+		}
+		offset += nitems;
+		XFree(data);
+		data = NULL;
+	} while (remaining && offset < 4096);
+	if (data) XFree(data);
+	XDeleteProperty(xw.dpy, xw.win, property);
+	if (clip5522_transfer.text_target)
+		clip5522_add_mime("text/plain");
+	clip5522_send_targets();
+}
+
+static void clip5522_next(void);
+
+static void
+clip5522_consume_data(Atom property)
+{
+	Atom type, incr;
+	int format;
+	unsigned long nitems, remaining, offset = 0;
+	unsigned char *data = NULL;
+	incr = XInternAtom(xw.dpy, "INCR", False);
+
+	do {
+		if (XGetWindowProperty(xw.dpy, xw.win, property, offset, 1024,
+			False, AnyPropertyType, &type, &format, &nitems, &remaining, &data) != Success)
+			goto failed;
+		if (type == incr) {
+			/* The advertised INCR size is advisory, but reject huge transfers. */
+			if (nitems && *(unsigned long *)data > CLIP5522_MAX_BYTES)
+				goto failed;
+			clip5522_transfer.incr = 1;
+			XFree(data);
+			XDeleteProperty(xw.dpy, xw.win, property);
+			return;
+		}
+		if (format != 8) goto failed;
+		if (nitems) {
+			if (clip5522_transfer.bytes + nitems > CLIP5522_MAX_BYTES)
+				goto failed;
+			clip5522_data(clip5522_write, NULL,
+				clip5522_transfer.mimes[clip5522_transfer.next], data, nitems, NULL);
+			clip5522_transfer.bytes += nitems;
+		}
+		offset += nitems / 4; /* long_offset is measured in 32-bit units */
+		XFree(data);
+		data = NULL;
+	} while (remaining && offset < CLIP5522_MAX_BYTES / 4);
+
+	/* A zero-sized INCR property ends that target; normal properties end here. */
+	if (!remaining) {
+		int was_incr = clip5522_transfer.incr;
+		XDeleteProperty(xw.dpy, xw.win, property);
+		if (!was_incr || nitems == 0) {
+			clip5522_transfer.incr = 0;
+			clip5522_transfer.next++;
+			clip5522_transfer.bytes = 0;
+			clip5522_next();
+		}
+		return;
+	}
+	failed:
+	if (data) XFree(data);
+	XDeleteProperty(xw.dpy, xw.win, property);
+	clip5522_abort_read("EIO");
+}
+
+static void
+clip5522_next(void)
+{
+	Atom target;
+	if (clip5522_transfer.next >= clip5522_transfer.nmimes) {
+		clip5522_finish();
+		return;
+	}
+	target = !strcmp(clip5522_transfer.mimes[clip5522_transfer.next], "text/plain") &&
+		clip5522_transfer.text_target ? clip5522_transfer.text_target :
+		XInternAtom(xw.dpy, clip5522_transfer.mimes[clip5522_transfer.next], False);
+	if (target == None) {
+		clip5522_transfer.next++;
+		clip5522_next();
+		return;
+	}
+	clip5522_deadline(&clip5522_transfer.deadline);
+	XConvertSelection(xw.dpy, clip5522_transfer.selection, target, xw.clip5522,
+		xw.win, CurrentTime);
+}
+
+/* Called by st.c after its OSC parser has bounded and decoded a read request. */
+void
+xclip5522read(const Clip5522Request *request)
+{
+	struct timespec now;
+	size_t i;
+	if (clip5522_transfer.operation != CLIP5522_IDLE) {
+		clip5522_error("EBUSY");
+		return;
+	}
+	if (request->nmimes == 1 && !strcmp(request->mimes[0], ".")) {
+		clip5522_transfer.operation = CLIP5522_LIST_TARGETS;
+		clip5522_transfer.selection = request->primary ? XA_PRIMARY :
+			XInternAtom(xw.dpy, "CLIPBOARD", False);
+		clip5522_deadline(&clip5522_transfer.deadline);
+		XConvertSelection(xw.dpy, clip5522_transfer.selection,
+			XInternAtom(xw.dpy, "TARGETS", False), xw.clip5522, xw.win, CurrentTime);
+		return;
+	}
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	if (!request->password || !request->paste_event_name || !clip5522_token.valid ||
+		clip5522_expired(&now, &clip5522_token.expiry) ||
+		strcmp(request->password, clip5522_token.value) ||
+		clip5522_token.selection != (request->primary ? XA_PRIMARY :
+			XInternAtom(xw.dpy, "CLIPBOARD", False))) {
+		clip5522_error("EPERM");
+		return;
+	}
+	clip5522_token.valid = 0; /* a paste event password is strictly single-use */
+	clip5522_transfer.operation = CLIP5522_READ;
+	clip5522_transfer.selection = request->primary ? XA_PRIMARY :
+		XInternAtom(xw.dpy, "CLIPBOARD", False);
+	clip5522_transfer.text_target = clip5522_token.text_target;
+	for (i = 0; i < request->nmimes; i++) {
+		char **mimes = realloc(clip5522_transfer.mimes,
+			(clip5522_transfer.nmimes + 1) * sizeof(*mimes));
+		if (!mimes) break;
+		clip5522_transfer.mimes = mimes;
+		clip5522_transfer.mimes[clip5522_transfer.nmimes++] = xstrdup(request->mimes[i]);
+	}
+	if (!clip5522_transfer.nmimes) {
+		clip5522_clear_transfer();
+		clip5522_error("ENOSYS");
+		return;
+	}
+	clip5522_transfer.sent_ok = 1;
+	clip5522_status(clip5522_write, NULL, "OK", 0, NULL);
+	clip5522_next();
+}
+
+void
+x5522paste(int primary)
+{
+	clip5522_paste(primary ? XA_PRIMARY : XInternAtom(xw.dpy, "CLIPBOARD", False));
+}
+
+static void
+clip5522_paste(Atom selection)
+{
+	if (clip5522_transfer.operation != CLIP5522_IDLE)
+		return;
+	clip5522_transfer.operation = CLIP5522_EVENT_TARGETS;
+	clip5522_transfer.selection = selection;
+	clip5522_deadline(&clip5522_transfer.deadline);
+	XConvertSelection(xw.dpy, selection, XInternAtom(xw.dpy, "TARGETS", False),
+		xw.clip5522, xw.win, CurrentTime);
+}
+
+static int
+clip5522_selnotify(XSelectionEvent *event)
+{
+	if (clip5522_transfer.operation == CLIP5522_IDLE ||
+		(event->property != xw.clip5522 && event->property != None))
+		return 0;
+	if (event->property == None) {
+		if (clip5522_transfer.operation == CLIP5522_READ) {
+			clip5522_transfer.next++;
+			clip5522_next();
+		} else if (clip5522_transfer.operation == CLIP5522_EVENT_TARGETS) {
+			/* A clipboard with no owner is still a paste event with no types. */
+			clip5522_send_targets();
+		} else if (clip5522_transfer.operation == CLIP5522_LIST_TARGETS)
+			clip5522_error("ENOSYS");
+		if (clip5522_transfer.operation != CLIP5522_READ &&
+			clip5522_transfer.operation != CLIP5522_IDLE)
+			clip5522_clear_transfer();
+		return 1;
+	}
+	if (clip5522_transfer.operation == CLIP5522_READ)
+		clip5522_consume_data(event->property);
+	else
+		clip5522_collect_targets(event->property);
+	return 1;
+}
+
+static int
+clip5522_propnotify(XPropertyEvent *event)
+{
+	if (clip5522_transfer.operation != CLIP5522_READ || !clip5522_transfer.incr ||
+		event->atom != xw.clip5522 || event->state != PropertyNewValue)
+		return 0;
+	clip5522_consume_data(event->atom);
+	return 1;
+}
+
+static void
+clip5522_tick(const struct timespec *now)
+{
+	if (clip5522_token.valid && clip5522_expired(now, &clip5522_token.expiry))
+		clip5522_token.valid = 0;
+	if (clip5522_transfer.operation != CLIP5522_IDLE &&
+		clip5522_expired(now, &clip5522_transfer.deadline)) {
+		if (clip5522_transfer.operation == CLIP5522_READ)
+			clip5522_abort_read("EIO");
+		else if (clip5522_transfer.operation == CLIP5522_EVENT_TARGETS)
+			clip5522_send_targets();
+		else if (clip5522_transfer.operation == CLIP5522_LIST_TARGETS)
+			clip5522_error("ENOSYS");
+		if (clip5522_transfer.operation != CLIP5522_IDLE)
+			clip5522_clear_transfer();
+	}
+}
+
 void
 clipcopy(const Arg *dummy)
 {
@@ -338,6 +748,10 @@ clippaste(const Arg *dummy)
 {
 	Atom clipboard;
 
+	if (IS_SET(MODE_PASTEEVENT)) {
+		x5522paste(0);
+		return;
+	}
 	clipboard = XInternAtom(xw.dpy, "CLIPBOARD", 0);
 	XConvertSelection(xw.dpy, clipboard, xsel.xtarget, clipboard,
 			xw.win, CurrentTime);
@@ -346,6 +760,10 @@ clippaste(const Arg *dummy)
 void
 selpaste(const Arg *dummy)
 {
+	if (IS_SET(MODE_PASTEEVENT)) {
+		x5522paste(1);
+		return;
+	}
 	XConvertSelection(xw.dpy, XA_PRIMARY, xsel.xtarget, XA_PRIMARY,
 			xw.win, CurrentTime);
 }
@@ -636,6 +1054,8 @@ propnotify(XEvent *e)
 			 xpev->atom == clipboard)) {
 		selnotify(e);
 	}
+	if (clip5522_propnotify(xpev))
+		return;
 
 	if (xpev->state == PropertyNewValue && xpev->atom == xw.stnotify) {
 		Atom type;
@@ -671,6 +1091,9 @@ selnotify(XEvent *e)
 	int format;
 	uchar *data, *last, *repl;
 	Atom type, incratom, property = None;
+
+	if (e->type == SelectionNotify && clip5522_selnotify(&e->xselection))
+		return;
 
 	incratom = XInternAtom(xw.dpy, "INCR", 0);
 
@@ -1408,6 +1831,7 @@ xinitatoms(pid_t thispid)
 	xw.stcwd = XInternAtom(xw.dpy, "_ST_CWD", False);
 	xw.stnotify = XInternAtom(xw.dpy, "_ST_NOTIFY", False);
 	xw.stsavecmd = XInternAtom(xw.dpy, "_ST_SAVE_CMD", False);
+	xw.clip5522 = XInternAtom(xw.dpy, "_ST_CLIPBOARD_5522", False);
 }
 
 void
@@ -2185,6 +2609,8 @@ xsetmode(int set, unsigned int flags)
 {
 	int mode = win.mode;
 	MODBIT(win.mode, set, flags);
+	if (!set && (flags & MODE_PASTEEVENT))
+		clip5522_token.valid = 0;
 	if ((win.mode & MODE_REVERSE) != (mode & MODE_REVERSE))
 		redraw();
 	if ((win.mode & MODE_MOUSE) != (mode & MODE_MOUSE)) {
@@ -2192,6 +2618,12 @@ xsetmode(int set, unsigned int flags)
 		XDefineCursor(xw.dpy, xw.win, IS_SET(MODE_MOUSE)
 			? xcursorpointer : xcursortext);
 	}
+}
+
+int
+xismode(unsigned int flags)
+{
+	return (win.mode & flags) == flags;
 }
 
 void
@@ -2503,6 +2935,16 @@ kpress(XEvent *ev)
 		}
 	}
 
+	/* Keep ordinary ^V for shells, except while a TUI explicitly opted into
+	 * DEC 5522 paste events.  Ctrl+Shift+V remains the configured text-paste
+	 * shortcut (which itself uses the rich event while that mode is enabled). */
+	if (IS_SET(MODE_PASTEEVENT) && (ksym == XK_v || ksym == XK_V) &&
+		(e->state & (ControlMask | ShiftMask)) == ControlMask &&
+		!(e->state & ~(ControlMask | LockMask | Mod2Mask))) {
+		x5522paste(0);
+		return;
+	}
+
 	/* 1. shortcuts */
 	for (bp = shortcuts; bp < shortcuts + LEN(shortcuts); bp++) {
 		if (ksym == bp->keysym && match(bp->mod, e->state)) {
@@ -2732,6 +3174,7 @@ run(void)
 		if (childready())
 			reapchild();
 		clock_gettime(CLOCK_MONOTONIC, &now);
+		clip5522_tick(&now);
 
 		ttyready = FD_ISSET(ttyfd, &rfd);
 		if (ttyready)

@@ -186,6 +186,7 @@ static void csihandle(void);
 static void csiparse(void);
 static void csireset(void);
 static void osc_color_response(int, int, int);
+static void osc5522_error(void);
 static int eschandle(uchar);
 static void strdump(void);
 static void strhandle(void);
@@ -1721,6 +1722,9 @@ tsetmode(int priv, int set, const int *args, int narg)
 			case 2004: /* 2004: bracketed paste mode */
 				xsetmode(set, MODE_BRCKTPASTE);
 				break;
+			case 5522: /* DEC private paste-event mode */
+				xsetmode(set, MODE_PASTEEVENT);
+				break;
 			/* Not implemented mouse modes. See comments there. */
 			case 1001: /* mouse highlight mode; can hang the
 				      terminal by design when implemented. */
@@ -1781,6 +1785,14 @@ csihandle(void)
 	if (csiescseq.len >= 2 && csiescseq.buf[0] == '<'
 	    && csiescseq.buf[csiescseq.len - 1] == 'u') {
 		xsetmode(0, MODE_KITTYKBD);
+		return;
+	}
+	/* DECRQM: CSI ? 5522 $ p -> CSI ? 5522 ; {1,2} $ y. */
+	if (csiescseq.priv && csiescseq.arg[0] == 5522 &&
+		csiescseq.mode[0] == '$' && csiescseq.mode[1] == 'p') {
+		len = snprintf(buf, sizeof(buf), "\033[?5522;%d$y",
+			xismode(MODE_PASTEEVENT) ? 1 : 2);
+		ttywrite(buf, len, 0);
 		return;
 	}
 
@@ -2117,6 +2129,23 @@ strhandle(void)
 				}
 			}
 			return;
+		case 5522: /* Kitty clipboard read request */
+			if (narg == 3) {
+				Clip5522Request request;
+				if (clip5522_parse_read(strescseq.args[1], strescseq.args[2], &request)) {
+#ifndef ST_NATIVE_MACOS
+					xclip5522read(&request);
+#else
+					osc5522_error();
+#endif
+					clip5522_request_free(&request);
+				} else {
+					osc5522_error();
+				}
+			} else {
+				osc5522_error();
+			}
+			return;
 		case 10: /* set dynamic VT100 text foreground color */
 		case 11: /* set dynamic VT100 text background color */
 		case 12: /* set dynamic text cursor color */
@@ -2241,6 +2270,13 @@ strhandle(void)
 
 	fprintf(stderr, "erresc: unknown str ");
 	strdump();
+}
+
+static void
+osc5522_error(void)
+{
+	static const char response[] = "\033]5522;type=read:status=EPERM\033\\";
+	ttywrite(response, sizeof(response) - 1, 0);
 }
 
 void

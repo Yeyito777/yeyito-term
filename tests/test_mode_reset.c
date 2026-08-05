@@ -8,11 +8,12 @@
 TEST(clears_observed_ssh_leak)
 {
 	/* Captured from the softlocked local-shell window after SSH dropped. */
-	unsigned int mode = 0x58201;
+	unsigned int mode = 0xD8201;
 	unsigned int restored = winmoderestore(mode);
 
 	ASSERT(mode & MODE_KITTYKBD);
 	ASSERT(mode & MODE_BRCKTPASTE);
+	ASSERT(mode & MODE_PASTEEVENT);
 	ASSERT(mode & MODE_MOUSEMANY);
 	ASSERT(mode & MODE_MOUSESGR);
 	ASSERT_EQ(MODE_VISIBLE, restored);

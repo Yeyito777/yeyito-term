@@ -595,6 +595,12 @@ xsetmode(int set, unsigned int flags)
 		xsetmousecursor(IS_SET(MODE_MOUSE) ? 1 : 0);
 }
 
+int
+xismode(unsigned int flags)
+{
+	return (win.mode & flags) == flags;
+}
+
 void
 xresetmode(void)
 {
