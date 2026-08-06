@@ -75,6 +75,10 @@ int allowwindowops = 0;
 static double minlatency = 2;
 static double maxlatency = 33;
 
+/* Maximum time an unterminated DEC 2026 synchronized update may suppress
+ * presentation.  This prevents a crashed application from freezing the view. */
+static unsigned int synctimeout = 150;
+
 /*
  * blinking timeout (set to 0 to disable blinking) for the terminal blinking
  * attribute.

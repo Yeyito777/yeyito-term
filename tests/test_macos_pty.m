@@ -48,7 +48,10 @@ TEST(nonblocking_write_survives_backpressure)
 	ASSERT_EQ(0, fcntl(sockets[1], F_SETFL,
 	    fcntl(sockets[1], F_GETFL) | O_NONBLOCK));
 
-	deadline = monotonicSeconds() + 5.0;
+	/* A deliberately tiny socket buffer can require hundreds of dispatch-source
+	 * wakeups.  Leave enough wall time for those wakeups on a loaded desktop;
+	 * byte-for-byte delivery, not scheduler throughput, is the regression here. */
+	deadline = monotonicSeconds() + 10.0;
 	while (receivedLength < PAYLOAD_SIZE && monotonicSeconds() < deadline) {
 		ssize_t count = read(sockets[1], received + receivedLength,
 		    PAYLOAD_SIZE - receivedLength);

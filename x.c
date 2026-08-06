@@ -34,6 +34,7 @@ char *argv0;
 #include "win.h"
 #include "persist.h"
 #include "clipboard5522.h"
+#include "sync.h"
 
 /* types used in config.h */
 typedef struct {
@@ -278,6 +279,7 @@ DC dc;               /* non-static for sshind.c access */
 XWindow xw;          /* non-static for sshind.c access */
 static XSelection xsel;
 TermWindow win;      /* non-static for sshind.c access */
+static SyncUpdate syncUpdate;
 
 /* A single X selection transfer is active at once.  Keeping it streaming is
  * important: images must never pass through st's text-paste path or be held
@@ -2407,6 +2409,8 @@ xstartdraw(void)
 	float bg[3];
 	int i, y;
 
+	if (IS_SET(MODE_SYNC))
+		return 0;
 	if (gpudraw && !gpu.active) {
 		gpuinit();
 		if (gpu.active)
@@ -2617,6 +2621,11 @@ xsetmode(int set, unsigned int flags)
 		xinitinputcursor();
 		XDefineCursor(xw.dpy, xw.win, IS_SET(MODE_MOUSE)
 			? xcursorpointer : xcursortext);
+	}
+	if ((win.mode ^ mode) & MODE_SYNC) {
+		struct timespec now;
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		syncupdate_set(&syncUpdate, set, &now);
 	}
 }
 
@@ -3224,6 +3233,16 @@ run(void)
 			          / maxlatency * minlatency;
 			if (timeout > 0)
 				continue;
+		}
+
+		/* DEC mode 2026 mutates the live grid normally but withholds all
+		 * presentation until ESU.  A finite watchdog recovers from a missing
+		 * reset sequence instead of leaving the window frozen forever. */
+		if (IS_SET(MODE_SYNC)) {
+			timeout = syncupdate_remaining(&syncUpdate, &now, synctimeout);
+			if (timeout > 0)
+				continue;
+			xsetmode(0, MODE_SYNC);
 		}
 
 		/* idle detected or maxlatency exhausted -> draw */

@@ -40,6 +40,7 @@ char *argv0;
 #include "pty.h"
 #include "reveal.h"
 #include "pasteboard5522.h"
+#include "../sync.h"
 
 typedef struct {
 	uint mod;
@@ -100,6 +101,7 @@ static size_t paletteCount;
 static int ttyfd = -1;
 static int drawingFrame;
 static int redrawPending;
+static SyncUpdate syncUpdate;
 static int shuttingDown;
 static int cursorKind;
 static int imeCol, imeRow;
@@ -458,6 +460,9 @@ drawCell(Glyph glyph, int x, int y, int overlay, int applyHighlights)
 int
 xstartdraw(void)
 {
+	/* Keep the last completed drawable visible until DEC mode 2026 ends. */
+	if (IS_SET(MODE_SYNC))
+		return 0;
 	if (!drawingFrame) {
 		macos_request_redraw();
 		return 0;
@@ -597,6 +602,25 @@ xsetmode(int set, unsigned int flags)
 	}
 	if ((old ^ win.mode) & MODE_MOUSE)
 		xsetmousecursor(IS_SET(MODE_MOUSE) ? 1 : 0);
+	if ((old ^ win.mode) & MODE_SYNC) {
+		struct timespec now;
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		syncupdate_set(&syncUpdate, set, &now);
+		if (set) {
+			unsigned long generation = syncUpdate.generation;
+			dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+			    (int64_t)synctimeout * NSEC_PER_MSEC),
+			    dispatch_get_main_queue(), ^{
+				if (syncUpdate.active &&
+				    syncUpdate.generation == generation)
+					xsetmode(0, MODE_SYNC);
+			});
+		} else {
+			/* Present all mutations accumulated since BSU as one frame. */
+			tfulldirt();
+			macos_request_redraw();
+		}
+	}
 }
 
 int
@@ -1483,7 +1507,7 @@ nativeFocus(int focused)
 void
 macos_request_redraw(void)
 {
-	if (!nativeView || redrawPending) return;
+	if (!nativeView || redrawPending || IS_SET(MODE_SYNC)) return;
 	redrawPending = 1;
 	dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
 	    (int64_t)(MAX(0.0, minlatency) * NSEC_PER_MSEC)),

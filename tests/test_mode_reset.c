@@ -22,6 +22,7 @@ TEST(clears_observed_ssh_leak)
 TEST(clears_every_application_controlled_mode)
 {
 	ASSERT_EQ(0, winmoderestore(MODE_APPRESET));
+	ASSERT(MODE_APPRESET & MODE_SYNC);
 }
 
 TEST(preserves_window_owned_modes)

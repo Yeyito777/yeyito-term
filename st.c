@@ -1722,6 +1722,9 @@ tsetmode(int priv, int set, const int *args, int narg)
 			case 2004: /* 2004: bracketed paste mode */
 				xsetmode(set, MODE_BRCKTPASTE);
 				break;
+			case 2026: /* synchronized output */
+				xsetmode(set, MODE_SYNC);
+				break;
 			case 5522: /* DEC private paste-event mode */
 				xsetmode(set, MODE_PASTEEVENT);
 				break;
@@ -1787,11 +1790,14 @@ csihandle(void)
 		xsetmode(0, MODE_KITTYKBD);
 		return;
 	}
-	/* DECRQM: CSI ? 5522 $ p -> CSI ? 5522 ; {1,2} $ y. */
-	if (csiescseq.priv && csiescseq.arg[0] == 5522 &&
+	/* DECRQM replies for supported DEC private modes. */
+	if (csiescseq.priv &&
+		(csiescseq.arg[0] == 2026 || csiescseq.arg[0] == 5522) &&
 		csiescseq.mode[0] == '$' && csiescseq.mode[1] == 'p') {
-		len = snprintf(buf, sizeof(buf), "\033[?5522;%d$y",
-			xismode(MODE_PASTEEVENT) ? 1 : 2);
+		unsigned int flag = csiescseq.arg[0] == 2026 ?
+		    MODE_SYNC : MODE_PASTEEVENT;
+		len = snprintf(buf, sizeof(buf), "\033[?%d;%d$y",
+			csiescseq.arg[0], xismode(flag) ? 1 : 2);
 		ttywrite(buf, len, 0);
 		return;
 	}

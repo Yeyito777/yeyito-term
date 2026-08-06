@@ -28,9 +28,9 @@ config.h:
 	$(CC) $(STOBJCFLAGS) -c $< -o $@
 
 st.o: config.h st.h win.h vimnav.h persist.h macos/emoji.h
-x.o: arg.h config.h st.h win.h clipboard5522.h sshind.h notif.h persist.h cmdline.h search.h render/gpu.c
+x.o: arg.h config.h st.h win.h sync.h clipboard5522.h sshind.h notif.h persist.h cmdline.h search.h render/gpu.c
 clipboard5522.o: clipboard5522.c clipboard5522.h
-macos/backend.o: macos/backend.m macos/native.h macos/renderer.h macos/pty.h macos/pasteboard5522.h macos/keysyms.h macos/reveal.h config.h st.h win.h
+macos/backend.o: macos/backend.m macos/native.h macos/renderer.h macos/pty.h macos/pasteboard5522.h macos/keysyms.h macos/reveal.h config.h st.h win.h sync.h
 macos/pasteboard5522.o: macos/pasteboard5522.m macos/pasteboard5522.h clipboard5522.h
 macos/locale.o: macos/locale.c macos/locale.h
 	$(CC) $(STCFLAGS) -c macos/locale.c -o macos/locale.o
@@ -96,7 +96,7 @@ dist: clean
 	mkdir -p st-$(VERSION)/render
 	mkdir -p st-$(VERSION)/macos st-$(VERSION)/scripts
 	cp -R CLAUDE.md Makefile README.md TODO.md config.mk\
-		config.def.h st.info st.1 arg.h st.h win.h vimnav.h sshind.h notif.h persist.h cmdline.h cmdline_layout.h search.h $(DIST_SRC)\
+		config.def.h st.info st.1 arg.h st.h win.h sync.h vimnav.h sshind.h notif.h persist.h cmdline.h cmdline_layout.h search.h $(DIST_SRC)\
 		st-$(VERSION)
 	cp -R render/gpu.c render/README.md st-$(VERSION)/render
 	cp -R macos/README.md macos/Info.plist macos/backend.m macos/pasteboard5522.h macos/pasteboard5522.m macos/keysyms.h macos/native.h macos/reveal.h\
@@ -203,6 +203,12 @@ tests/test_mode_reset.o: tests/test_mode_reset.c tests/test.h win.h
 test_mode_reset: tests/test_mode_reset.o
 	$(CC) -o tests/test_mode_reset tests/test_mode_reset.o
 
+tests/test_sync.o: tests/test_sync.c tests/test.h sync.h
+	$(CC) $(TESTFLAGS) -c tests/test_sync.c -o tests/test_sync.o
+
+test_sync: tests/test_sync.o
+	$(CC) -o tests/test_sync tests/test_sync.o
+
 tests/test_clipboard5522.o: tests/test_clipboard5522.c tests/test.h clipboard5522.h
 	$(CC) $(TESTFLAGS) -c tests/test_clipboard5522.c -o tests/test_clipboard5522.o
 
@@ -256,7 +262,7 @@ test_gpu_regressions: st
 test_aerospace_launcher:
 	@./tests/test_aerospace_launcher.sh
 
-test: test_vimnav test_sshind test_scrollback test_cwd test_notif test_persist test_search test_cmdline_layout test_mode_reset test_clipboard5522 test_aerospace_launcher
+test: test_vimnav test_sshind test_scrollback test_cwd test_notif test_persist test_search test_cmdline_layout test_mode_reset test_sync test_clipboard5522 test_aerospace_launcher
 ifeq ($(UNAME_S),Darwin)
 test: test_macos_pty test_macos_reveal test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522
 endif
@@ -270,6 +276,7 @@ endif
 	@./tests/test_search
 	@./tests/test_cmdline_layout
 	@./tests/test_mode_reset
+	@./tests/test_sync
 	@./tests/test_clipboard5522
 ifeq ($(UNAME_S),Darwin)
 	@./tests/test_macos_pty
@@ -281,6 +288,6 @@ ifeq ($(UNAME_S),Darwin)
 endif
 
 clean-tests:
-	rm -f tests/*.o tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search tests/test_cmdline_layout tests/test_mode_reset tests/test_clipboard5522 tests/test_macos_pty tests/test_macos_reveal tests/test_macos_locale tests/test_macos_glyph_layout tests/test_macos_emoji tests/test_macos_pasteboard5522
+	rm -f tests/*.o tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search tests/test_cmdline_layout tests/test_mode_reset tests/test_sync tests/test_clipboard5522 tests/test_macos_pty tests/test_macos_reveal tests/test_macos_locale tests/test_macos_glyph_layout tests/test_macos_emoji tests/test_macos_pasteboard5522
 
-.PHONY: all app install-app uninstall-app install-hint clean dist install uninstall test test_gpu_regressions test_aerospace_launcher test_mode_reset test_macos_pty test_macos_reveal test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522 clean-tests
+.PHONY: all app install-app uninstall-app install-hint clean dist install uninstall test test_gpu_regressions test_aerospace_launcher test_mode_reset test_sync test_macos_pty test_macos_reveal test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522 clean-tests

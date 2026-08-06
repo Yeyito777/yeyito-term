@@ -22,6 +22,7 @@ enum win_mode {
 	MODE_BRCKTPASTE  = 1 << 16,
 	MODE_NUMLOCK     = 1 << 17,
 	MODE_PASTEEVENT  = 1 << 19,
+	MODE_SYNC        = 1 << 20,
 	MODE_MOUSE       = MODE_MOUSEBTN|MODE_MOUSEMOTION|MODE_MOUSEX10\
 	                  |MODE_MOUSEMANY,
 };
@@ -31,7 +32,7 @@ enum win_mode {
  * disconnects before a remote TUI can emit its normal teardown sequences). */
 #define MODE_APPRESET (MODE_APPKEYPAD | MODE_MOUSE | MODE_REVERSE | \
 	MODE_KBDLOCK | MODE_HIDE | MODE_APPCURSOR | MODE_MOUSESGR | MODE_8BIT | \
-	MODE_KITTYKBD | MODE_FOCUS | MODE_BRCKTPASTE | MODE_PASTEEVENT)
+	MODE_KITTYKBD | MODE_FOCUS | MODE_BRCKTPASTE | MODE_PASTEEVENT | MODE_SYNC)
 
 static inline unsigned int
 winmoderestore(unsigned int mode)
