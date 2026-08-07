@@ -17,7 +17,7 @@ X11LIB = /usr/X11R6/lib
 INCS = -I$(X11INC) \
        `$(PKG_CONFIG) --cflags fontconfig` \
        `$(PKG_CONFIG) --cflags freetype2`
-LIBS = -L$(X11LIB) -lm -lrt -lX11 -lutil -lXft -lGL \
+LIBS = -L$(X11LIB) -lm -lrt -lz -lX11 -lutil -lXft -lGL \
        `$(PKG_CONFIG) --libs fontconfig` \
        `$(PKG_CONFIG) --libs freetype2`
 
@@ -28,7 +28,7 @@ LDFLAGS = -flto
 # Native macOS backend: Cocoa window/input, CoreText fonts, and Metal drawing.
 ifeq ($(UNAME_S),Darwin)
 INCS = -I.
-LIBS = -lm -lutil -framework Cocoa -framework Metal -framework MetalKit \
+LIBS = -lm -lutil -lz -framework Cocoa -framework Metal -framework MetalKit \
        -framework QuartzCore -framework CoreText -framework CoreGraphics
 STCPPFLAGS += -D_DARWIN_C_SOURCE -DST_NATIVE_MACOS
 CFLAGS = -O3 -march=native -flto

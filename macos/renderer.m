@@ -27,6 +27,17 @@ typedef struct {
 	size_t capacity;
 } MacVertexList;
 
+typedef struct {
+	uint64_t serial;
+	MacVertex vertices[6];
+} MacImageDraw;
+
+typedef struct {
+	MacImageDraw *items;
+	size_t count;
+	size_t capacity;
+} MacImageList;
+
 @interface STGlyph : NSObject
 @property(nonatomic) float u0, v0, u1, v1;
 @property(nonatomic) float left, top, width, height, advance;
@@ -45,6 +56,7 @@ typedef struct {
 	__strong id<MTLTexture> atlas;
 	__strong id<MTLSamplerState> sampler;
 	__strong NSMutableDictionary<NSString *, STGlyph *> *glyphs;
+	__strong NSMutableDictionary<NSNumber *, id<MTLTexture>> *images;
 	CTFontRef fonts[4];
 	char family[256];
 	double pointSize;
@@ -56,6 +68,8 @@ typedef struct {
 	double cellHeight;
 	NSUInteger atlasX, atlasY, atlasRowHeight;
 	MacVertexList layers[MAC_LAYER_COUNT];
+	MacImageList imageLayers[3];
+	double imageClipX, imageClipY, imageClipWidth, imageClipHeight;
 	__strong id<CAMetalDrawable> drawable;
 	__strong MTLRenderPassDescriptor *pass;
 	__strong id<MTLCommandBuffer> command;
@@ -77,8 +91,8 @@ static NSString *const shaderSource = @
 "  if (in.mode < 0.5) return in.color;\n"
 "  float4 s = atlas.sample(samp, in.uv);\n"
 "  if (in.mode < 1.5) return float4(in.color.rgb, in.color.a * s.a);\n"
-"  if (s.a > 0.0001) s.rgb /= s.a;\n"
-"  return float4(s.rgb, s.a * in.color.a);\n"
+"  if (in.mode < 2.5) { if (s.a > 0.0001) s.rgb /= s.a; return float4(s.rgb, s.a * in.color.a); }\n"
+"  return float4(s.rgb * in.color.rgb, s.a * in.color.a);\n"
 "}\n";
 
 static void
@@ -132,6 +146,19 @@ listappend(MacVertexList *list, MacVertex vertex)
 			abort();
 	}
 	list->items[list->count++] = vertex;
+}
+
+static MacImageDraw *
+imageappend(MacImageList *list)
+{
+	if (list->count == list->capacity) {
+		list->capacity = list->capacity ? list->capacity * 2 : 64;
+		list->items = realloc(list->items,
+		    list->capacity * sizeof(*list->items));
+		if (!list->items)
+			abort();
+	}
+	return &list->items[list->count++];
 }
 
 static void
@@ -386,6 +413,7 @@ mac_renderer_init(void *viewPtr, const char *fontName, double fontSize)
 	r.view.device = r.device;
 	r.queue = [r.device newCommandQueue];
 	r.glyphs = [NSMutableDictionary dictionary];
+	r.images = [NSMutableDictionary dictionary];
 	r.scale = 1.0;
 	r.pointSize = fontSize > 0 ? fontSize : 14.0;
 	strlcpy(r.family, fontName ?: "Menlo", sizeof(r.family));
@@ -439,7 +467,13 @@ mac_renderer_destroy(void)
 		r.layers[i].items = NULL;
 		r.layers[i].count = r.layers[i].capacity = 0;
 	}
+	for (int i = 0; i < 3; i++) {
+		free(r.imageLayers[i].items);
+		r.imageLayers[i].items = NULL;
+		r.imageLayers[i].count = r.imageLayers[i].capacity = 0;
+	}
 	r.glyphs = nil;
+	r.images = nil;
 	r.atlas = nil;
 	r.pipeline = nil;
 	r.queue = nil;
@@ -496,6 +530,8 @@ mac_renderer_begin(MacColor clearColor)
 {
 	for (int i = 0; i < MAC_LAYER_COUNT; i++)
 		listreset(&r.layers[i]);
+	for (int i = 0; i < 3; i++)
+		r.imageLayers[i].count = 0;
 	r.pass = r.view.currentRenderPassDescriptor;
 	r.drawable = r.view.currentDrawable;
 	if (!r.pass || !r.drawable)
@@ -611,6 +647,116 @@ mac_renderer_text(enum MacRenderLayer layer, const char *text, size_t len,
 }
 
 void
+mac_renderer_image(int stage, uint64_t serial, const uint8_t *rgba,
+		int imageWidth, int imageHeight, int sourceX, int sourceY,
+		int sourceWidth, int sourceHeight, double x, double y,
+		double width, double height)
+{
+	NSNumber *key;
+	id<MTLTexture> texture;
+	MacImageDraw *draw;
+	vector_float4 white = {1, 1, 1, 1};
+	float scale, left, top, right, bottom, u0, v0, u1, v1;
+	MacVertex a, b, c, d;
+
+	if (stage < 0 || stage > 2 || !rgba || imageWidth <= 0 || imageHeight <= 0 ||
+	    sourceWidth <= 0 || sourceHeight <= 0 || width <= 0 || height <= 0)
+		return;
+	key = @(serial);
+	texture = r.images[key];
+	if (!texture) {
+		MTLTextureDescriptor *descriptor = [MTLTextureDescriptor
+		    texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+		    width:(NSUInteger)imageWidth height:(NSUInteger)imageHeight
+		    mipmapped:NO];
+		descriptor.usage = MTLTextureUsageShaderRead;
+		texture = [r.device newTextureWithDescriptor:descriptor];
+		if (!texture)
+			return;
+		[texture replaceRegion:MTLRegionMake2D(0, 0, imageWidth, imageHeight)
+		    mipmapLevel:0 withBytes:rgba bytesPerRow:(NSUInteger)imageWidth * 4];
+		r.images[key] = texture;
+	}
+	draw = imageappend(&r.imageLayers[stage]);
+	draw->serial = serial;
+	scale = (float)r.scale;
+	left = (float)x * scale;
+	top = (float)y * scale;
+	right = (float)(x + width) * scale;
+	bottom = (float)(y + height) * scale;
+	u0 = (float)(sourceX + 0.5) / imageWidth;
+	v0 = (float)(sourceY + 0.5) / imageHeight;
+	u1 = (float)(sourceX + sourceWidth - 0.5) / imageWidth;
+	v1 = (float)(sourceY + sourceHeight - 0.5) / imageHeight;
+	a = (MacVertex){{left, top}, {u0, v0}, white, 3.0f};
+	b = (MacVertex){{right, top}, {u1, v0}, white, 3.0f};
+	c = (MacVertex){{left, bottom}, {u0, v1}, white, 3.0f};
+	d = (MacVertex){{right, bottom}, {u1, v1}, white, 3.0f};
+	draw->vertices[0] = a; draw->vertices[1] = c; draw->vertices[2] = b;
+	draw->vertices[3] = b; draw->vertices[4] = c; draw->vertices[5] = d;
+}
+
+void
+mac_renderer_remove_image(uint64_t serial)
+{
+	[r.images removeObjectForKey:@(serial)];
+}
+
+void
+mac_renderer_set_image_clip(double x, double y, double width, double height)
+{
+	r.imageClipX = x;
+	r.imageClipY = y;
+	r.imageClipWidth = width;
+	r.imageClipHeight = height;
+}
+
+static void
+encodeLayer(id<MTLRenderCommandEncoder> encoder, MacVertexList *list,
+		id<MTLTexture> texture)
+{
+	if (!list->count)
+		return;
+	id<MTLBuffer> buffer = [r.device newBufferWithBytes:list->items
+	    length:list->count * sizeof(*list->items)
+	    options:MTLResourceStorageModeShared];
+	[encoder setFragmentTexture:texture atIndex:0];
+	[encoder setVertexBuffer:buffer offset:0 atIndex:0];
+	[encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0
+	    vertexCount:list->count];
+}
+
+static void
+encodeImages(id<MTLRenderCommandEncoder> encoder, int stage)
+{
+	MacImageList *list = &r.imageLayers[stage];
+	double scale = r.scale;
+	NSUInteger drawableWidth = (NSUInteger)r.view.drawableSize.width;
+	NSUInteger drawableHeight = (NSUInteger)r.view.drawableSize.height;
+	NSUInteger x = (NSUInteger)MAX(0.0, floor(r.imageClipX * scale));
+	NSUInteger y = (NSUInteger)MAX(0.0, floor(r.imageClipY * scale));
+	NSUInteger right = (NSUInteger)MIN((double)drawableWidth,
+	    ceil((r.imageClipX + r.imageClipWidth) * scale));
+	NSUInteger bottom = (NSUInteger)MIN((double)drawableHeight,
+	    ceil((r.imageClipY + r.imageClipHeight) * scale));
+	if (!list->count || right <= x || bottom <= y)
+		return;
+	[encoder setScissorRect:(MTLScissorRect){x, y, right - x, bottom - y}];
+	for (size_t i = 0; i < list->count; i++) {
+		MacImageDraw *draw = &list->items[i];
+		id<MTLTexture> texture = r.images[@(draw->serial)];
+		if (!texture)
+			continue;
+		[encoder setFragmentTexture:texture atIndex:0];
+		[encoder setVertexBytes:draw->vertices length:sizeof(draw->vertices)
+		    atIndex:0];
+		[encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0
+		    vertexCount:6];
+	}
+	[encoder setScissorRect:(MTLScissorRect){0, 0, drawableWidth, drawableHeight}];
+}
+
+void
 mac_renderer_end(void)
 {
 	if (!r.command || !r.pass || !r.drawable)
@@ -621,19 +767,16 @@ mac_renderer_end(void)
 	vector_float2 viewport = {(float)r.view.drawableSize.width,
 	    (float)r.view.drawableSize.height};
 	[encoder setVertexBytes:&viewport length:sizeof(viewport) atIndex:1];
-	[encoder setFragmentTexture:r.atlas atIndex:0];
 	[encoder setFragmentSamplerState:r.sampler atIndex:0];
-	for (int i = 0; i < MAC_LAYER_COUNT; i++) {
-		MacVertexList *list = &r.layers[i];
-		if (!list->count)
-			continue;
-		id<MTLBuffer> buffer = [r.device newBufferWithBytes:list->items
-		    length:list->count * sizeof(*list->items)
-		    options:MTLResourceStorageModeShared];
-		[encoder setVertexBuffer:buffer offset:0 atIndex:0];
-		[encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0
-		    vertexCount:list->count];
-	}
+	encodeImages(encoder, 0);
+	encodeLayer(encoder, &r.layers[MAC_LAYER_BACKGROUND], r.atlas);
+	encodeImages(encoder, 1);
+	encodeLayer(encoder, &r.layers[MAC_LAYER_TEXT], r.atlas);
+	encodeLayer(encoder, &r.layers[MAC_LAYER_DECORATION], r.atlas);
+	encodeImages(encoder, 2);
+	encodeLayer(encoder, &r.layers[MAC_LAYER_OVERLAY_BACKGROUND], r.atlas);
+	encodeLayer(encoder, &r.layers[MAC_LAYER_OVERLAY_TEXT], r.atlas);
+	encodeLayer(encoder, &r.layers[MAC_LAYER_OVERLAY_DECORATION], r.atlas);
 	[encoder endEncoding];
 	[r.command presentDrawable:r.drawable];
 	[r.command commit];

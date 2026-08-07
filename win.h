@@ -60,6 +60,8 @@ void xsetmode(int, unsigned int);
 int xismode(unsigned int);
 void xresetmode(void);
 int xgpuenabled(void);
+int xgraphicsavailable(void);
+void xgetdimensions(int *, int *, int *, int *);
 void xsetgraphicsmode(int);
 int xdrawrowtop(int);
 int xdrawrowbottom(int);

@@ -48,6 +48,13 @@ void mac_renderer_rune(enum MacRenderLayer layer, uint32_t rune,
 void mac_renderer_text(enum MacRenderLayer layer, const char *text,
 		size_t len, double x, double baseline, double font_scale,
 		MacColor color);
+void mac_renderer_image(int stage, uint64_t serial, const uint8_t *rgba,
+		int image_width, int image_height, int source_x, int source_y,
+		int source_width, int source_height, double x, double y,
+		double width, double height);
+void mac_renderer_set_image_clip(double x, double y, double width,
+		double height);
+void mac_renderer_remove_image(uint64_t serial);
 void mac_renderer_end(void);
 
 #endif

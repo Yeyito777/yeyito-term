@@ -8,8 +8,8 @@ not use XQuartz or link against X11.
   the local control socket used by the bundled helper scripts.
 - `pasteboard5522.m` and `pasteboard5522.h` bridge native `NSPasteboard` image
   and text types to Kitty's authenticated OSC 5522 paste-event protocol.
-- `renderer.m` and `renderer.h` implement the Metal renderer and CoreText glyph
-  atlas/font metrics.
+- `renderer.m` and `renderer.h` implement the Metal renderer, CoreText glyph
+  atlas/font metrics, and cached RGBA textures for Kitty graphics placements.
 - `glyph_layout.h` keeps color-font glyphs sized and centered by their visible
   ink bounds instead of the atlas padding or text baseline.
 - `emoji.c` and `emoji.h` preserve macOS emoji-presentation selectors and their

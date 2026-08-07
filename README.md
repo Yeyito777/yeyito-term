@@ -32,6 +32,36 @@ The app is installed at `~/Applications/st.app`, appears in Spotlight as `st`,
 uses an ordinary macOS window that tiling managers can control, and bundles the
 `st-notify`, `st-save-cmd`, and `st-aerospace-launch` helper scripts.
 
+## Inline images, including over SSH
+
+`st` implements the direct-stream subset of the Kitty terminal graphics
+protocol. PNG, RGB, and RGBA images can be transmitted in APC escape sequences,
+split into 4096-byte base64 chunks, and optionally compressed with zlib. Images
+support source cropping, cell scaling, alpha, z-order, image and placement IDs,
+deletion, cursor movement control, the protocol capability query, and terminal
+scrollback. Both the native Metal backend and the X11 OpenGL backend render the
+same backend-neutral image state.
+
+Direct transmission is intentional: unlike file and shared-memory references,
+it names no resources on the machine running the terminal and therefore works
+unchanged through SSH. In an interactive remote shell, for example:
+
+```sh
+kitten icat --transfer-mode=stream image.png
+chafa --format kitty image.png
+```
+
+Applications should use the Kitty graphics query rather than infer support from
+`$TERM`; the terminal continues to identify as `st-256color`. The PTY reports
+both cell and pixel dimensions, and `CSI 14 t` / `CSI 16 t` are available as
+geometry-query fallbacks.
+
+The current implementation does not accept local file, temporary-file, or
+shared-memory image transfers. Animations, relative placements, and Kitty
+Unicode placeholders are also not yet implemented. Kitty graphics can cross
+tmux with explicitly enabled passthrough, but tmux does not natively preserve
+these placements; use a direct SSH shell for the supported path.
+
 ## AeroSpace launch integration
 
 To open `st` on the currently focused AeroSpace workspace, bind a key to the

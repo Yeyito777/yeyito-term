@@ -32,6 +32,7 @@ char *argv0;
 #include "arg.h"
 #include "st.h"
 #include "win.h"
+#include "graphics.h"
 #include "persist.h"
 #include "clipboard5522.h"
 #include "sync.h"
@@ -200,6 +201,8 @@ static void gpuinit(void);
 static void gpudamageensure(void);
 static void gpuresize(void);
 static void gpudestroy(void);
+static void gpudrawimages(int);
+static void gpufreeimage(uint64_t, void *);
 static double gpuxscale(void);
 static double gpuyscale(void);
 static void gpudrawline(Line, int, int, int);
@@ -847,6 +850,23 @@ int
 xgpuenabled(void)
 {
 	return gpudraw;
+}
+
+int
+xgraphicsavailable(void)
+{
+	if (gpudraw && !gpu.active)
+		gpuinit();
+	return gpu.active;
+}
+
+void
+xgetdimensions(int *width, int *height, int *cellwidth, int *cellheight)
+{
+	if (width) *width = win.tw;
+	if (height) *height = win.th;
+	if (cellwidth) *cellwidth = win.cw;
+	if (cellheight) *cellheight = win.ch;
 }
 
 int
@@ -1929,6 +1949,7 @@ xinit(int cols, int rows)
 	xsel.xtarget = XInternAtom(xw.dpy, "UTF8_STRING", 0);
 	if (xsel.xtarget == None)
 		xsel.xtarget = XA_STRING;
+	graphics_set_image_free_callback(gpufreeimage, NULL);
 }
 
 int
@@ -2458,6 +2479,15 @@ xstartdraw(void)
 						tsetdirt(y, y);
 			}
 		}
+		/* Image quads are emitted every frame in z-order.  Rebuild the
+		 * complete text grid while any are visible so a negative-z image
+		 * never composites over text retained from an older back buffer. */
+		if (graphics_placement_count()) {
+			tlineviewprepare();
+			if (graphics_has_visible_placements(tisaltscreen(), trow(),
+			    tlineviewrow))
+				tfulldirt();
+		}
 		return 1;
 	}
 	xensurexftbuf(win.cw ? MAX(1, win.tw / win.cw) : 1);
@@ -2537,10 +2567,13 @@ void
 xfinishdraw(void)
 {
 	if (gpu.active) {
+		gpudrawimages(GRAPHICS_STAGE_BELOW_BACKGROUND);
 		gpudrawbatch(&gpu.bg, 0);
+		gpudrawimages(GRAPHICS_STAGE_BELOW_TEXT);
 		gpudrawbatch(&gpu.text, 1);
 		gpudrawbatch(&gpu.ctext, 2);
 		gpudrawbatch(&gpu.deco, 0);
+		gpudrawimages(GRAPHICS_STAGE_ABOVE_TEXT);
 		gpudrawbatch(&gpu.obg, 0);
 		gpudrawbatch(&gpu.otext, 1);
 		gpudrawbatch(&gpu.octext, 2);

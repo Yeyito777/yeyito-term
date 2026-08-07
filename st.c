@@ -18,6 +18,7 @@
 #include <wchar.h>
 
 #include "st.h"
+#include "graphics.h"
 #include "persist.h"
 #include "win.h"
 #include "vimnav.h"
@@ -101,6 +102,7 @@ enum escape_state {
 	ESC_STR_END    = 16, /* a final string was encountered */
 	ESC_TEST       = 32, /* Enter in test mode */
 	ESC_UTF8       = 64,
+	ESC_STR_IGNORE = 128, /* discard an oversized control string through ST */
 };
 
 typedef struct {
@@ -228,6 +230,8 @@ static void tdefutf8(char);
 static int32_t tdefcolor(const int *, int *, int);
 static void tdeftran(char);
 static void tstrsequence(uchar);
+static void tgraphicscursor(int, int);
+static int tlineviewrowslow(Line, int);
 
 static void drawregion(int, int, int, int);
 
@@ -255,6 +259,15 @@ static int iofd = 1;
 static int cmdfd;
 static pid_t pid;
 static volatile sig_atomic_t childexited;
+
+typedef struct {
+	Line line;
+	int row;
+} LineViewEntry;
+
+static LineViewEntry *lineview;
+static size_t lineviewcap;
+static int lineviewalt;
 
 static const uchar utfbyte[UTF_SIZ + 1] = {0x80,    0, 0xC0, 0xE0, 0xF0};
 static const uchar utfmask[UTF_SIZ + 1] = {0xC0, 0x80, 0xE0, 0xF0, 0xF8};
@@ -1041,6 +1054,102 @@ ttyresize(int tw, int th)
 		fprintf(stderr, "Couldn't set window size: %s\n", strerror(errno));
 }
 
+/* Build a Line -> viewport-row hash once per frame.  Placements are anchored
+ * to stable Line allocations, and resolving every placement by rescanning the
+ * 32K history ring would otherwise make image drawing quadratic. */
+static size_t
+lineviewslot(Line line)
+{
+	uintptr_t value = (uintptr_t)line >> 4;
+	return (size_t)((value ^ (value >> 17)) * UINT64_C(11400714819323198485)) &
+	    (lineviewcap - 1);
+}
+
+static void
+lineviewinsert(Line line, int row)
+{
+	size_t slot;
+	if (!line)
+		return;
+	for (slot = lineviewslot(line); lineview[slot].line &&
+	    lineview[slot].line != line; slot = (slot + 1) & (lineviewcap - 1))
+		;
+	lineview[slot] = (LineViewEntry){line, row};
+}
+
+void
+tlineviewprepare(void)
+{
+	int i, idx, oldest, top, count = term.row;
+	size_t wanted = 16;
+
+	lineviewalt = !!IS_SET(MODE_ALTSCREEN);
+	if (!lineviewalt)
+		count += term.histn;
+	while (wanted < (size_t)MAX(1, count) * 2)
+		wanted *= 2;
+	if (wanted > lineviewcap) {
+		lineview = xrealloc(lineview, wanted * sizeof(*lineview));
+		lineviewcap = wanted;
+	}
+	memset(lineview, 0, lineviewcap * sizeof(*lineview));
+	if (lineviewalt) {
+		for (i = 0; i < term.row; i++)
+			lineviewinsert(term.line[i], i);
+		return;
+	}
+
+	top = term.histn - term.scr;
+	oldest = (term.histi - term.histn + 1 + HISTSIZE) % HISTSIZE;
+	for (i = 0; i < term.histn; i++) {
+		idx = (oldest + i) % HISTSIZE;
+		lineviewinsert(term.hist[idx], i - top);
+	}
+	for (i = 0; i < term.row; i++)
+		lineviewinsert(term.line[i], term.histn + i - top);
+}
+
+int
+tlineviewrow(Line target, int alt)
+{
+	size_t slot;
+
+	if (!target || !lineviewcap || alt != lineviewalt ||
+	    alt != !!IS_SET(MODE_ALTSCREEN))
+		return INT_MIN;
+	for (slot = lineviewslot(target); lineview[slot].line;
+	    slot = (slot + 1) & (lineviewcap - 1))
+		if (lineview[slot].line == target)
+			return lineview[slot].row;
+	return INT_MIN;
+}
+
+static int
+tlineviewrowslow(Line target, int alt)
+{
+	int i, idx, oldest, top;
+
+	if (!target || alt != !!IS_SET(MODE_ALTSCREEN))
+		return INT_MIN;
+	if (alt) {
+		for (i = 0; i < term.row; i++)
+			if (term.line[i] == target)
+				return i;
+		return INT_MIN;
+	}
+	top = term.histn - term.scr;
+	oldest = (term.histi - term.histn + 1 + HISTSIZE) % HISTSIZE;
+	for (i = 0; i < term.histn; i++) {
+		idx = (oldest + i) % HISTSIZE;
+		if (term.hist[idx] == target)
+			return i - top;
+	}
+	for (i = 0; i < term.row; i++)
+		if (term.line[i] == target)
+			return term.histn + i - top;
+	return INT_MIN;
+}
+
 void
 ttyhangup(void)
 {
@@ -1120,6 +1229,7 @@ void
 treset(void)
 {
 	uint i;
+	graphics_reset();
 
 	term.c = (TCursor){{
 		.mode = ATTR_NULL,
@@ -1199,17 +1309,20 @@ kscrollup(const Arg* a)
 void
 tscrolldown(int orig, int n, int copyhist)
 {
-	int i;
+	int i, hadgraphics = graphics_placement_count() != 0;
 	Line temp;
 
 	LIMIT(n, 0, term.bot-orig+1);
 
 	if (copyhist) {
 		term.histi = (term.histi - 1 + HISTSIZE) % HISTSIZE;
+		graphics_recycle_line(term.hist[term.histi]);
 		temp = term.hist[term.histi];
 		term.hist[term.histi] = term.line[term.bot];
 		term.line[term.bot] = temp;
-	}
+	} else
+		for (i = term.bot-n+1; i <= term.bot; i++)
+			graphics_recycle_line(term.line[i]);
 
 	tsetdirt(orig, term.bot-n);
 	tclearregion(0, term.bot-n+1, term.col-1, term.bot);
@@ -1222,24 +1335,29 @@ tscrolldown(int orig, int n, int copyhist)
 
 	if (term.scr == 0)
 		selscroll(orig, n);
+	if (hadgraphics)
+		tfulldirt();
 }
 
 void
 tscrollup(int orig, int n, int copyhist)
 {
-	int i;
+	int i, hadgraphics = graphics_placement_count() != 0;
 	Line temp;
 
 	LIMIT(n, 0, term.bot-orig+1);
 
 	if (copyhist) {
 		term.histi = (term.histi + 1) % HISTSIZE;
+		graphics_recycle_line(term.hist[term.histi]);
 		temp = term.hist[term.histi];
 		term.hist[term.histi] = term.line[orig];
 		term.line[orig] = temp;
 		if (term.histn < HISTSIZE)
 			term.histn++;
-	}
+	} else
+		for (i = orig; i < orig+n; i++)
+			graphics_recycle_line(term.line[i]);
 
 	if (term.scr > 0 && term.scr < HISTSIZE)
 		term.scr = MIN(term.scr + n, HISTSIZE-1);
@@ -1255,6 +1373,8 @@ tscrollup(int orig, int n, int copyhist)
 
 	if (term.scr == 0)
 		selscroll(orig, -n);
+	if (hadgraphics)
+		tfulldirt();
 }
 
 void
@@ -1288,6 +1408,22 @@ tnewline(int first_col)
 		y++;
 	}
 	tmoveto(first_col ? 0 : term.c.x, y);
+}
+
+/* Kitty placements advance like a cell rectangle: preserve the starting
+ * column while visiting its remaining rows, then leave the cursor immediately
+ * to the right of the last row (wrapping once when necessary). */
+static void
+tgraphicscursor(int columns, int rows)
+{
+	int row;
+
+	for (row = 1; row < rows; row++)
+		tnewline(0);
+	if (term.c.x + columns >= term.col)
+		tnewline(1);
+	else
+		tmoveto(term.c.x + columns, term.c.y);
 }
 
 void
@@ -1707,6 +1843,11 @@ tsetmode(int priv, int set, const int *args, int narg)
 				if (!allowaltscreen)
 					break;
 				alt = IS_SET(MODE_ALTSCREEN);
+				/* DECSET 1049 enters a freshly cleared alternate image
+				 * buffer.  Existing st behavior also clears that buffer on
+				 * exit, so mirror both text lifecycle points. */
+				if (alt || (set && *args == 1049))
+					graphics_clear_buffer(1);
 				if (alt) {
 					tclearregion(0, 0, term.col-1,
 							term.row-1);
@@ -1895,7 +2036,7 @@ csihandle(void)
 		DEFAULT(csiescseq.arg[0], 1);
 		tputtab(csiescseq.arg[0]);
 		break;
-	case 'J': /* ED -- Clear screen */
+		case 'J': /* ED -- Clear screen */
 		switch (csiescseq.arg[0]) {
 		case 0: /* below */
 			tclearregion(term.c.x, term.c.y, term.col-1, term.c.y);
@@ -1909,8 +2050,9 @@ csihandle(void)
 				tclearregion(0, 0, term.col-1, term.c.y-1);
 			tclearregion(0, term.c.y, term.c.x, term.c.y);
 			break;
-		case 2: /* all */
-			if (!IS_SET(MODE_ALTSCREEN)) {
+			case 2: /* all */
+				graphics_clear_buffer(IS_SET(MODE_ALTSCREEN));
+				if (!IS_SET(MODE_ALTSCREEN)) {
 				int i, last_content = -1;
 				/* Find last line with content */
 				for (i = term.row - 1; i >= 0; i--) {
@@ -1955,6 +2097,23 @@ csihandle(void)
 	case 'T': /* SD -- Scroll <n> line down */
 		DEFAULT(csiescseq.arg[0], 1);
 		tscrolldown(term.top, csiescseq.arg[0], 0);
+		break;
+	case 't': /* XTWINOPS -- report drawable and cell pixel geometry */
+		if (!csiescseq.priv &&
+		    (csiescseq.arg[0] == 14 || csiescseq.arg[0] == 16)) {
+			int width, height, cellwidth, cellheight, n;
+			char response[64];
+			xgetdimensions(&width, &height, &cellwidth, &cellheight);
+			if (csiescseq.arg[0] == 14)
+				n = snprintf(response, sizeof(response), "\033[4;%d;%dt",
+				    height, width);
+			else
+				n = snprintf(response, sizeof(response), "\033[6;%d;%dt",
+				    cellheight, cellwidth);
+			if (n > 0 && n < (int)sizeof(response))
+				ttywrite(response, (size_t)n, 0);
+		} else
+			goto unknown;
 		break;
 	case 'L': /* IL -- Insert <n> blank lines */
 		DEFAULT(csiescseq.arg[0], 1);
@@ -2097,13 +2256,33 @@ strhandle(void)
 {
 	char *p = NULL, *dec;
 	int j, narg, par;
+	GraphicsCommandResult graphics;
 	const struct { int idx; char *str; } osc_table[] = {
 		{ defaultfg, "foreground" },
 		{ defaultbg, "background" },
 		{ defaultcs, "cursor" }
 	};
 
-	term.esc &= ~(ESC_STR_END|ESC_STR);
+	if (term.esc & ESC_STR_IGNORE) {
+		term.esc &= ~(ESC_STR_END|ESC_STR|ESC_STR_IGNORE);
+		return;
+	}
+	term.esc &= ~(ESC_STR_END|ESC_STR|ESC_STR_IGNORE);
+	if (strescseq.type == '_' && strescseq.len && strescseq.buf[0] == 'G') {
+		int cellwidth, cellheight;
+		xgetdimensions(NULL, NULL, &cellwidth, &cellheight);
+		graphics_handle_apc(strescseq.buf, strescseq.len,
+		    term.line[term.c.y], term.c.x, IS_SET(MODE_ALTSCREEN),
+		    cellwidth, cellheight, term.row, tlineviewrowslow,
+		    xgraphicsavailable(), &graphics);
+		if (graphics.response_len)
+			ttywrite(graphics.response, graphics.response_len, 0);
+		if (graphics.move_cursor)
+			tgraphicscursor(graphics.columns, graphics.rows);
+		if (graphics.redraw)
+			tfulldirt();
+		return;
+	}
 	strparse();
 	par = (narg = strescseq.narg) ? atoi(strescseq.args[0]) : 0;
 
@@ -2481,6 +2660,7 @@ tstrsequence(uchar c)
 	}
 	strreset();
 	strescseq.type = c;
+	term.esc &= ~ESC_STR_IGNORE;
 	term.esc |= ESC_STR;
 }
 
@@ -2578,7 +2758,7 @@ tcontrolcode(uchar ascii)
 		return;
 	}
 	/* only CAN, SUB, \a and C1 chars interrupt a sequence */
-	term.esc &= ~(ESC_STR_END|ESC_STR);
+	term.esc &= ~(ESC_STR_END|ESC_STR|ESC_STR_IGNORE);
 }
 
 /*
@@ -2706,8 +2886,16 @@ tputc(Rune u)
 			term.esc |= ESC_STR_END;
 			goto check_control_code;
 		}
+		if (term.esc & ESC_STR_IGNORE)
+			return;
 		if (len == 0)
 			len = utf8encode(u, c);
+		if (strescseq.type == '_' && strescseq.len > 0 &&
+		    strescseq.buf[0] == 'G' &&
+		    strescseq.len + len > GRAPHICS_APC_MAX) {
+			term.esc |= ESC_STR_IGNORE;
+			return;
+		}
 
 		if (strescseq.len+len >= strescseq.siz) {
 			/*
@@ -3034,6 +3222,11 @@ typedef struct {
 	long long total;
 } ReflowBuf;
 
+typedef struct {
+	Line line;
+	int offset;
+} ReflowSource;
+
 static Glyph
 blankglyph(void)
 {
@@ -3106,8 +3299,12 @@ rffree(ReflowBuf *rf)
 {
 	int i;
 
-	for (i = 0; i < rf->len; i++)
-		free(rf->buf[(rf->head + i) % rf->cap]);
+	for (i = 0; i < rf->len; i++) {
+		Line line = rf->buf[(rf->head + i) % rf->cap];
+		if (line)
+			graphics_recycle_line(line);
+		free(line);
+	}
 	free(rf->buf);
 }
 
@@ -3125,6 +3322,7 @@ rfpush(ReflowBuf *rf, Line line)
 		rf->len++;
 	} else {
 		p = rf->head;
+		graphics_recycle_line(rf->buf[p]);
 		free(rf->buf[p]);
 		rf->head = (rf->head + 1) % rf->cap;
 	}
@@ -3140,6 +3338,12 @@ rfget(ReflowBuf *rf, long long idx)
 	if (idx < first || idx >= rf->total)
 		return NULL;
 	return rf->buf[(rf->head + (int)(idx - first)) % rf->cap];
+}
+
+static Line
+graphicsrfget(void *context, long long idx)
+{
+	return rfget(context, idx);
 }
 
 static void
@@ -3234,8 +3438,11 @@ resizealt(Line *oldalt, int oldrow, int oldcol, int newrow, int newcol)
 			memcpy(newalt[i], oldalt[i], n * sizeof(Glyph));
 			if (newcol < oldcol)
 				newalt[i][newcol - 1].mode &= ~ATTR_WRAP;
+			graphics_reanchor_line(oldalt[i], newalt[i]);
 		}
 	}
+	for (i = newrow; i < oldrow; i++)
+		graphics_recycle_line(oldalt[i]);
 	for (i = 0; i < oldrow; i++)
 		free(oldalt[i]);
 	free(oldalt);
@@ -3255,6 +3462,8 @@ tresize_reflow(int newcol, int newrow)
 	int *oldtabs = term.tabs;
 	long long cursor_abs = -1, screen_start, hist_start, outidx;
 	Glyph *logical = NULL;
+	ReflowSource *sources = NULL;
+	int source_len = 0, source_cap = 0;
 	ReflowBuf rf;
 	TCursor c = term.c;
 
@@ -3265,18 +3474,30 @@ tresize_reflow(int newcol, int newrow)
 
 	if (sel.ob.x != -1)
 		selclear();
-
 	for (i = 0; i < HISTSIZE; i++)
 		oldhist[i] = term.hist[i];
 
 	rfinit(&rf, HISTSIZE + newrow);
 
+	#define ADD_SOURCE(src) do { \
+		if (source_len == source_cap) { \
+			source_cap = source_cap ? source_cap * 2 : 8; \
+			sources = xrealloc(sources, source_cap * sizeof(*sources)); \
+		} \
+		sources[source_len++] = (ReflowSource){(src), logical_len}; \
+	} while (0)
 	#define FLUSH_LOGICAL() do { \
+		long long reflow_first = rf.total; \
 		logicalpad(&logical, &logical_len, &logical_cap, \
 		           cursor_in_line ? cursor_off + 1 : logical_len); \
 		reflowlogical(&rf, logical, logical_len, newcol, cursor_in_line, \
 		              cursor_off, &cursor_abs, &cursor_x); \
+		for (int source_i = 0; source_i < source_len; source_i++) \
+			graphics_reflow_line(sources[source_i].line, \
+			    sources[source_i].offset, newcol, reflow_first, \
+			    graphicsrfget, &rf); \
 		logical_len = 0; \
+		source_len = 0; \
 		cursor_in_line = 0; \
 		cursor_off = 0; \
 	} while (0)
@@ -3286,6 +3507,8 @@ tresize_reflow(int newcol, int newrow)
 		idx = (oldhisti - oldhistn + 1 + i + HISTSIZE) % HISTSIZE;
 		wrapped = oldhist[idx][oldcol - 1].mode & ATTR_WRAP;
 		append_len = wrapped ? oldcol : linelenwidth(oldhist[idx], oldcol);
+		append_len = MAX(append_len, graphics_line_extent(oldhist[idx]));
+		ADD_SOURCE(oldhist[idx]);
 		logicalappend(&logical, &logical_len, &logical_cap, oldhist[idx], append_len);
 		if (!wrapped)
 			FLUSH_LOGICAL();
@@ -3295,7 +3518,8 @@ tresize_reflow(int newcol, int newrow)
 	 * recreated below, instead of pushing the prompt out of view on resize. */
 	last_content = -1;
 	for (y = oldrow - 1; y >= 0; y--) {
-		if (linehascontent(oldline[y], oldcol)) {
+		if (linehascontent(oldline[y], oldcol) ||
+		    graphics_line_extent(oldline[y]) > 0) {
 			last_content = y;
 			break;
 		}
@@ -3306,6 +3530,8 @@ tresize_reflow(int newcol, int newrow)
 	for (y = 0; y < save_end; y++) {
 		wrapped = oldline[y][oldcol - 1].mode & ATTR_WRAP;
 		append_len = wrapped ? oldcol : linelenwidth(oldline[y], oldcol);
+		append_len = MAX(append_len, graphics_line_extent(oldline[y]));
+		ADD_SOURCE(oldline[y]);
 		if (y == c.y) {
 			cursor_in_line = 1;
 			cursor_off = logical_len + c.x;
@@ -3316,8 +3542,10 @@ tresize_reflow(int newcol, int newrow)
 	}
 	if (logical_len > 0 || cursor_in_line)
 		FLUSH_LOGICAL();
+	#undef ADD_SOURCE
 	#undef FLUSH_LOGICAL
 	free(logical);
+	free(sources);
 
 	/* Allocate fresh primary screen/history at the new width. */
 	term.line = xmalloc(newrow * sizeof(Line));
@@ -3379,6 +3607,8 @@ tresize_reflow(int newcol, int newrow)
 		term.tabs[i] = 1;
 
 	for (y = 0; y < oldrow; y++)
+		graphics_recycle_line(oldline[y]);
+	for (y = 0; y < oldrow; y++)
 		free(oldline[y]);
 	free(oldline);
 	for (i = 0; i < HISTSIZE; i++)
@@ -3433,6 +3663,8 @@ tresize(int col, int row)
 	 * memmove because we're freeing the earlier lines
 	 */
 	for (i = 0; i <= term.c.y - row; i++) {
+		graphics_recycle_line(term.line[i]);
+		graphics_recycle_line(term.alt[i]);
 		free(term.line[i]);
 		free(term.alt[i]);
 	}
@@ -3442,6 +3674,8 @@ tresize(int col, int row)
 		memmove(term.alt, term.alt + i, row * sizeof(Line));
 	}
 	for (i += row; i < term.row; i++) {
+		graphics_recycle_line(term.line[i]);
+		graphics_recycle_line(term.alt[i]);
 		free(term.line[i]);
 		free(term.alt[i]);
 	}
@@ -3453,7 +3687,9 @@ tresize(int col, int row)
 	term.tabs = xrealloc(term.tabs, col * sizeof(*term.tabs));
 
 	for (i = 0; i < HISTSIZE; i++) {
+		uintptr_t oldline = (uintptr_t)term.hist[i];
 		term.hist[i] = xrealloc(term.hist[i], col * sizeof(Glyph));
+		graphics_reanchor_line_address(oldline, term.hist[i]);
 		for (j = mincol; j < col; j++) {
 			term.hist[i][j] = term.c.attr;
 			term.hist[i][j].u = ' ';
@@ -3462,8 +3698,12 @@ tresize(int col, int row)
 
 	/* resize each row to new width, zero-pad if needed */
 	for (i = 0; i < minrow; i++) {
+		uintptr_t oldline = (uintptr_t)term.line[i];
+		uintptr_t oldalt = (uintptr_t)term.alt[i];
 		term.line[i] = xrealloc(term.line[i], col * sizeof(Glyph));
 		term.alt[i]  = xrealloc(term.alt[i],  col * sizeof(Glyph));
+		graphics_reanchor_line_address(oldline, term.line[i]);
+		graphics_reanchor_line_address(oldalt, term.alt[i]);
 	}
 
 	/* allocate any new rows */

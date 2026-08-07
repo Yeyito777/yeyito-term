@@ -7,3 +7,7 @@ kept separate from the X11 event/input/window-management code in `x.c`.
 unit.  The GPU renderer depends on `x.c` private state such as window geometry,
 Xft colors/fonts, and config globals.  Including it keeps those details private
 while making the rendering code easier to find and review.
+
+Kitty graphics images use individual RGBA OpenGL textures rather than the glyph
+atlases. Placements are emitted in three compositing stages: below cell
+backgrounds, between backgrounds and text, and above text.

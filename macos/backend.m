@@ -30,6 +30,7 @@ char *argv0;
 #include "../arg.h"
 #include "../st.h"
 #include "../win.h"
+#include "../graphics.h"
 #include "../persist.h"
 #include "../vimnav.h"
 #include "../cmdline.h"
@@ -349,6 +350,18 @@ static double cellY(int y) { return borderpx + floor(y * cellHeight() + 0.5); }
 static double cellRight(int x, int wide) { return cellX(x + (wide ? 2 : 1)); }
 static double rowBottom(int y) { return cellY(y + 1); }
 
+void
+xgetdimensions(int *width, int *height, int *cellwidth, int *cellheight)
+{
+	double scale = mac_renderer_scale();
+	if (width) *width = (int)lrint(win.tw * scale);
+	if (height) *height = (int)lrint(win.th * scale);
+	if (cellwidth) *cellwidth = (int)lrint(win.cw * scale);
+	if (cellheight) *cellheight = (int)lrint(win.ch * scale);
+}
+
+int xgraphicsavailable(void) { return 1; }
+
 static double
 rowBaseline(int y)
 {
@@ -440,7 +453,9 @@ drawCell(Glyph glyph, int x, int y, int overlay, int applyHighlights)
 	    MAC_LAYER_TEXT;
 	enum MacRenderLayer decoLayer = overlay ? MAC_LAYER_OVERLAY_DECORATION :
 	    MAC_LAYER_DECORATION;
-	mac_renderer_rect(bgLayer, left, top, width, height, bg);
+	MacColor clear = indexedColor(IS_SET(MODE_REVERSE) ? defaultfg : defaultbg);
+	if (bg.r != clear.r || bg.g != clear.g || bg.b != clear.b || bg.a != clear.a)
+		mac_renderer_rect(bgLayer, left, top, width, height, bg);
 	if (glyph.u != ' ' && glyph.u != 0) {
 		unsigned int style = 0;
 		if (glyph.mode & ATTR_BOLD) style |= MAC_FONT_BOLD;
@@ -560,9 +575,47 @@ xdrawcursor(int cx, int cy, Glyph glyph, int ox, int oy, Glyph oldGlyph)
 
 static void drawMarkedText(void);
 
+static void
+drawGraphicsPlacement(const GraphicsPlacementView *placement, void *context)
+{
+	int stage = (int)(intptr_t)context;
+	double scale = mac_renderer_scale();
+	double x = cellX(placement->column) + placement->pixel_x / scale;
+	double y = cellY(placement->row) + placement->pixel_y / scale;
+	double width = placement->natural_size ? placement->source_width / scale :
+	    cellX(placement->column + placement->columns) -
+	    cellX(placement->column);
+	double height = placement->natural_size ? placement->source_height / scale :
+	    cellY(placement->row + placement->rows) - cellY(placement->row);
+
+	if (x >= borderpx + win.tw || x + width <= borderpx ||
+	    y >= borderpx + win.th || y + height <= borderpx)
+		return;
+	mac_renderer_image(stage, placement->serial, placement->rgba,
+	    placement->image_width, placement->image_height,
+	    placement->source_x, placement->source_y,
+	    placement->source_width, placement->source_height,
+	    x, y, width, height);
+}
+
+static void
+freeGraphicsImage(uint64_t serial, void *context)
+{
+	(void)context;
+	mac_renderer_remove_image(serial);
+}
+
 void
 xfinishdraw(void)
 {
+	if (graphics_placement_count()) {
+		tlineviewprepare();
+		mac_renderer_set_image_clip(borderpx, borderpx, win.tw, win.th);
+		for (int stage = 0; stage < 3; stage++)
+			graphics_draw(tisaltscreen(), stage, win.cw, win.ch, trow(),
+			    tlineviewrow, drawGraphicsPlacement,
+			    (void *)(intptr_t)stage);
+	}
 	sshind_draw();
 	notif_draw();
 	cmdline_draw();
@@ -1775,7 +1828,10 @@ nativeResize(double width, double height)
 	win.tw = columns * win.cw;
 	win.th = rows * win.ch;
 	tresize(columns, rows);
-	if (ttyfd >= 0) ttyresize(win.tw, win.th);
+	if (ttyfd >= 0) {
+		double scale = mac_renderer_scale();
+		ttyresize((int)lrint(win.tw * scale), (int)lrint(win.th * scale));
+	}
 	sshind_resize(); notif_resize(); cmdline_resize();
 	tfulldirt();
 	macos_request_redraw();
@@ -1833,6 +1889,7 @@ initializeNativeWindow(int columns, int rows)
 	    device:device];
 	if (!mac_renderer_init((__bridge void *)nativeView, usedfont, usedfontsize))
 		die("st: could not initialize Metal renderer\n");
+	graphics_set_image_free_callback(freeGraphicsImage, NULL);
 	updateCellMetrics();
 	NSSize content = NSMakeSize(2 * borderpx + columns * win.cw,
 	    2 * borderpx + rows * win.ch);

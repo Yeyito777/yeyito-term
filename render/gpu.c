@@ -38,6 +38,13 @@ typedef struct {
 	int len, cap;
 } GpuBatch;
 
+typedef struct GpuImageTexture {
+	struct GpuImageTexture *next;
+	uint64_t serial;
+	GLuint texture;
+	int width, height;
+} GpuImageTexture;
+
 typedef struct {
 	int active, doublebuf;
 	int bufferage;
@@ -64,6 +71,7 @@ typedef struct {
 	GpuFallbackFace *fallbacks;
 	int fallbacklen, fallbackcap;
 	GpuBatch bg, text, ctext, deco, obg, otext, octext, odeco;
+	GpuImageTexture *images;
 } Gpu;
 
 static Gpu gpu;
@@ -455,7 +463,14 @@ static void
 gpudestroy(void)
 {
 	int i;
+	GpuImageTexture *image, *nextimage;
 
+	for (image = gpu.images; image; image = nextimage) {
+		nextimage = image->next;
+		if (image->texture)
+			glDeleteTextures(1, &image->texture);
+		free(image);
+	}
 	if (gpu.atlas)
 		glDeleteTextures(1, &gpu.atlas);
 	if (gpu.catlas)
@@ -1021,5 +1036,118 @@ gpudrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 		gpubatchrect(&gpu.odeco, cellx, celly, 1, cellh, col);
 		gpubatchrect(&gpu.odeco, cellx + cellw - 1, celly, 1, cellh, col);
 		gpubatchrect(&gpu.odeco, cellx, celly + cellh - 1, cellw, 1, col);
+	}
+}
+
+static GpuImageTexture *
+gpuimagetexture(const GraphicsPlacementView *placement)
+{
+	GpuImageTexture *image;
+
+	for (image = gpu.images; image; image = image->next)
+		if (image->serial == placement->serial)
+			return image;
+	image = calloc(1, sizeof(*image));
+	if (!image)
+		return NULL;
+	image->serial = placement->serial;
+	image->width = placement->image_width;
+	image->height = placement->image_height;
+	glGenTextures(1, &image->texture);
+	glBindTexture(GL_TEXTURE_2D, image->texture);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, image->width, image->height,
+	    0, GL_RGBA, GL_UNSIGNED_BYTE, placement->rgba);
+	image->next = gpu.images;
+	gpu.images = image;
+	return image;
+}
+
+static void
+gpudrawimage(const GraphicsPlacementView *placement, void *context)
+{
+	GpuImageTexture *image;
+	GpuVertex vertices[6];
+	double x, y, w, h, u0, v0, u1, v1;
+	const void *voff, *toff, *coff;
+	(void)context;
+
+	x = gpucellx(placement->column) + placement->pixel_x * gpuxscale();
+	y = gpucelly(placement->row) + placement->pixel_y * gpuyscale();
+	w = placement->natural_size ? placement->source_width * gpuxscale() :
+	    gpucellx(placement->column + placement->columns) -
+	    gpucellx(placement->column);
+	h = placement->natural_size ? placement->source_height * gpuyscale() :
+	    gpucelly(placement->row + placement->rows) - gpucelly(placement->row);
+	if (x >= borderpx + win.tw || x + w <= borderpx ||
+	    y >= borderpx + win.th || y + h <= borderpx)
+		return;
+	image = gpuimagetexture(placement);
+	if (!image)
+		return;
+	u0 = (placement->source_x + 0.5) / placement->image_width;
+	v0 = (placement->source_y + 0.5) / placement->image_height;
+	u1 = (placement->source_x + placement->source_width - 0.5) /
+	    placement->image_width;
+	v1 = (placement->source_y + placement->source_height - 0.5) /
+	    placement->image_height;
+#define IVERTEX(px, py, tu, tv) \
+	(GpuVertex){(GLfloat)(px), (GLfloat)(py), (GLfloat)(tu), (GLfloat)(tv), 1, 1, 1, 1}
+	vertices[0] = IVERTEX(x, y, u0, v0);
+	vertices[1] = IVERTEX(x, y+h, u0, v1);
+	vertices[2] = IVERTEX(x+w, y, u1, v0);
+	vertices[3] = IVERTEX(x+w, y, u1, v0);
+	vertices[4] = IVERTEX(x, y+h, u0, v1);
+	vertices[5] = IVERTEX(x+w, y+h, u1, v1);
+#undef IVERTEX
+	voff = &vertices[0].x;
+	toff = &vertices[0].u;
+	coff = &vertices[0].r;
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	glEnable(GL_ALPHA_TEST);
+	glAlphaFunc(GL_GREATER, 0.0f);
+	glEnable(GL_TEXTURE_2D);
+	glBindTexture(GL_TEXTURE_2D, image->texture);
+	glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+	glEnableClientState(GL_VERTEX_ARRAY);
+	glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+	glEnableClientState(GL_COLOR_ARRAY);
+	glVertexPointer(2, GL_FLOAT, sizeof(GpuVertex), voff);
+	glTexCoordPointer(2, GL_FLOAT, sizeof(GpuVertex), toff);
+	glColorPointer(4, GL_FLOAT, sizeof(GpuVertex), coff);
+	glDrawArrays(GL_TRIANGLES, 0, 6);
+}
+
+static void
+gpudrawimages(int stage)
+{
+	glEnable(GL_SCISSOR_TEST);
+	glScissor(borderpx, MAX(0, win.h - borderpx - win.th), win.tw, win.th);
+	graphics_draw(tisaltscreen(), stage, win.cw, win.ch, trow(),
+	    tlineviewrow, gpudrawimage, NULL);
+	glDisable(GL_SCISSOR_TEST);
+}
+
+static void
+gpufreeimage(uint64_t serial, void *context)
+{
+	GpuImageTexture **link, *image;
+	(void)context;
+
+	for (link = &gpu.images; (image = *link); link = &image->next) {
+		if (image->serial != serial)
+			continue;
+		*link = image->next;
+		if (gpu.active) {
+			glXMakeCurrent(xw.dpy, xw.win, gpu.ctx);
+			glDeleteTextures(1, &image->texture);
+		}
+		free(image);
+		return;
 	}
 }
