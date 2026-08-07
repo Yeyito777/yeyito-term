@@ -61,6 +61,7 @@ typedef struct {
 	int icharset;
 	int *tabs;
 	Rune lastc;
+	int histn;
 } Term;
 
 /* Mock globals */

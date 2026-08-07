@@ -203,6 +203,7 @@ static void gpuresize(void);
 static void gpudestroy(void);
 static void gpudrawimages(int);
 static void gpufreeimage(uint64_t, void *);
+static void gpureleaseimages(void);
 static double gpuxscale(void);
 static double gpuyscale(void);
 static void gpudrawline(Line, int, int, int);
@@ -1930,7 +1931,7 @@ xinit(int cols, int rows)
 		xinitatoms(thispid);
 	}
 
-	win.mode = MODE_NUMLOCK;
+	win.mode = MODE_NUMLOCK | MODE_ONSCREEN;
 	if (gpudraw) {
 		xw.netwmname = XInternAtom(xw.dpy, "_NET_WM_NAME", False);
 		xw.netwmiconname = XInternAtom(xw.dpy, "_NET_WM_ICON_NAME", False);
@@ -2438,9 +2439,17 @@ xstartdraw(void)
 			xhints();
 	}
 	if (gpu.active) {
-		if (!IS_SET(MODE_VISIBLE))
+		if (!IS_SET(MODE_VISIBLE) || !IS_SET(MODE_ONSCREEN)) {
+			graphics_compact_images();
 			return 0;
+		}
 		glXMakeCurrent(xw.dpy, xw.win, gpu.ctx);
+		if (++gpu.frame == 0) {
+			GpuImageTexture *image;
+			gpu.frame = 1;
+			for (image = gpu.images; image; image = image->next)
+				image->frame = 0;
+		}
 		gpuresize();
 		gpudamageensure();
 		if (gpu.doublebuf && gpu.damage[0]) {
@@ -2491,7 +2500,7 @@ xstartdraw(void)
 		return 1;
 	}
 	xensurexftbuf(win.cw ? MAX(1, win.tw / win.cw) : 1);
-	return IS_SET(MODE_VISIBLE);
+	return IS_SET(MODE_VISIBLE) && IS_SET(MODE_ONSCREEN);
 }
 
 void
@@ -2578,6 +2587,8 @@ xfinishdraw(void)
 		gpudrawbatch(&gpu.otext, 1);
 		gpudrawbatch(&gpu.octext, 2);
 		gpudrawbatch(&gpu.odeco, 0);
+		gpupruneimages();
+		graphics_compact_images();
 		glDisableClientState(GL_VERTEX_ARRAY);
 		glDisableClientState(GL_COLOR_ARRAY);
 		glDisableClientState(GL_TEXTURE_COORD_ARRAY);
@@ -2626,12 +2637,16 @@ visibility(XEvent *ev)
 	XVisibilityEvent *e = &ev->xvisibility;
 
 	MODBIT(win.mode, e->state != VisibilityFullyObscured, MODE_VISIBLE);
+	if (e->state == VisibilityFullyObscured && gpu.active)
+		gpureleaseimages();
 }
 
 void
 unmap(XEvent *ev)
 {
 	win.mode &= ~MODE_VISIBLE;
+	if (gpu.active)
+		gpureleaseimages();
 }
 
 void
@@ -3121,6 +3136,24 @@ cmessage(XEvent *e)
 void
 resize(XEvent *e)
 {
+	int onscreen, wasonscreen;
+
+	/* dwm hides clients by moving them completely outside the root window.
+	 * VisibilityNotify does not reliably classify such mapped windows as
+	 * obscured, so without this check a hidden terminal continues submitting
+	 * GL frames.  Keep this bit separate from MODE_VISIBLE: an on-screen
+	 * terminal can still be fully obscured by another client. */
+	wasonscreen = IS_SET(MODE_ONSCREEN);
+	onscreen = e->xconfigure.x < DisplayWidth(xw.dpy, xw.scr) &&
+		e->xconfigure.y < DisplayHeight(xw.dpy, xw.scr) &&
+		e->xconfigure.x + e->xconfigure.width > 0 &&
+		e->xconfigure.y + e->xconfigure.height > 0;
+	MODBIT(win.mode, onscreen, MODE_ONSCREEN);
+	if (onscreen && !wasonscreen)
+		tfulldirt();
+	else if (!onscreen && wasonscreen && gpu.active)
+		gpureleaseimages();
+
 	if (e->xconfigure.width == win.w && e->xconfigure.height == win.h)
 		return;
 

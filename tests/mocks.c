@@ -56,6 +56,7 @@ mock_term_init(int rows, int cols)
 	}
 	term.histi = 0;
 	term.scr = 0;
+	term.histn = 0;
 
 	/* Initialize cursor at origin */
 	term.c.x = 0;
@@ -116,12 +117,17 @@ mock_set_line(int y, const char *content)
 void
 mock_set_hist(int idx, const char *content)
 {
-	int i;
+	int i, was_populated = 0;
 	int len;
 
 	idx = (idx + HISTSIZE) % HISTSIZE;
 	if (!term.hist[idx])
 		return;
+	for (i = 0; i < term.col; i++)
+		if (term.hist[idx][i].u != 0 && term.hist[idx][i].u != ' ') {
+			was_populated = 1;
+			break;
+		}
 
 	len = strlen(content);
 	if (len > term.col)
@@ -134,6 +140,10 @@ mock_set_hist(int idx, const char *content)
 	for (i = 0; i < len; i++) {
 		term.hist[idx][i].u = content[i];
 	}
+	if (!was_populated && len > 0 && term.histn < HISTSIZE)
+		term.histn++;
+	if (idx > term.histi)
+		term.histi = idx;
 }
 
 /* Stub implementations of st.c functions */
@@ -346,9 +356,13 @@ kscrollup(const Arg *a)
 	n = a->i;
 	mock_state.last_kscrollup.n = n;
 
+	if (n < 0)
+		n = term.row + n;
+	if (n > term.histn - term.scr)
+		n = term.histn - term.scr;
+	if (n < 0)
+		n = 0;
 	term.scr += n;
-	if (term.scr > HISTSIZE - 1)
-		term.scr = HISTSIZE - 1;
 	tfulldirt();
 }
 
@@ -455,6 +469,8 @@ tscrollup(int orig, int n, int copyhist)
 		temp = term.hist[term.histi];
 		term.hist[term.histi] = term.line[orig];
 		term.line[orig] = temp;
+		if (term.histn < HISTSIZE)
+			term.histn++;
 	}
 
 	/* Clear the region */

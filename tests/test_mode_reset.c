@@ -28,7 +28,7 @@ TEST(clears_every_application_controlled_mode)
 TEST(preserves_window_owned_modes)
 {
 	unsigned int owned = MODE_VISIBLE | MODE_FOCUSED | MODE_BLINK |
-	    MODE_FBLINK | MODE_NUMLOCK;
+	    MODE_FBLINK | MODE_NUMLOCK | MODE_ONSCREEN;
 
 	ASSERT_EQ(owned, winmoderestore(owned | MODE_APPRESET));
 }

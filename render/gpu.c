@@ -41,6 +41,7 @@ typedef struct {
 typedef struct GpuImageTexture {
 	struct GpuImageTexture *next;
 	uint64_t serial;
+	uint64_t frame;
 	GLuint texture;
 	int width, height;
 } GpuImageTexture;
@@ -72,6 +73,7 @@ typedef struct {
 	int fallbacklen, fallbackcap;
 	GpuBatch bg, text, ctext, deco, obg, otext, octext, odeco;
 	GpuImageTexture *images;
+	uint64_t frame;
 } Gpu;
 
 static Gpu gpu;
@@ -460,17 +462,29 @@ gpuinit(void)
 }
 
 static void
-gpudestroy(void)
+gpureleaseimages(void)
 {
-	int i;
-	GpuImageTexture *image, *nextimage;
+	GpuImageTexture *image, *next;
 
-	for (image = gpu.images; image; image = nextimage) {
-		nextimage = image->next;
+	if (!gpu.images)
+		return;
+	if (gpu.active)
+		glXMakeCurrent(xw.dpy, xw.win, gpu.ctx);
+	for (image = gpu.images; image; image = next) {
+		next = image->next;
 		if (image->texture)
 			glDeleteTextures(1, &image->texture);
 		free(image);
 	}
+	gpu.images = NULL;
+}
+
+static void
+gpudestroy(void)
+{
+	int i;
+
+	gpureleaseimages();
 	if (gpu.atlas)
 		glDeleteTextures(1, &gpu.atlas);
 	if (gpu.catlas)
@@ -1043,16 +1057,26 @@ static GpuImageTexture *
 gpuimagetexture(const GraphicsPlacementView *placement)
 {
 	GpuImageTexture *image;
+	const unsigned char *rgba;
 
 	for (image = gpu.images; image; image = image->next)
-		if (image->serial == placement->serial)
+		if (image->serial == placement->serial) {
+			image->frame = gpu.frame;
 			return image;
+		}
 	image = calloc(1, sizeof(*image));
 	if (!image)
 		return NULL;
 	image->serial = placement->serial;
+	image->frame = gpu.frame;
 	image->width = placement->image_width;
 	image->height = placement->image_height;
+	rgba = placement->rgba ? placement->rgba :
+	    graphics_image_pixels(placement->serial);
+	if (!rgba) {
+		free(image);
+		return NULL;
+	}
 	glGenTextures(1, &image->texture);
 	glBindTexture(GL_TEXTURE_2D, image->texture);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -1061,10 +1085,33 @@ gpuimagetexture(const GraphicsPlacementView *placement)
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, image->width, image->height,
-	    0, GL_RGBA, GL_UNSIGNED_BYTE, placement->rgba);
+	    0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+	graphics_release_image_pixels(placement->serial);
 	image->next = gpu.images;
 	gpu.images = image;
 	return image;
+}
+
+/* Keep decoded pixels in the terminal's bounded scrollback cache, but keep GL
+ * textures resident only while an image is actually in the current viewport.
+ * Otherwise every image ever viewed in every st window consumes VRAM until its
+ * history line is recycled, which can make the X server and the whole WM page
+ * GPU memory when several image-heavy terminals are open. */
+static void
+gpupruneimages(void)
+{
+	GpuImageTexture **link, *image;
+
+	for (link = &gpu.images; (image = *link); ) {
+		if (image->frame == gpu.frame) {
+			link = &image->next;
+			continue;
+		}
+		*link = image->next;
+		if (image->texture)
+			glDeleteTextures(1, &image->texture);
+		free(image);
+	}
 }
 
 static void

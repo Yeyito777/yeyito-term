@@ -126,6 +126,7 @@ void tresize(int col, int row)
 	free(term.tabs);
 
 	term.col = col;
+	term.maxcol = col;
 	term.row = row;
 	term.line = calloc(row, sizeof(Line));
 	term.alt = calloc(row, sizeof(Line));
@@ -147,6 +148,7 @@ setup_term(int col, int row)
 
 	memset(&term, 0, sizeof(term));
 	term.col = col;
+	term.maxcol = col;
 	term.row = row;
 	term.line = calloc(row, sizeof(Line));
 	term.alt = calloc(row, sizeof(Line));
@@ -300,6 +302,12 @@ TEST(full_roundtrip)
 	/* Reset */
 	cleanup_term();
 	setup_term(8, 3);
+	/* Match a fresh lazy-history terminal: restore must allocate only the
+	 * history rows present in the save. */
+	for (int i = 0; i < HISTSIZE; i++) {
+		free(term.hist[i]);
+		term.hist[i] = NULL;
+	}
 	persist_set_cwd(NULL);
 
 	/* Restore */
@@ -314,6 +322,7 @@ TEST(full_roundtrip)
 	ASSERT_EQ(42, (int)term.hist[0][0].fg);
 	ASSERT_EQ('Y', (int)term.hist[1][0].u);
 	ASSERT_EQ(84, (int)term.hist[1][0].fg);
+	ASSERT(term.hist[2] == NULL);
 
 	/* Verify screen */
 	ASSERT_EQ('$', (int)term.line[0][0].u);

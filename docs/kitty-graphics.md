@@ -33,9 +33,11 @@ dependency.
    7-bit wire form starts with bytes `1b 5f 47` (`ESC _ G`) and ends with
    `1b 5c` (`ESC` followed by a backslash).
 2. `st.c` collects the control string. Graphics strings are limited to a
-   2,048-byte control header and one 4,096-byte base64 payload chunk. An
-   oversized APC is discarded through its string terminator rather than grown
-   without bound or interpreted as terminal text.
+   2,048-byte control header and enough base64 payload for the 64 MiB decoded
+   transfer limit. An oversized APC is discarded through its string terminator
+   rather than grown without bound or interpreted as terminal text. Clients
+   should use 4,096-byte chunks, but bounded single-APC transfers and unpadded
+   base64 are accepted for compatibility with `kitten icat`.
 3. `graphics_handle_apc()` parses the command. If `m=1` is present, decoded
    chunks are accumulated until a final `m=0` command arrives. A malformed or
    interleaved command aborts the partial transfer.
@@ -48,8 +50,9 @@ dependency.
    viewport, sorts them by z-index, image ID, and creation serial, and emits a
    `GraphicsPlacementView` through the active backend callback.
 7. The Metal or OpenGL backend looks up a texture by the image's internal
-   serial number, uploads it only on first use, and draws the requested source
-   rectangle into the placement rectangle.
+   serial number, uploads it on demand, and draws the requested source rectangle
+   into the placement rectangle. On Linux, texture residency is limited to
+   images intersecting the current viewport.
 8. When common image state is reclaimed, an image-free callback immediately
    invalidates the corresponding GPU texture.
 
@@ -180,10 +183,18 @@ placement geometry into the three image passes. On Retina displays it reports
 backing-pixel dimensions, so an image using natural size maps image pixels to
 physical display pixels.
 
-The OpenGL backend keeps the equivalent texture cache and uses a scissor
-rectangle for the terminal content area. Graphics capability is reported only
-when the GPU renderer is available; the non-GPU X11 path returns an unavailable
-response rather than claiming support it cannot draw.
+The OpenGL backend uses a scissor rectangle for the terminal content area. It
+keeps textures only for images drawn in the current frame, and releases the
+entire texture set when dwm moves the terminal off-screen, X11 fully obscures it,
+or the window is unmapped. Direct PNGs retain their compact encoded bytes in the
+bounded common scrollback cache; decoded RGBA pixels are materialized only for
+the duration of an on-demand texture upload. Scrolling an old image into view
+decodes and uploads it again. This prevents image-heavy terminal history across
+many windows from filling either VRAM or ordinary memory and stalling the X
+server/window manager.
+Graphics capability is reported only when the GPU renderer is available; the
+non-GPU X11 path returns an unavailable response rather than claiming support it
+cannot draw.
 
 ## Geometry and cursor behavior
 
@@ -204,7 +215,7 @@ implementation applies the following limits:
 | Resource | Limit |
 | --- | ---: |
 | APC control header | 2,048 bytes |
-| Base64 payload per APC | 4,096 bytes |
+| Base64 payload per APC | 89,478,488 bytes (64 MiB decoded) |
 | Buffered transfer | 64 MiB |
 | Normalized image | 64 MiB |
 | Total normalized image memory | 320 MiB |

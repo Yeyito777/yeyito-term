@@ -23,6 +23,7 @@ enum win_mode {
 	MODE_NUMLOCK     = 1 << 17,
 	MODE_PASTEEVENT  = 1 << 19,
 	MODE_SYNC        = 1 << 20,
+	MODE_ONSCREEN    = 1 << 21,
 	MODE_MOUSE       = MODE_MOUSEBTN|MODE_MOUSEMOTION|MODE_MOUSEX10\
 	                  |MODE_MOUSEMANY,
 };

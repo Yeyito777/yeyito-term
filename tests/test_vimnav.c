@@ -1714,9 +1714,7 @@ TEST(vimnav_textobj_unknown_key_clears_pending)
 	mock_term_free();
 }
 
-/* Test: scrolling up works after Ctrl+L clears screen (but history has content)
- * This is a regression test for the bug where scrolling was blocked after clear
- * because the check only looked at the immediate top line (which was empty). */
+/* Test: scrolling up works after Ctrl+L clears the screen but leaves history. */
 TEST(vimnav_scroll_up_after_clear)
 {
 	mock_term_init(24, 80);
@@ -1784,6 +1782,63 @@ TEST(vimnav_ctrl_u_after_clear)
 
 	/* Should have scrolled */
 	ASSERT(term.scr > 0);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Graphics placements can occupy valid history rows whose text cells are all
+ * blank. Ctrl+u/Ctrl+d must navigate those rows based on histn, not glyphs. */
+TEST(vimnav_ctrl_scrolls_image_only_history)
+{
+	mock_term_init(24, 80);
+	term.histn = 7;
+	term.histi = 6;
+	term.c.x = 0;
+	term.c.y = 23;
+
+	vimnav_enter();
+	ASSERT_EQ(1, vimnav_handle_key('u', 4));
+	ASSERT_EQ(7, term.scr);
+	ASSERT_EQ(1, vimnav_handle_key('d', 4));
+	ASSERT_EQ(0, term.scr);
+
+	term.histn = 30;
+	term.histi = 29;
+	ASSERT_EQ(1, vimnav_handle_key('y', 4));
+	ASSERT_EQ(1, term.scr);
+	ASSERT_EQ(1, vimnav_handle_key('e', 4));
+	ASSERT_EQ(0, term.scr);
+	ASSERT_EQ(1, vimnav_handle_key('b', 4));
+	ASSERT_EQ(20, term.scr);
+	ASSERT_EQ(1, vimnav_handle_key('f', 4));
+	ASSERT_EQ(0, term.scr);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
+/* Plain k/j navigation must also cross textually blank rows used by images and
+ * stop exactly at the populated history boundary. */
+TEST(vimnav_jk_navigates_image_only_history)
+{
+	mock_term_init(6, 80);
+	term.histn = 4;
+	term.histi = 3;
+	term.c.x = 0;
+	term.c.y = 0;
+
+	vimnav_enter();
+	for (int i = 1; i <= 4; i++) {
+		ASSERT_EQ(1, vimnav_handle_key('k', 0));
+		ASSERT_EQ(i, term.scr);
+	}
+	vimnav_handle_key('k', 0);
+	ASSERT_EQ(4, term.scr);
+
+	for (int i = 0; i < 16 && term.scr > 0; i++)
+		vimnav_handle_key('j', 0);
+	ASSERT_EQ(0, term.scr);
 
 	vimnav_exit();
 	mock_term_free();
@@ -4018,6 +4073,8 @@ TEST_SUITE(vimnav)
 	/* Scrollback after clear tests */
 	RUN_TEST(vimnav_scroll_up_after_clear);
 	RUN_TEST(vimnav_ctrl_u_after_clear);
+	RUN_TEST(vimnav_ctrl_scrolls_image_only_history);
+	RUN_TEST(vimnav_jk_navigates_image_only_history);
 	RUN_TEST(vimnav_scroll_stops_at_empty_history);
 	RUN_TEST(vimnav_scroll_reaches_oldest_history);
 	/* f/F find character tests */

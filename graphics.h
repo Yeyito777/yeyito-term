@@ -10,7 +10,15 @@
 #define GRAPHICS_STAGE_BELOW_BACKGROUND 0
 #define GRAPHICS_STAGE_BELOW_TEXT       1
 #define GRAPHICS_STAGE_ABOVE_TEXT       2
-#define GRAPHICS_APC_MAX (1U + 2048U + 1U + 4096U)
+#define GRAPHICS_HEADER_MAX             2048U
+#define GRAPHICS_DATA_MAX        (64U * 1024U * 1024U)
+/* A direct-transfer payload is base64, so its wire representation can be up
+ * to four thirds the size of the bounded decoded image data.  Although Kitty
+ * recommends 4096-byte chunks, clients such as kitten icat also emit a whole
+ * image in one APC. */
+#define GRAPHICS_PAYLOAD_MAX (((GRAPHICS_DATA_MAX + 2U) / 3U) * 4U)
+#define GRAPHICS_APC_MAX \
+	(1U + GRAPHICS_HEADER_MAX + 1U + GRAPHICS_PAYLOAD_MAX)
 
 typedef struct {
 	int handled;
@@ -68,6 +76,9 @@ void graphics_set_image_free_callback(GraphicsImageFreeCallback callback,
 size_t graphics_image_bytes(void);
 size_t graphics_image_count(void);
 size_t graphics_placement_count(void);
+const unsigned char *graphics_image_pixels(uint64_t serial);
+void graphics_release_image_pixels(uint64_t serial);
+void graphics_compact_images(void);
 int graphics_has_visible_placements(int alt, int viewport_rows,
 		int (*line_to_row)(Line, int));
 

@@ -81,6 +81,7 @@ typedef struct {
 	int icharset;
 	int *tabs;
 	Rune lastc;
+	int histn;
 } Term;
 
 /* Extern declarations for st.c globals */
@@ -347,53 +348,21 @@ vimnav_move_right(void)
 	vimnav_update_selection();
 }
 
-/* Check if there's any content in history above current scroll position.
- * This looks ahead to see if scrolling up would eventually show content,
- * even if the immediate next lines are empty. */
-static int
-vimnav_has_history_content(int scroll_offset)
-{
-	int i, idx;
-	/* Check up to 10 lines ahead in history for any content */
-	for (i = 0; i < 10 && scroll_offset + i < HISTSIZE; i++) {
-		/* Calculate the history index for this scroll position.
-		 * Must match TLINE macro: hist[(y + histi - scr + HISTSIZE + 1) % HISTSIZE]
-		 * For y=0 (top line) at scroll_offset, looking i lines further back: */
-		idx = (term.histi - scroll_offset - i + HISTSIZE + 1) % HISTSIZE;
-		if (term.hist[idx]) {
-			/* Check if this history line has content */
-			int j;
-			for (j = term.col - 1; j >= 0; j--) {
-				if (term.hist[idx][j].u != ' ' && term.hist[idx][j].u != 0) {
-					return 1;  /* Found content */
-				}
-			}
-		}
-	}
-	return 0;  /* No content found in lookahead */
-}
-
 /* Scroll helper that respects vim nav boundaries and moves cursor */
 static void
 vimnav_scroll_up(int n)
 {
 	int old_scr = term.scr;
-	int scrolled, remaining;
-	int i;
+	int available = MAX(0, term.histn - term.scr);
+	int scrolled = MIN(n, available);
+	int remaining;
 
-	/* Scroll up incrementally, checking for content in history */
-	for (i = 0; i < n && term.scr < HISTSIZE - 1; i++) {
-		term.scr++;
-		/* Stop if there's no content anywhere in the history we'd scroll into */
-		if (!vimnav_has_history_content(term.scr)) {
-			term.scr--;
-			break;
-		}
-	}
+	/* Every populated history row is navigable. Image placements are anchored
+	 * to otherwise blank rows, so inspecting glyph text to decide whether a row
+	 * exists incorrectly makes image-only scrollback unreachable. */
+	if (scrolled > 0)
+		kscrollup(&(Arg){ .i = scrolled });
 	scrolled = term.scr - old_scr;
-	if (scrolled > 0) {
-		tfulldirt();
-	}
 
 	/* Move cursor up by the amount we couldn't scroll */
 	remaining = n - scrolled;
@@ -457,22 +426,16 @@ vimnav_scroll_down(int n)
 static void
 vimnav_move_up(void)
 {
-	int old_scr = term.scr;
 	int was_in_prompt_space = vimnav_is_prompt_space(vimnav.y);
 
 	if (vimnav.y > 0) {
 		/* Move cursor up within visible area */
 		vimnav.y--;
 	} else if (!IS_SET(MODE_ALTSCREEN)) {
-		/* At top of screen, try to scroll up into history.
-		 * Skip on alt screen - history belongs to the main screen. */
-		term.scr++;
-		if (term.scr > HISTSIZE - 1 || !vimnav_has_history_content(term.scr)) {
-			/* Can't scroll or no content in history, revert */
-			term.scr = old_scr;
-		} else {
-			tfulldirt();
-		}
+		/* At top of screen, scroll into any valid history row, including a
+		 * textually blank row occupied by a graphics placement. */
+		if (term.scr < term.histn)
+			kscrollup(&(Arg){ .i = 1 });
 		/* Cursor stays at row 0 */
 	}
 
@@ -1132,8 +1095,8 @@ vimnav_move_top(void)
 {
 	int was_in_prompt_space = vimnav_is_prompt_space(vimnav.y);
 
-	/* Scroll to top of history, stopping at blank lines */
-	vimnav_scroll_up(HISTSIZE);
+	/* Scroll to the oldest populated history row. */
+	vimnav_scroll_up(term.histn - term.scr);
 	vimnav.y = 0;
 
 	/* Handoff: if we left prompt space with zsh in visual mode, inherit selection */
@@ -1185,13 +1148,8 @@ vimnav_move_prev_prompt(void)
 
 	/* Not found on screen. Scan into history by increasing term.scr. */
 	if (!IS_SET(MODE_ALTSCREEN)) {
-		while (term.scr < HISTSIZE - 1) {
-			int old_scr = term.scr;
+		while (term.scr < term.histn) {
 			term.scr++;
-			if (!vimnav_has_history_content(term.scr)) {
-				term.scr = old_scr;
-				break;
-			}
 			/* The new line scrolled in at screen top is TLINE(0) */
 			if (vimnav_has_main_prompt(0)) {
 				y = 0;

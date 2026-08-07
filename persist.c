@@ -349,6 +349,10 @@ persist_restore(const char *dir, unsigned int *out_col,
 	if (histn > HISTSIZE)
 		histn = HISTSIZE;
 	for (i = 0; i < histn; i++) {
+		/* History storage is lazy: a fresh terminal has no backing rows until
+		 * scrollback is produced or restored. */
+		if (!term.hist[i])
+			term.hist[i] = xmalloc(MAX(term.maxcol, hdr.col) * sizeof(Glyph));
 		if (fread(term.hist[i], sizeof(Glyph), hdr.col, f)
 				!= (size_t)hdr.col) {
 			fprintf(stderr, "[persist] restore: short history "

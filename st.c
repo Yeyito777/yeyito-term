@@ -232,6 +232,7 @@ static void tdeftran(char);
 static void tstrsequence(uchar);
 static void tgraphicscursor(int, int);
 static int tlineviewrowslow(Line, int);
+static Line newlineblank(int);
 
 static void drawregion(int, int, int, int);
 
@@ -1298,8 +1299,10 @@ kscrollup(const Arg* a)
 
 	if (n < 0)
 		n = term.row + n;
+	if (n > term.histn - term.scr)
+		n = term.histn - term.scr;
 
-	if (term.scr <= HISTSIZE-n) {
+	if (n > 0) {
 		term.scr += n;
 		selscroll(0, n);
 		tfulldirt();
@@ -1315,11 +1318,23 @@ tscrolldown(int orig, int n, int copyhist)
 	LIMIT(n, 0, term.bot-orig+1);
 
 	if (copyhist) {
+		int oldest;
+
 		term.histi = (term.histi - 1 + HISTSIZE) % HISTSIZE;
 		graphics_recycle_line(term.hist[term.histi]);
 		temp = term.hist[term.histi];
+		if (!temp)
+			temp = newlineblank(term.maxcol);
 		term.hist[term.histi] = term.line[term.bot];
 		term.line[term.bot] = temp;
+		/* Reverse index shifts the valid ring backwards without changing
+		 * histn.  Its new oldest row used to be supplied by the eagerly
+		 * allocated blank ring, so materialize that one row lazily. */
+		if (term.histn > 0) {
+			oldest = (term.histi - term.histn + 1 + HISTSIZE) % HISTSIZE;
+			if (!term.hist[oldest])
+				term.hist[oldest] = newlineblank(term.maxcol);
+		}
 	} else
 		for (i = term.bot-n+1; i <= term.bot; i++)
 			graphics_recycle_line(term.line[i]);
@@ -1351,6 +1366,8 @@ tscrollup(int orig, int n, int copyhist)
 		term.histi = (term.histi + 1) % HISTSIZE;
 		graphics_recycle_line(term.hist[term.histi]);
 		temp = term.hist[term.histi];
+		if (!temp)
+			temp = newlineblank(term.maxcol);
 		term.hist[term.histi] = term.line[orig];
 		term.line[orig] = temp;
 		if (term.histn < HISTSIZE)
@@ -3547,12 +3564,14 @@ tresize_reflow(int newcol, int newrow)
 	free(logical);
 	free(sources);
 
-	/* Allocate fresh primary screen/history at the new width. */
+	/* Allocate a fresh primary screen at the new width.  History slots stay
+	 * NULL until they actually contain scrollback; eagerly allocating all 32K
+	 * rows makes every wide terminal consume hundreds of MiB. */
 	term.line = xmalloc(newrow * sizeof(Line));
 	for (y = 0; y < newrow; y++)
 		term.line[y] = newlineblank(newcol);
 	for (i = 0; i < HISTSIZE; i++)
-		term.hist[i] = newlineblank(newcol);
+		term.hist[i] = NULL;
 
 	if (rf.total > newrow) {
 		screen_start = rf.total - newrow;
@@ -3569,7 +3588,6 @@ tresize_reflow(int newcol, int newrow)
 	for (i = 0; i < hist_count; i++) {
 		outidx = hist_start + i;
 		idx = i;
-		free(term.hist[idx]);
 		term.hist[idx] = rfget(&rf, outidx);
 		if (term.hist[idx])
 			rf.buf[(rf.head + (int)(outidx - (rf.total - rf.len))) % rf.cap] = NULL;
@@ -3686,8 +3704,12 @@ tresize(int col, int row)
 	term.dirty = xrealloc(term.dirty, row * sizeof(*term.dirty));
 	term.tabs = xrealloc(term.tabs, col * sizeof(*term.tabs));
 
+	/* Keep unused history slots unallocated.  A slot receives a blank line on
+	 * its first scroll in tscrollup()/tscrolldown(). */
 	for (i = 0; i < HISTSIZE; i++) {
 		uintptr_t oldline = (uintptr_t)term.hist[i];
+		if (!term.hist[i])
+			continue;
 		term.hist[i] = xrealloc(term.hist[i], col * sizeof(Glyph));
 		graphics_reanchor_line_address(oldline, term.hist[i]);
 		for (j = mincol; j < col; j++) {

@@ -24,9 +24,7 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "vendor/stb_image.h"
 
-#define GR_HEADER_MAX             2048U
-#define GR_PAYLOAD_CHUNK_MAX      4096U
-#define GR_ENCODED_MAX      (64U * 1024U * 1024U)
+#define GR_ENCODED_MAX GRAPHICS_DATA_MAX
 #define GR_IMAGE_MAX        (64U * 1024U * 1024U)
 #define GR_TOTAL_MAX       (320U * 1024U * 1024U)
 #define GR_IMAGE_COUNT_MAX         1024U
@@ -105,7 +103,10 @@ struct GraphicsImage {
 	int width;
 	int height;
 	size_t bytes;
+	size_t pixel_bytes;
 	unsigned char *rgba;
+	size_t encoded_bytes;
+	unsigned char *encoded;
 	unsigned int placements;
 	int delete_candidate;
 };
@@ -235,12 +236,12 @@ parse_command(const char *data, size_t length, GraphicsCommand *command,
 		*payload = end;
 		*payload_length = 0;
 	}
-	if (header_length > GR_HEADER_MAX) {
+	if (header_length > GRAPHICS_HEADER_MAX) {
 		*error = "E2BIG:control data too large";
 		return 0;
 	}
-	if (*payload_length > GR_PAYLOAD_CHUNK_MAX) {
-		*error = "E2BIG:payload chunk too large";
+	if (*payload_length > GRAPHICS_PAYLOAD_MAX) {
+		*error = "E2BIG:payload too large";
 		return 0;
 	}
 
@@ -414,16 +415,18 @@ decode_base64(const char *source, size_t length, unsigned char **output,
 		size_t *output_length)
 {
 	unsigned char *decoded;
-	size_t i, used = 0;
+	size_t full_length, i, remainder, used = 0;
 
 	*output = NULL;
 	*output_length = 0;
-	if (!length || length % 4)
+	remainder = length % 4;
+	if (!length || remainder == 1 || length > GRAPHICS_PAYLOAD_MAX)
 		return 0;
-	decoded = malloc(length / 4 * 3 + 1);
+	decoded = malloc(length / 4 * 3 + (remainder ? remainder - 1 : 0) + 1);
 	if (!decoded)
 		return 0;
-	for (i = 0; i < length; i += 4) {
+	full_length = length - remainder;
+	for (i = 0; i < full_length; i += 4) {
 		int a = base64_value((unsigned char)source[i]);
 		int b = base64_value((unsigned char)source[i + 1]);
 		int c = source[i + 2] == '=' ? -2 : base64_value((unsigned char)source[i + 2]);
@@ -440,6 +443,25 @@ decode_base64(const char *source, size_t length, unsigned char **output,
 			if (d != -2)
 				decoded[used++] = (unsigned char)((c << 6) | d);
 		}
+	}
+	/* Kitty's protocol examples use padded base64, but kitten icat omits the
+	 * final '=' or '==' when the source length is not divisible by three. */
+	if (remainder) {
+		int a = base64_value((unsigned char)source[i]);
+		int b = base64_value((unsigned char)source[i + 1]);
+		int c = remainder == 3 ?
+		    base64_value((unsigned char)source[i + 2]) : 0;
+		if (a < 0 || b < 0 || c < 0) {
+			free(decoded);
+			return 0;
+		}
+		decoded[used++] = (unsigned char)((a << 2) | (b >> 4));
+		if (remainder == 3)
+			decoded[used++] = (unsigned char)((b << 4) | (c >> 2));
+	}
+	if (used > GRAPHICS_DATA_MAX) {
+		free(decoded);
+		return 0;
 	}
 	*output = decoded;
 	*output_length = used;
@@ -560,6 +582,7 @@ delete_image(GraphicsImage *image)
 				image_free_callback(image->serial, image_free_context);
 			total_image_bytes -= image->bytes;
 			free(image->rgba);
+			free(image->encoded);
 			free(image);
 			image_count--;
 			return;
@@ -779,15 +802,39 @@ set_response(GraphicsCommandResult *result, const GraphicsCommand *command,
 
 static GraphicsImage *
 store_image(const GraphicsCommand *command, unsigned char *rgba, int width,
-		int height, const char **error)
+		int height, const unsigned char *encoded, size_t encoded_bytes,
+		const char **error)
 {
 	GraphicsImage *image, *old;
-	size_t bytes = (size_t)width * height * 4;
+	unsigned char *encoded_copy = NULL;
+	size_t pixel_bytes = (size_t)width * height * 4;
+	size_t bytes;
 	uint32_t id = command->id;
+
+	/* Keep direct PNG bytes as a compact backing store.  Linux can then drop
+	 * the much larger RGBA copy after uploading a visible texture and decode it
+	 * again only if that scrollback image returns to the viewport. */
+	if (command->format != 100 || command->compression == 'z')
+		encoded_bytes = 0;
+	if (encoded_bytes) {
+		encoded_copy = malloc(encoded_bytes);
+		if (!encoded_copy) {
+			*error = "ENOMEM:image backing allocation failed";
+			return NULL;
+		}
+		memcpy(encoded_copy, encoded, encoded_bytes);
+	}
+	if (encoded_bytes > SIZE_MAX - pixel_bytes) {
+		free(encoded_copy);
+		*error = "ENOMEM:image size overflow";
+		return NULL;
+	}
+	bytes = pixel_bytes + encoded_bytes;
 
 	if (command->has_number) {
 		id = allocate_image_id();
 		if (!id) {
+			free(encoded_copy);
 			*error = "ENOMEM:no image IDs available";
 			return NULL;
 		}
@@ -795,10 +842,12 @@ store_image(const GraphicsCommand *command, unsigned char *rgba, int width,
 	old = id ? find_image_id(id) : NULL;
 	while (image_count >= GR_IMAGE_COUNT_MAX && !old)
 		if (!evict_unplaced(NULL)) {
+			free(encoded_copy);
 			*error = "ENOMEM:too many images";
 			return NULL;
 		}
 	if (!make_room(bytes, old)) {
+		free(encoded_copy);
 		*error = "ENOMEM:image quota exceeded";
 		return NULL;
 	}
@@ -806,6 +855,7 @@ store_image(const GraphicsCommand *command, unsigned char *rgba, int width,
 		delete_image(old);
 	image = calloc(1, sizeof(*image));
 	if (!image) {
+		free(encoded_copy);
 		*error = "ENOMEM:image allocation failed";
 		return NULL;
 	}
@@ -817,7 +867,10 @@ store_image(const GraphicsCommand *command, unsigned char *rgba, int width,
 	image->width = width;
 	image->height = height;
 	image->bytes = bytes;
+	image->pixel_bytes = pixel_bytes;
 	image->rgba = rgba;
+	image->encoded_bytes = encoded_bytes;
+	image->encoded = encoded_copy;
 	image->next = images;
 	images = image;
 	total_image_bytes += bytes;
@@ -1056,7 +1109,7 @@ process_data_command(const GraphicsCommand *command, const unsigned char *data,
 		set_response(result, command, response_id, 0, 1, "OK", 0);
 		return 1;
 	}
-	image = store_image(command, rgba, width, height, &error);
+	image = store_image(command, rgba, width, height, data, length, &error);
 	if (!image) {
 		stbi_image_free(rgba);
 		goto failed;
@@ -1427,6 +1480,56 @@ graphics_set_image_free_callback(GraphicsImageFreeCallback callback,
 size_t graphics_image_bytes(void) { return total_image_bytes; }
 size_t graphics_image_count(void) { return image_count; }
 size_t graphics_placement_count(void) { return placement_count; }
+
+const unsigned char *
+graphics_image_pixels(uint64_t serial)
+{
+	GraphicsImage *image;
+	unsigned char *rgba;
+	int width, height, channels;
+
+	for (image = images; image && image->serial != serial; image = image->next)
+		;
+	if (!image || image->rgba)
+		return image ? image->rgba : NULL;
+	if (!image->encoded || image->encoded_bytes > INT_MAX)
+		return NULL;
+	rgba = stbi_load_from_memory(image->encoded, (int)image->encoded_bytes,
+	    &width, &height, &channels, 4);
+	if (!rgba || width != image->width || height != image->height) {
+		stbi_image_free(rgba);
+		return NULL;
+	}
+	image->rgba = rgba;
+	image->bytes += image->pixel_bytes;
+	total_image_bytes += image->pixel_bytes;
+	return image->rgba;
+}
+
+void
+graphics_release_image_pixels(uint64_t serial)
+{
+	GraphicsImage *image;
+
+	for (image = images; image && image->serial != serial; image = image->next)
+		;
+	if (!image || !image->rgba || !image->encoded)
+		return;
+	stbi_image_free(image->rgba);
+	image->rgba = NULL;
+	image->bytes -= image->pixel_bytes;
+	total_image_bytes -= image->pixel_bytes;
+}
+
+void
+graphics_compact_images(void)
+{
+	GraphicsImage *image;
+
+	for (image = images; image; image = image->next)
+		if (image->rgba && image->encoded)
+			graphics_release_image_pixels(image->serial);
+}
 
 int
 graphics_has_visible_placements(int alt, int viewport_rows,

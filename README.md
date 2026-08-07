@@ -36,7 +36,9 @@ uses an ordinary macOS window that tiling managers can control, and bundles the
 
 `st` implements the direct-stream subset of the Kitty terminal graphics
 protocol. PNG, RGB, and RGBA images can be transmitted in APC escape sequences,
-split into 4096-byte base64 chunks, and optionally compressed with zlib. Images
+split into 4096-byte base64 chunks or sent in a bounded single APC, and
+optionally compressed with zlib. Both padded and unpadded base64 are accepted
+for compatibility with `kitten icat`. Images
 support source cropping, cell scaling, alpha, z-order, image and placement IDs,
 deletion, cursor movement control, the protocol capability query, and terminal
 scrollback. Both the native Metal backend and the X11 OpenGL backend render the
@@ -54,7 +56,8 @@ chafa --format kitty image.png
 Applications should use the Kitty graphics query rather than infer support from
 `$TERM`; the terminal continues to identify as `st-256color`. The PTY reports
 both cell and pixel dimensions, and `CSI 14 t` / `CSI 16 t` are available as
-geometry-query fallbacks.
+geometry-query fallbacks. `kitten icat --detect-support` reports `stream` on the
+GPU renderer.
 
 The current implementation does not accept local file, temporary-file, or
 shared-memory image transfers. Animations, relative placements, and Kitty

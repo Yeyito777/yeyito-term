@@ -2,6 +2,7 @@
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <zlib.h>
 
@@ -274,6 +275,82 @@ TEST(png_query)
 	ASSERT_EQ(0, (int)graphics_image_count());
 }
 
+TEST(png_pixels_compact_and_restore)
+{
+	GraphicsCommandResult result;
+	const unsigned char *pixels;
+	uint64_t serial;
+	size_t expanded, compact;
+
+	reset_state();
+	result = command("Ga=T,f=100,i=155,C=1;iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAHnOcQAAAAABJRU5ErkJggg==",
+	    line_a);
+	ASSERT(result.redraw);
+	graphics_draw(0, GRAPHICS_STAGE_ABOVE_TEXT, 10, 20, 24,
+	    line_row, capture_draw, NULL);
+	ASSERT_EQ(1, drawn);
+	ASSERT(last_draw.rgba != NULL);
+	serial = last_draw.serial;
+	expanded = graphics_image_bytes();
+
+	graphics_compact_images();
+	compact = graphics_image_bytes();
+	ASSERT(compact < expanded);
+	pixels = graphics_image_pixels(serial);
+	ASSERT(pixels != NULL);
+	ASSERT_EQ((int)expanded, (int)graphics_image_bytes());
+	graphics_release_image_pixels(serial);
+	ASSERT_EQ((int)compact, (int)graphics_image_bytes());
+}
+
+TEST(kitten_icat_unpadded_base64)
+{
+	GraphicsCommandResult result;
+	reset_state();
+	/* kitten icat strips the two trailing padding bytes from this four-byte
+	 * RGBA payload. */
+	result = command("Ga=T,f=32,s=1,v=1,i=56,C=1;/wAA/w", line_a);
+	ASSERT(result.redraw);
+	ASSERT_EQ(1, (int)graphics_image_count());
+	ASSERT_EQ(4, (int)graphics_image_bytes());
+	graphics_draw(0, GRAPHICS_STAGE_ABOVE_TEXT, 10, 20, 24,
+	    line_row, capture_draw, NULL);
+	ASSERT_EQ(1, drawn);
+	ASSERT_EQ(255, last_draw.rgba[0]);
+	ASSERT_EQ(255, last_draw.rgba[3]);
+}
+
+TEST(kitten_icat_large_single_apc)
+{
+	GraphicsCommandResult result;
+	unsigned char *raw;
+	char *encoded, *sequence;
+	size_t raw_length = 1025 * 4;
+	size_t encoded_capacity = ((raw_length + 2) / 3) * 4 + 1;
+	size_t sequence_capacity = encoded_capacity + 128;
+
+	reset_state();
+	raw = malloc(raw_length);
+	encoded = malloc(encoded_capacity);
+	sequence = malloc(sequence_capacity);
+	ASSERT(raw != NULL);
+	ASSERT(encoded != NULL);
+	ASSERT(sequence != NULL);
+	memset(raw, 0x7f, raw_length);
+	base64(raw, raw_length, encoded);
+	ASSERT(strlen(encoded) > 4096);
+	snprintf(sequence, sequence_capacity,
+	    "Ga=T,q=2,f=32,s=1025,v=1,i=57,C=1;%s", encoded);
+	graphics_handle_apc(sequence, strlen(sequence), line_a, 2, 0, 10, 20,
+	    24, line_row, 1, &result);
+	ASSERT(result.redraw);
+	ASSERT_EQ(1, (int)graphics_image_count());
+	ASSERT_EQ((int)raw_length, (int)graphics_image_bytes());
+	free(sequence);
+	free(encoded);
+	free(raw);
+}
+
 TEST(zlib_compressed_raw_rgba)
 {
 	unsigned char raw[] = {1, 2, 3, 4, 5, 6, 7, 8};
@@ -338,6 +415,9 @@ TEST_SUITE(graphics)
 	RUN_TEST(unsupported_transport_and_quiet_errors);
 	RUN_TEST(invalid_payload_does_not_allocate);
 	RUN_TEST(png_query);
+	RUN_TEST(png_pixels_compact_and_restore);
+	RUN_TEST(kitten_icat_unpadded_base64);
+	RUN_TEST(kitten_icat_large_single_apc);
 	RUN_TEST(zlib_compressed_raw_rgba);
 	RUN_TEST(image_count_limit_evicts_and_allows_replacement);
 	RUN_TEST(malformed_interleaving_aborts_chunk_transfer);

@@ -24,8 +24,10 @@ char *stty_args = "stty raw pass8 nl -echo -iexten -cstopb 38400";
 /* escape sequence emitted on standalone Right Shift press */
 static char *rightshiftseq = "\033]777;right-shift\a";
 
-/* identification sequence returned in DA and DECID */
-char *vtiden = "\033[?6c";
+/* Identification sequence returned in DA and DECID.  The standard VT100 with
+ * Advanced Video Option form is also long enough for Kitty clients to use a DA
+ * response as the completion boundary for graphics capability detection. */
+char *vtiden = "\033[?1;2c";
 
 /* Kerning / character bounding-box multipliers */
 static float cwscale = 1.0;
@@ -219,9 +221,9 @@ static MouseShortcut mshortcuts[] = {
 	/* mask                 button   function        argument       release */
 	{ XK_ANY_MOD,           Button2, selpaste,       {.i = 0},      1 },
 	{ ShiftMask,            Button4, ttysend,        {.s = "\033[5;2~"} },
-	{ XK_ANY_MOD,           Button4, ttysend,        {.s = "\031"} },
+	{ XK_ANY_MOD,           Button4, kscrollup,      {.i = 3} },
 	{ ShiftMask,            Button5, ttysend,        {.s = "\033[6;2~"} },
-	{ XK_ANY_MOD,           Button5, ttysend,        {.s = "\005"} },
+	{ XK_ANY_MOD,           Button5, kscrolldown,    {.i = 3} },
 };
 
 /* Internal keyboard shortcuts. */
