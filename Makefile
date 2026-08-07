@@ -95,11 +95,12 @@ clean:
 dist: clean
 	mkdir -p st-$(VERSION)
 	mkdir -p st-$(VERSION)/render
-	mkdir -p st-$(VERSION)/macos st-$(VERSION)/scripts
+	mkdir -p st-$(VERSION)/docs st-$(VERSION)/macos st-$(VERSION)/scripts
 	cp -R CLAUDE.md Makefile README.md TODO.md config.mk\
 		config.def.h st.info st.1 arg.h st.h win.h sync.h vimnav.h sshind.h notif.h persist.h cmdline.h cmdline_layout.h search.h $(DIST_SRC)\
 		st-$(VERSION)
 	cp -R render/gpu.c render/README.md st-$(VERSION)/render
+	cp -R docs/kitty-graphics.md st-$(VERSION)/docs
 	mkdir -p st-$(VERSION)/vendor
 	cp -R vendor/stb_image.h st-$(VERSION)/vendor
 	cp -R macos/README.md macos/Info.plist macos/backend.m macos/pasteboard5522.h macos/pasteboard5522.m macos/keysyms.h macos/native.h macos/reveal.h\

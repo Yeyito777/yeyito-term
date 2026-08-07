@@ -62,6 +62,9 @@ Unicode placeholders are also not yet implemented. Kitty graphics can cross
 tmux with explicitly enabled passthrough, but tmux does not natively preserve
 these placements; use a direct SSH shell for the supported path.
 
+See [Kitty graphics architecture](docs/kitty-graphics.md) for the protocol
+subset, data flow, renderer integration, scrollback model, and safety limits.
+
 ## AeroSpace launch integration
 
 To open `st` on the currently focused AeroSpace workspace, bind a key to the
