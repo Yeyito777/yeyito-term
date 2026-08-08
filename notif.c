@@ -8,63 +8,15 @@
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
 #include <X11/Xft/Xft.h>
+#include "xstate.h"
 #endif
 
 #include "sshind.h"
 #include "notif.h"
 
 #ifndef NOTIF_TEST
-typedef XftDraw *Draw;
-typedef XftColor Color;
-
-/* Purely graphic info */
-typedef struct {
-	int tw, th; /* tty width and height */
-	int w, h; /* window width and height */
-	int ch; /* char height */
-	int cw; /* char width  */
-	int mode; /* window state/mode flags */
-	int cursor; /* cursor style */
-} TermWindow;
-
-typedef struct {
-	Display *dpy;
-	Colormap cmap;
-	Window win;
-	Drawable buf;
-	void *specbuf; /* font spec buffer used for rendering */
-	Atom xembed, wmdeletewin, netwmname, netwmiconname, netwmpid, stcwd, stnotify, stsavecmd;
-	struct {
-		XIM xim;
-		XIC xic;
-		XPoint spot;
-		XVaNestedList spotlist;
-	} ime;
-	Draw draw;
-	Visual *vis;
-	XSetWindowAttributes attrs;
-	int scr;
-	int isfixed; /* is fixed geometry? */
-	int l, t; /* left and top offset */
-	int gm; /* geometry mask */
-} XWindow;
-
-/* Drawing Context */
-typedef struct {
-	Color *col;
-	size_t collen;
-	void *font, *bfont, *ifont, *ibfont;  /* Font structs not needed for notif */
-	GC gc;
-} DC;
-
-/* Extern declarations for x.c globals */
-extern XWindow xw;
-extern TermWindow win;
-extern DC dc;
-extern char *usedfont;
-extern double usedfontsize;
 extern int debug_mode;
-#endif /* !NOTIF_TEST */
+#endif
 
 /* Per-toast override flags */
 #define NOTIF_PF_FG     1

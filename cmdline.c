@@ -14,6 +14,7 @@
 #include <X11/Xlib.h>
 #include <X11/Xft/Xft.h>
 #include <X11/keysym.h>
+#include "xstate.h"
 #endif
 
 #include "cmdline.h"
@@ -22,53 +23,7 @@
 #include "vimnav.h"
 
 #ifndef ST_NATIVE_MACOS
-typedef XftDraw *Draw;
 typedef XftColor Color;
-
-/* Replicate structs from x.c for extern access */
-typedef struct {
-	int tw, th; /* tty width and height */
-	int w, h; /* window width and height */
-	int ch; /* char height */
-	int cw; /* char width  */
-	int mode; /* window state/mode flags */
-	int cursor; /* cursor style */
-} TermWindow;
-
-typedef struct {
-	Display *dpy;
-	Colormap cmap;
-	Window win;
-	Drawable buf;
-	void *specbuf;
-	Atom xembed, wmdeletewin, netwmname, netwmiconname, netwmpid, stcwd, stnotify, stsavecmd;
-	struct {
-		XIM xim;
-		XIC xic;
-		XPoint spot;
-		XVaNestedList spotlist;
-	} ime;
-	Draw draw;
-	Visual *vis;
-	XSetWindowAttributes attrs;
-	int scr;
-	int isfixed;
-	int l, t;
-	int gm;
-} XWindow;
-
-typedef struct {
-	Color *col;
-	size_t collen;
-	void *font, *bfont, *ifont, *ibfont;
-	GC gc;
-} DC;
-
-extern XWindow xw;
-extern TermWindow win;
-extern DC dc;
-extern char *usedfont;
-extern double usedfontsize;
 #endif
 extern int debug_mode;
 extern int tisaltscreen(void);

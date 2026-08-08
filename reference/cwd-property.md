@@ -98,9 +98,12 @@ OSC 779: cwd=/tmp
 |------|------|-------------|
 | `xsetcwd()` | 37 | Public declaration |
 
-### Struct layout constraint
+### Shared X11 state
 
-The `stcwd` atom field sits between `netwmpid` and `stnotify` in the `XWindow` struct (x.c:100). The local `XWindow` definitions in `sshind.c`, `notif.c`, `tests/test_sshind.c`, and `tests/test_notif.c` must include this field at the same position, or all subsequent fields will be at wrong offsets. See `reference/notifications.md` § Struct Layout Constraint.
+The `stcwd` atom is part of the canonical `XWindow` definition in `xstate.h`.
+The X11 backend and child-overlay modules all include that definition, avoiding
+the field-offset corruption formerly caused by private struct copies. See
+`reference/notifications.md` § Shared X11 State Layout.
 
 ### tests/test_cwd.c
 

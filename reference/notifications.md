@@ -356,6 +356,9 @@ ConfigureNotify event
 
 Each toast window is created with `override_redirect = True` so the window manager does not manage it. The `CWColormap` flag is passed explicitly to avoid `BadMatch` errors.
 
-## Struct Layout Constraint
+## Shared X11 State Layout
 
-Both `notif.c` and `sshind.c` contain their own local `XWindow` struct definition (a subset of the real one in `x.c`) to avoid pulling in all of `x.c`'s includes. **These struct definitions must match the field layout in `x.c` exactly**, particularly the `Atom` fields. If atoms are added to the `XWindow` struct in `x.c`, the local definitions in `notif.c` and `sshind.c` must be updated to match, or all fields after the atoms will be read at incorrect offsets (causing garbage values for `vis`, `scr`, `cmap`, etc., and likely `BadMatch` or `BadValue` X errors).
+`xstate.h` owns the single `XWindow` and `TermWindow` definitions used by `x.c`,
+`notif.c`, `sshind.c`, and `cmdline.c`. Keep new X11 atoms in that shared
+definition. This replaced private struct copies, which could silently read
+`vis`, `scr`, and other fields at the wrong offsets after an atom was added.

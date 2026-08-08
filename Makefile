@@ -28,7 +28,7 @@ config.h:
 	$(CC) $(STOBJCFLAGS) -c $< -o $@
 
 st.o: config.h st.h win.h graphics.h vimnav.h persist.h macos/emoji.h
-x.o: arg.h config.h st.h win.h graphics.h sync.h clipboard5522.h sshind.h notif.h persist.h cmdline.h search.h render/gpu.c
+x.o: arg.h config.h st.h win.h xstate.h graphics.h sync.h clipboard5522.h sshind.h notif.h persist.h cmdline.h search.h render/gpu.c
 graphics.o: graphics.c graphics.h st.h vendor/stb_image.h
 clipboard5522.o: clipboard5522.c clipboard5522.h
 macos/backend.o: macos/backend.m macos/native.h macos/renderer.h macos/pty.h macos/pasteboard5522.h macos/keysyms.h macos/reveal.h config.h st.h win.h graphics.h sync.h
@@ -40,10 +40,10 @@ macos/emoji.o: macos/emoji.c macos/emoji.h st.h
 macos/renderer.o: macos/renderer.m macos/renderer.h macos/glyph_layout.h
 macos/pty.o: macos/pty.m macos/pty.h
 vimnav.o: st.h vimnav.h
-sshind.o: sshind.h
-notif.o: sshind.h notif.h
+sshind.o: sshind.h xstate.h
+notif.o: sshind.h notif.h xstate.h
 persist.o: st.h persist.h
-cmdline.o: cmdline.h cmdline_layout.h vimnav.h
+cmdline.o: cmdline.h cmdline_layout.h vimnav.h xstate.h
 search.o: search.h st.h vimnav.h
 
 $(OBJ): config.h config.mk
@@ -97,7 +97,7 @@ dist: clean
 	mkdir -p st-$(VERSION)/render
 	mkdir -p st-$(VERSION)/docs st-$(VERSION)/macos st-$(VERSION)/scripts
 	cp -R CLAUDE.md Makefile README.md TODO.md config.mk\
-		config.def.h st.info st.1 arg.h st.h win.h sync.h vimnav.h sshind.h notif.h persist.h cmdline.h cmdline_layout.h search.h $(DIST_SRC)\
+		config.def.h st.info st.1 arg.h st.h win.h xstate.h sync.h vimnav.h sshind.h notif.h persist.h cmdline.h cmdline_layout.h search.h $(DIST_SRC)\
 		st-$(VERSION)
 	cp -R render/gpu.c render/README.md st-$(VERSION)/render
 	cp -R docs/kitty-graphics.md st-$(VERSION)/docs

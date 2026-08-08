@@ -36,6 +36,7 @@ char *argv0;
 #include "persist.h"
 #include "clipboard5522.h"
 #include "sync.h"
+#include "xstate.h"
 
 /* types used in config.h */
 typedef struct {
@@ -117,38 +118,6 @@ typedef XftGlyphFontSpec GlyphFontSpec;
 #ifndef GL_BGRA
 #define GL_BGRA 0x80E1
 #endif
-
-/* Purely graphic info */
-typedef struct {
-	int tw, th; /* tty width and height */
-	int w, h; /* window width and height */
-	int ch; /* char height */
-	int cw; /* char width  */
-	int mode; /* window state/mode flags */
-	int cursor; /* cursor style */
-} TermWindow;
-
-typedef struct {
-	Display *dpy;
-	Colormap cmap;
-	Window win;
-	Drawable buf;
-	GlyphFontSpec *specbuf; /* font spec buffer used for rendering */
-	Atom xembed, wmdeletewin, netwmname, netwmiconname, netwmpid, stcwd, stnotify, stsavecmd, clip5522;
-	struct {
-		XIM xim;
-		XIC xic;
-		XPoint spot;
-		XVaNestedList spotlist;
-	} ime;
-	Draw draw;
-	Visual *vis;
-	XSetWindowAttributes attrs;
-	int scr;
-	int isfixed; /* is fixed geometry? */
-	int l, t; /* left and top offset */
-	int gm; /* geometry mask */
-} XWindow;
 
 typedef struct {
 	Atom xtarget;
@@ -279,10 +248,10 @@ static void (*handler[LASTEvent])(XEvent *) = {
 };
 
 /* Globals */
-DC dc;               /* non-static for sshind.c access */
-XWindow xw;          /* non-static for sshind.c access */
+DC dc;
+XWindow xw;          /* shared with X11 child-overlay modules via xstate.h */
 static XSelection xsel;
-TermWindow win;      /* non-static for sshind.c access */
+TermWindow win;      /* shared with X11 child-overlay modules via xstate.h */
 static SyncUpdate syncUpdate;
 
 /* A single X selection transfer is active at once.  Keeping it streaming is

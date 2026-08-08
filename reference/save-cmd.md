@@ -100,7 +100,7 @@ These commands change the session ID within Claude Code. The `SessionStart` hook
 | `persist.c` | `persist_save_cmd_buf`, `persist_set_save_cmd()`, `persist_get_save_cmd()`, save priority logic in `persist_save_generic()` |
 | `persist.h` | Public API declarations |
 | `x.c` | `xw.stsavecmd` atom, `propnotify()` handler, `xinit()` atom creation |
-| `notif.c`, `sshind.c` | XWindow struct copies (must include `stsavecmd` field for layout parity) |
+| `xstate.h` | Canonical shared `XWindow` definition containing `stsavecmd` |
 | `scripts/st-save-cmd` | Helper script (installed to `/usr/local/bin/st-save-cmd`) |
 | `tests/test_persist.c` | Tests: `save_cmd_set_and_get`, `save_cmd_null_clears`, `save_cmd_overrides_altcmd`, `save_cmd_saved_without_altscreen`, `altcmd_used_when_no_save_cmd` |
 
