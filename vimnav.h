@@ -42,6 +42,7 @@ void vimnav_enter(void);
 void vimnav_force_enter(void);
 void vimnav_exit(void);
 int tisvimnav(void);
+int vimnav_terminal_owned(void); /* forced nav or terminal-owned Ctrl+V block */
 int tisvimnav_paste(void);
 void vimnav_paste_done(void);
 int vimnav_handle_key(ulong ksym, uint state);

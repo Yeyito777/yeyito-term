@@ -3665,6 +3665,50 @@ TEST(vimnav_ctrl_v_enters_block_mode)
 	mock_term_free();
 }
 
+/* Test: Ctrl+v owns the live prompt like forced nav, without zsh handoffs. */
+TEST(vimnav_ctrl_v_is_terminal_owned_on_prompt)
+{
+	mock_term_init(24, 80);
+	mock_set_line(10, "% hello world");
+	term.c.x = 7;
+	term.c.y = 10;
+	term.scr = 0;
+	vimnav.zsh_cursor = 5;
+
+	vimnav_enter();
+	ASSERT_EQ(7, vimnav.x);
+
+	/* This used to pass Ctrl+v through to zsh on the live prompt. */
+	mock_reset();
+	ASSERT_EQ(1, vimnav_handle_key('v', 4));
+	ASSERT_EQ(4, vimnav.mode);  /* VIMNAV_VISUAL_BLOCK */
+	ASSERT(vimnav_terminal_owned());
+	ASSERT_EQ(-1, vimnav_curline_y());
+	ASSERT_EQ(0, mock_state.ttywrite_calls);
+
+	/* st keeps cursor authority while the rectangular selection is active. */
+	ASSERT_EQ(1, vimnav_handle_key('h', 0));
+	ASSERT_EQ(6, vimnav.x);
+	vimnav_set_zsh_cursor(8);
+	ASSERT_EQ(6, vimnav.x);
+
+	/* J/K must not snap to or change zsh line history from block mode. */
+	mock_reset();
+	ASSERT_EQ(1, vimnav_handle_key('J', 0));
+	ASSERT_EQ(1, vimnav_handle_key('K', 0));
+	ASSERT_EQ(4, vimnav.mode);
+	ASSERT_EQ(10, vimnav.y);
+	ASSERT_EQ(6, vimnav.x);
+	ASSERT_EQ(0, mock_state.ttywrite_calls);
+
+	/* A delayed visual report cannot cancel st's block selection. */
+	vimnav_set_zsh_visual(0, 0, 0);
+	ASSERT_EQ(4, vimnav.mode);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
 /* Test: Ctrl+v again exits block mode back to normal */
 TEST(vimnav_ctrl_v_toggles_off)
 {
@@ -4174,6 +4218,7 @@ TEST_SUITE(vimnav)
 	RUN_TEST(vimnav_ctrl_percent_scrolled_uses_full_screen);
 	/* Block visual mode (Ctrl+v) tests */
 	RUN_TEST(vimnav_ctrl_v_enters_block_mode);
+	RUN_TEST(vimnav_ctrl_v_is_terminal_owned_on_prompt);
 	RUN_TEST(vimnav_ctrl_v_toggles_off);
 	RUN_TEST(vimnav_block_selection_uses_rectangular);
 	RUN_TEST(vimnav_block_cursor_uses_virtual_columns);

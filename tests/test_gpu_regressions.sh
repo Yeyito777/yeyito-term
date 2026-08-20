@@ -47,9 +47,10 @@ while not os.path.exists(sys.argv[1]) and time.monotonic() < deadline:
     time.sleep(0.02)
 if os.path.exists(sys.argv[1]):
     # Put an opaque magenta image on the final terminal row. C=1 leaves
-    # the terminal cursor there so forced Ctrl+V can exercise cursor layering.
+    # the terminal cursor there so regular Ctrl+V can exercise cursor layering.
     sys.stdout.buffer.write(
         b"\x1b[999;1H\x1b_Ga=T,f=32,s=1,v=1,c=8,r=1,C=1,q=2;/wD//w==\x1b\\"
+        b"\x1b]777;cursor;0\x07\x1b]777;vim-mode;enter\x07"
     )
     sys.stdout.buffer.flush()
 time.sleep(30)
@@ -170,10 +171,10 @@ if height < 14:
     raise SystemExit(f"bottom-row image was clipped to {height}px")
 PY
 
-# Forced nav uses a coral-red block cursor. Ctrl+V selects the cursor cell, so
-# the GPU cursor draw must ignore selection highlighting rather than replacing
-# its explicit red background with the gray selection color.
-xenv -e "$env_name" key Shift+Escape ctrl+v >/dev/null
+# Regular Ctrl+V is terminal-owned and uses the forced-nav coral block cursor.
+# It selects the cursor cell, so GPU cursor drawing must also ignore selection
+# highlighting rather than replacing red with the gray selection color.
+xenv -e "$env_name" key ctrl+v >/dev/null
 sleep 0.2
 blockshot="$tmpdir/block-cursor.png"
 xenv screenshot -e "$env_name" -o "$blockshot" >/dev/null
@@ -190,12 +191,12 @@ for y in range(im.height):
         if r > 235 and 75 < g < 145 and 75 < b < 145:
             coral += 1
 if coral < 100:
-    raise SystemExit(f"forced Ctrl+V cursor was not visibly coral: {coral}px")
+    raise SystemExit(f"regular Ctrl+V cursor was not visibly coral: {coral}px")
 PY
 
-# Leave forced block mode so the existing cmdline test can enter forced mode
-# from a clean state.
-xenv -e "$env_name" key Shift+Escape >/dev/null
+# Leave regular block mode. The following Shift+Escape upgrades regular nav to
+# forced mode for the existing cmdline test.
+xenv -e "$env_name" key ctrl+v >/dev/null
 
 # The vim-style command line is an Xft child overlay even when the grid is drawn
 # by the GPU.  It should align with the actual rendered bottom row, including
@@ -235,4 +236,4 @@ if bottom14 < 20:
     raise SystemExit(f"cmdline descenders/bottom strokes look clipped: only {bottom14} low pixels")
 PY
 
-echo "GPU regression tests passed: full-size mapping, preserved redraws, bottom-row images, forced block cursor, and cmdline alignment"
+echo "GPU regression tests passed: full-size mapping, preserved redraws, bottom-row images, regular block cursor, and cmdline alignment"

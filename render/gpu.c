@@ -998,6 +998,7 @@ gpudrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 	int cellx = gpucellx(cx), celly = gpucelly(cy);
 	int cellw = gpucellright(cx, 0) - cellx, cellh = gpurowbottom(cy) - celly;
 	int selactive = selection_active(), searchactive = search_active();
+	int terminal_owned = vimnav_terminal_owned();
 	float col[3];
 	Glyph cg = g;
 
@@ -1006,10 +1007,10 @@ gpudrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 	if (searchactive && search_matched(ox, oy))
 		og.mode |= ATTR_MATCH;
 	gpudrawcell(og, ox, oy, 1, 1);
-	if ((IS_SET(MODE_HIDE) && !vimnav.forced) || cmdline_active())
+	if ((IS_SET(MODE_HIDE) && !terminal_owned) || cmdline_active())
 		return;
 	cg.mode &= ATTR_BOLD|ATTR_ITALIC|ATTR_UNDERLINE|ATTR_STRUCK|ATTR_WIDE;
-	if (vimnav.forced) {
+	if (terminal_owned) {
 		cg.fg = defaultbg;
 		cg.bg = TRUECOLOR(0xff, 0x6b, 0x6b);
 		gpucolor(cg.bg, col);
@@ -1035,7 +1036,7 @@ gpudrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 			/* FALLTHROUGH */
 		case 0: case 1: case 2:
 			/* The cursor's explicit color must win over visual/block selection
-			 * highlights. Otherwise ATTR_SELECTED replaces the forced-nav coral
+			 * highlights. Otherwise ATTR_SELECTED replaces the nav-mode coral
 			 * background and makes the cursor disappear inside Ctrl+V regions. */
 			gpudrawcell(cg, cx, cy, 1, 0);
 			break;

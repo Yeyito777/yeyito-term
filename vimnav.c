@@ -146,6 +146,14 @@ vimnav_is_visual(void)
 	return vimnav.mode >= VIMNAV_VISUAL;
 }
 
+/* Ctrl+V block selection deliberately borrows forced-nav semantics while it
+ * is active: st, rather than zsh, owns the cursor and the selected region. */
+int
+vimnav_terminal_owned(void)
+{
+	return vimnav.forced || vimnav.mode == VIMNAV_VISUAL_BLOCK;
+}
+
 /* Snap back to prompt line (scroll down if needed, update cursor position) */
 static void
 vimnav_snap_to_prompt(void)
@@ -171,6 +179,8 @@ vimnav_set_zsh_cursor(int pos)
 	int prompt_end;
 
 	vimnav.zsh_cursor = pos;
+	if (vimnav_terminal_owned())
+		return;
 
 	/* If in nav mode on prompt line, update our cursor to match zsh */
 	if (vimnav.mode != VIMNAV_INACTIVE && term.scr == 0 && vimnav.y == term.c.y) {
@@ -210,6 +220,12 @@ vimnav_set_zsh_visual(int active, int anchor, int line_mode)
 	vimnav.zsh_visual = active;
 	vimnav.zsh_visual_anchor = anchor;
 	vimnav.zsh_visual_line = line_mode;
+
+	/* Forced nav and Ctrl+V block mode are wholly rendered and controlled by
+	 * st. Keep the reported state for later, but a delayed shell report must
+	 * not move or cancel the terminal-owned selection. */
+	if (vimnav_terminal_owned())
+		return;
 
 	if (active && vimnav.mode != VIMNAV_INACTIVE && term.scr == 0) {
 		/* zsh entered visual mode on prompt line - st renders the selection */
@@ -1510,8 +1526,8 @@ vimnav_is_prompt_space(int y)
 	int prompt_start;
 	int prompt_end_y;
 
-	if (vimnav.forced) {
-		return 0;  /* Forced mode: no prompt space concept */
+	if (vimnav_terminal_owned()) {
+		return 0;  /* Terminal-owned modes have no prompt space concept */
 	}
 
 	prompt_end_y = term.c.y + term.scr;
@@ -1786,9 +1802,9 @@ vimnav_handle_key(ulong ksym, uint state)
 			vimnav_update_selection();
 			return 1;
 		case 'v':
-			/* In prompt space: pass to zsh */
-			if (vimnav_is_prompt_space(vimnav.y))
-				return 0;
+			/* Unlike character visual mode, block selection is owned by st even
+			 * on the live prompt. It should behave like forced navigation, not
+			 * turn into a zsh history/editing operation. */
 			vimnav_toggle_visual_block();
 			return 1;
 		case '1': vimnav_move_screen_percent(0);   return 1;
@@ -1995,8 +2011,8 @@ vimnav_handle_key(ulong ksym, uint state)
 	case '~':  /* toggle case */
 	case 'J':  /* zsh history navigation (user-bound) */
 	case 'K':  /* zsh history navigation (user-bound) */
-		/* In forced mode: no-ops (no shell to send to) */
-		if (vimnav.forced)
+		/* Terminal-owned modes must not jump to or mutate shell history. */
+		if (vimnav_terminal_owned())
 			break;
 		vimnav_snap_to_prompt();
 		return 0;  /* Pass through to zsh */
@@ -2029,8 +2045,8 @@ vimnav_handle_key(ulong ksym, uint state)
 
 	/* Paste after cursor (vim-style 'p') */
 	case 'p':
-		/* In forced mode: no-ops (no shell to paste into) */
-		if (vimnav.forced)
+		/* Terminal-owned modes have no shell target to paste into. */
+		if (vimnav_terminal_owned())
 			break;
 		vimnav_snap_to_prompt();
 		vimnav_paste_strip_newlines = 1;

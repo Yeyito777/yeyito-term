@@ -75,6 +75,11 @@ path. A single selected placement can be published as one system clipboard
 image; selections touching multiple placements retain their normal text
 representation because the clipboard has no portable multi-image target.
 
+`Ctrl-v` block selection is terminal-owned, including on the live prompt. While
+it is active it uses the same coral-red block cursor as `Shift-Escape`, suppresses
+the normal current-line highlight, and does not hand movement or `J`/`K` history
+jumps to zsh. Leaving block selection restores regular shell coordination.
+
 See [Kitty graphics architecture](docs/kitty-graphics.md) for the protocol
 subset, data flow, renderer integration, scrollback model, and safety limits.
 

@@ -2377,6 +2377,7 @@ void
 xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 {
 	Color drawcol;
+	int terminal_owned = vimnav_terminal_owned();
 
 	if (gpu.active) {
 		gpudrawcursor(cx, cy, g, ox, oy, og);
@@ -2390,7 +2391,7 @@ xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 		og.mode |= ATTR_MATCH;
 	xdrawglyph(og, ox, oy);
 
-	if ((IS_SET(MODE_HIDE) && !vimnav.forced) || cmdline_active())
+	if ((IS_SET(MODE_HIDE) && !terminal_owned) || cmdline_active())
 		return;
 
 	/*
@@ -2398,8 +2399,8 @@ xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 	 */
 	g.mode &= ATTR_BOLD|ATTR_ITALIC|ATTR_UNDERLINE|ATTR_STRUCK|ATTR_WIDE;
 
-	if (vimnav.forced) {
-		/* Coral red cursor for forced nav mode */
+	if (terminal_owned) {
+		/* Coral red cursor for forced nav and Ctrl+V block mode */
 		static int allocated = 0;
 		static Color forcedcol;
 		if (!allocated) {

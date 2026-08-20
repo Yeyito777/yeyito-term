@@ -520,7 +520,8 @@ void
 xdrawcursor(int cx, int cy, Glyph glyph, int ox, int oy, Glyph oldGlyph)
 {
 	(void)ox; (void)oy; (void)oldGlyph;
-	if ((IS_SET(MODE_HIDE) && !vimnav.forced) || cmdline_active())
+	int terminalOwned = vimnav_terminal_owned();
+	if ((IS_SET(MODE_HIDE) && !terminalOwned) || cmdline_active())
 		return;
 	double left = cellX(cx), top = cellY(cy);
 	double width = cellRight(cx, 0) - left;
@@ -528,7 +529,7 @@ xdrawcursor(int cx, int cy, Glyph glyph, int ox, int oy, Glyph oldGlyph)
 	MacColor color;
 	glyph.mode &= ATTR_BOLD | ATTR_ITALIC | ATTR_UNDERLINE |
 	    ATTR_STRUCK | ATTR_WIDE | ATTR_EMOJI;
-	if (vimnav.forced) {
+	if (terminalOwned) {
 		glyph.fg = defaultbg;
 		glyph.bg = TRUECOLOR(0xff, 0x6b, 0x6b);
 		color = (MacColor){1.0f, 0.42f, 0.42f, 1};
