@@ -222,6 +222,30 @@ TEST(vimnav_V_toggles_visual_line)
 	mock_term_free();
 }
 
+/* An image-only line still yanks as one semantic object.  The graphics module
+ * supplies PNG bytes while text-only clipboard clients receive U+FFFC. */
+TEST(vimnav_V_yanks_image_object)
+{
+	mock_term_init(24, 80);
+	term.c.y = 10;
+
+	vimnav_enter();
+	vimnav.x = 0;
+	vimnav.y = 5;
+	mock_state.provide_selection_image = 1;
+
+	ASSERT_EQ(1, vimnav_handle_key('V', 0));
+	ASSERT_EQ(1, vimnav_handle_key('y', 0));
+	ASSERT_EQ(1, mock_state.getselimage_calls);
+	ASSERT_EQ(1, mock_state.xsetimage_calls);
+	ASSERT_EQ(8, (int)mock_state.last_xsetimage_length);
+	ASSERT_STR_EQ("\xef\xbf\xbc", mock_state.last_xsetsel);
+	ASSERT_EQ(1, mock_state.xclipcopy_calls);
+
+	vimnav_exit();
+	mock_term_free();
+}
+
 /* Test: Escape clears visual selection */
 TEST(vimnav_escape_clears_visual)
 {
@@ -4022,6 +4046,7 @@ TEST_SUITE(vimnav)
 	RUN_TEST(vimnav_0_moves_bol);
 	RUN_TEST(vimnav_v_toggles_visual);
 	RUN_TEST(vimnav_V_toggles_visual_line);
+	RUN_TEST(vimnav_V_yanks_image_object);
 	RUN_TEST(vimnav_escape_clears_visual);
 	RUN_TEST(tisvimnav_returns_correct_state);
 	RUN_TEST(vimnav_ctrl_u_scrolls_up);

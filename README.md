@@ -65,6 +65,16 @@ Unicode placeholders are also not yet implemented. Kitty graphics can cross
 tmux with explicitly enabled passthrough, but tmux does not natively preserve
 these placements; use a direct SSH shell for the supported path.
 
+Inline placements also participate in st's vim navigation selections as atomic
+visual objects. Move onto any row occupied by an image, press `V` (or use `v`
+or `Ctrl-v` to touch one of its cells), and yank with `y`. The whole placement
+is highlighted and the clipboard advertises an `image/png` representation;
+text-only clipboard consumers receive the Unicode object-replacement character
+(`U+FFFC`) for an image-only selection. `yy` and mouse selection use the same
+path. A single selected placement can be published as one system clipboard
+image; selections touching multiple placements retain their normal text
+representation because the clipboard has no portable multi-image target.
+
 See [Kitty graphics architecture](docs/kitty-graphics.md) for the protocol
 subset, data flow, renderer integration, scrollback model, and safety limits.
 

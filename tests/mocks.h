@@ -78,6 +78,8 @@ typedef struct {
 	int kscrollup_calls;
 	int kscrolldown_calls;
 	int xsetsel_calls;
+	int getselimage_calls;
+	int xsetimage_calls;
 	int xclipcopy_calls;
 	int clippaste_calls;
 	int ttywrite_calls;
@@ -90,6 +92,8 @@ typedef struct {
 	struct { int n; } last_kscrollup;
 	struct { int n; } last_kscrolldown;
 	char *last_xsetsel;
+	int provide_selection_image;
+	size_t last_xsetimage_length;
 	char ttywrite_buf[256];  /* Buffer of keys sent via ttywrite */
 	int ttywrite_buf_len;
 } MockState;

@@ -127,8 +127,10 @@ void selinit(void);
 void selstart(int, int, int);
 void selextend(int, int, int, int);
 int selected(int, int);
+int selectedregion(int, int, int, int);
 int selection_active(void);
 char *getsel(void);
+unsigned char *getselimage(size_t *);
 
 void vimnav_enter(void);
 void vimnav_exit(void);

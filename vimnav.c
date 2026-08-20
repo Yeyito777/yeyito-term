@@ -95,6 +95,7 @@ extern void tfulldirt(void);
 
 /* Extern declarations for functions in x.c */
 extern void xsetsel(char *str);
+extern void xsetimage(unsigned char *png, size_t length);
 extern void xclipcopy(void);
 extern void clippaste(const Arg *);
 
@@ -1411,12 +1412,28 @@ yank_strip_trailing_newline(char *text)
 static void
 vimnav_yank_selection(void)
 {
+	static const char object_replacement[] = "\xef\xbf\xbc";
+	unsigned char *png;
+	size_t png_length = 0;
 	char *text = getsel();
-	if (text) {
+
+	png = getselimage(&png_length);
+	if (text)
 		yank_strip_trailing_newline(text);
-		xsetsel(text);
-		xclipcopy();
+	/* Text-only clipboard consumers still get one semantic character rather
+	 * than an empty line for an image-only selection. */
+	if (png && (!text || !text[0])) {
+		if (!text)
+			text = xstrdup(object_replacement);
+		else
+			memcpy(text, object_replacement, sizeof(object_replacement));
 	}
+	if (text)
+		xsetsel(text);
+	if (png)
+		xsetimage(png, png_length);
+	if (text || png)
+		xclipcopy();
 }
 
 static int
@@ -1569,20 +1586,11 @@ vimnav_yank_line(void)
 		}
 	} else {
 		/* For non-prompt lines, use SNAP_LINE to select whole line */
-		char *text;
-
 		selstart(0, screen_y, 0);
 		sel.snap = SNAP_LINE;
 		sel.mode = SEL_READY;  /* Required for selextend to work with done=1 */
 		selextend(term.col - 1, screen_y, SEL_REGULAR, 1);
-
-		text = getsel();
-		if (text) {
-			yank_strip_trailing_newline(text);
-			xsetsel(text);
-			xclipcopy();
-		}
-
+		vimnav_yank_selection();
 		selclear();
 	}
 

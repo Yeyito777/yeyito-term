@@ -1446,6 +1446,144 @@ graphics_line_extent(Line line)
 	return extent;
 }
 
+static void
+png_write_u32(unsigned char *output, uint32_t value)
+{
+	output[0] = (unsigned char)(value >> 24);
+	output[1] = (unsigned char)(value >> 16);
+	output[2] = (unsigned char)(value >> 8);
+	output[3] = (unsigned char)value;
+}
+
+static unsigned char *
+png_write_chunk(unsigned char *output, const char type[4],
+		const unsigned char *data, size_t length)
+{
+	uLong checksum;
+
+	png_write_u32(output, (uint32_t)length);
+	memcpy(output + 4, type, 4);
+	if (length)
+		memcpy(output + 8, data, length);
+	checksum = crc32(0L, Z_NULL, 0);
+	checksum = crc32(checksum, output + 4, 4);
+	if (length)
+		checksum = crc32(checksum, output + 8, (uInt)length);
+	png_write_u32(output + 8 + length, (uint32_t)checksum);
+	return output + 12 + length;
+}
+
+/* Encode the source rectangle represented by a placement as a standalone PNG.
+ * Keeping this in the backend-neutral image store lets RGB/RGBA transmissions
+ * and cropped placements be copied just like images originally sent as PNG. */
+static int
+placement_png(GraphicsPlacement *placement, unsigned char **png,
+		size_t *png_length)
+{
+	GraphicsImage *image = placement->image;
+	const unsigned char *pixels;
+	unsigned char ihdr[13], *raw = NULL, *compressed = NULL, *output, *cursor;
+	size_t stride, raw_length, output_length;
+	uLongf compressed_length;
+	int had_pixels, y;
+
+	*png = NULL;
+	*png_length = 0;
+	if (placement->source_width <= 0 || placement->source_height <= 0 ||
+	    (size_t)placement->source_width > (SIZE_MAX - 1) / 4)
+		return 0;
+	stride = (size_t)placement->source_width * 4 + 1;
+	if ((size_t)placement->source_height > SIZE_MAX / stride)
+		return 0;
+	raw_length = stride * (size_t)placement->source_height;
+	if (raw_length > ULONG_MAX)
+		return 0;
+
+	had_pixels = image->rgba != NULL;
+	pixels = graphics_image_pixels(image->serial);
+	if (!pixels)
+		return 0;
+	raw = malloc(raw_length);
+	if (!raw)
+		goto failed;
+	for (y = 0; y < placement->source_height; y++) {
+		unsigned char *row = raw + (size_t)y * stride;
+		const unsigned char *source = pixels +
+		    ((size_t)(placement->source_y + y) * image->width +
+		    placement->source_x) * 4;
+		row[0] = 0; /* PNG filter: None */
+		memcpy(row + 1, source, stride - 1);
+	}
+
+	compressed_length = compressBound((uLong)raw_length);
+	compressed = malloc((size_t)compressed_length);
+	if (!compressed || compress2(compressed, &compressed_length, raw,
+	    (uLong)raw_length, Z_DEFAULT_COMPRESSION) != Z_OK)
+		goto failed;
+	if ((size_t)compressed_length > UINT32_MAX ||
+	    (size_t)compressed_length > SIZE_MAX - (8 + 25 + 12 + 12))
+		goto failed;
+	output_length = 8 + 25 + 12 + (size_t)compressed_length + 12;
+	output = malloc(output_length);
+	if (!output)
+		goto failed;
+	memcpy(output, "\x89PNG\r\n\x1a\n", 8);
+	memset(ihdr, 0, sizeof(ihdr));
+	png_write_u32(ihdr, (uint32_t)placement->source_width);
+	png_write_u32(ihdr + 4, (uint32_t)placement->source_height);
+	ihdr[8] = 8; /* bit depth */
+	ihdr[9] = 6; /* RGBA */
+	cursor = png_write_chunk(output + 8, "IHDR", ihdr, sizeof(ihdr));
+	cursor = png_write_chunk(cursor, "IDAT", compressed,
+	    (size_t)compressed_length);
+	cursor = png_write_chunk(cursor, "IEND", NULL, 0);
+	*png = output;
+	*png_length = (size_t)(cursor - output);
+	free(compressed);
+	free(raw);
+	if (!had_pixels && image->encoded)
+		graphics_release_image_pixels(image->serial);
+	return 1;
+
+failed:
+	free(compressed);
+	free(raw);
+	if (!had_pixels && image->encoded)
+		graphics_release_image_pixels(image->serial);
+	return 0;
+}
+
+/* Images are atomic selection objects: touching any occupied cell selects the
+ * entire placement.  A system clipboard has only one image/png representation,
+ * so publish one only when the selection identifies exactly one placement. */
+int
+graphics_selection_png(int alt, int (*line_to_row)(Line, int),
+		GraphicsSelectionCallback selected, void *context,
+		unsigned char **png, size_t *png_length)
+{
+	GraphicsPlacement *placement, *match = NULL;
+
+	if (!png || !png_length)
+		return 0;
+	*png = NULL;
+	*png_length = 0;
+	if (!line_to_row || !selected)
+		return 0;
+	for (placement = placements; placement; placement = placement->next) {
+		int row;
+		if (placement->alt != !!alt)
+			continue;
+		row = line_to_row(placement->anchor, placement->alt);
+		if (row == INT_MIN || !selected(placement->column, row,
+		    placement->columns, placement->rows, context))
+			continue;
+		if (match)
+			return 0;
+		match = placement;
+	}
+	return match ? placement_png(match, png, png_length) : 0;
+}
+
 void
 graphics_clear_buffer(int alt)
 {

@@ -14,6 +14,10 @@ static int freed_images;
 static int drawn;
 static GraphicsPlacementView last_draw;
 
+typedef struct {
+	int x, y, width, height;
+} SelectedRegion;
+
 static void
 free_image(uint64_t serial, void *context)
 {
@@ -53,6 +57,21 @@ capture_draw(const GraphicsPlacementView *view, void *context)
 	(void)context;
 	drawn++;
 	last_draw = *view;
+}
+
+static int
+region_selected(int x, int y, int width, int height, void *context)
+{
+	SelectedRegion *region = context;
+	return x < region->x + region->width && x + width > region->x &&
+	    y < region->y + region->height && y + height > region->y;
+}
+
+static uint32_t
+png_u32(const unsigned char *data)
+{
+	return (uint32_t)data[0] << 24 | (uint32_t)data[1] << 16 |
+	    (uint32_t)data[2] << 8 | data[3];
 }
 
 static GraphicsCommandResult
@@ -303,6 +322,42 @@ TEST(png_pixels_compact_and_restore)
 	ASSERT_EQ((int)compact, (int)graphics_image_bytes());
 }
 
+TEST(selected_placement_copies_cropped_png_atomically)
+{
+	GraphicsCommandResult result;
+	SelectedRegion selected = {0, 5, 8, 1};
+	unsigned char *png = NULL, raw[5];
+	size_t png_length = 0, offset;
+	uLongf raw_length = sizeof(raw);
+
+	reset_state();
+	/* Two RGBA pixels; copy only the second source pixel. The placement spans
+	 * rows 4-5, and selecting only row 5 still selects the whole object. */
+	result = command("Ga=T,f=32,s=2,v=1,x=1,w=1,c=3,r=2,C=1;AQIDBAUGBwg=",
+	    line_a);
+	ASSERT(result.redraw);
+	ASSERT(graphics_selection_png(0, line_row, region_selected, &selected,
+	    &png, &png_length));
+	ASSERT(png != NULL);
+	ASSERT(png_length > 57);
+	ASSERT(memcmp(png, "\x89PNG\r\n\x1a\n", 8) == 0);
+	ASSERT_EQ(1, (int)png_u32(png + 16));
+	ASSERT_EQ(1, (int)png_u32(png + 20));
+
+	/* The encoder emits IHDR followed by one IDAT chunk. */
+	offset = 8 + 25;
+	ASSERT(memcmp(png + offset + 4, "IDAT", 4) == 0);
+	ASSERT_EQ(Z_OK, uncompress(raw, &raw_length, png + offset + 8,
+	    png_u32(png + offset)));
+	ASSERT_EQ(5, (int)raw_length);
+	ASSERT_EQ(0, raw[0]);
+	ASSERT_EQ(5, raw[1]);
+	ASSERT_EQ(6, raw[2]);
+	ASSERT_EQ(7, raw[3]);
+	ASSERT_EQ(8, raw[4]);
+	free(png);
+}
+
 TEST(kitten_icat_unpadded_base64)
 {
 	GraphicsCommandResult result;
@@ -416,6 +471,7 @@ TEST_SUITE(graphics)
 	RUN_TEST(invalid_payload_does_not_allocate);
 	RUN_TEST(png_query);
 	RUN_TEST(png_pixels_compact_and_restore);
+	RUN_TEST(selected_placement_copies_cropped_png_atomically);
 	RUN_TEST(kitten_icat_unpadded_base64);
 	RUN_TEST(kitten_icat_large_single_apc);
 	RUN_TEST(zlib_compressed_raw_rgba);

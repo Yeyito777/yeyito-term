@@ -1120,6 +1120,8 @@ gpudrawimage(const GraphicsPlacementView *placement, void *context)
 	GpuImageTexture *image;
 	GpuVertex vertices[6];
 	double x, y, w, h, u0, v0, u1, v1;
+	float selection[3];
+	int selected_image;
 	const void *voff, *toff, *coff;
 	(void)context;
 
@@ -1151,6 +1153,8 @@ gpudrawimage(const GraphicsPlacementView *placement, void *context)
 	vertices[4] = IVERTEX(x, y+h, u0, v1);
 	vertices[5] = IVERTEX(x+w, y+h, u1, v1);
 #undef IVERTEX
+	selected_image = selection_active() && selectedregion(placement->column,
+	    placement->row, placement->columns, placement->rows);
 	voff = &vertices[0].x;
 	toff = &vertices[0].u;
 	coff = &vertices[0].r;
@@ -1168,6 +1172,23 @@ gpudrawimage(const GraphicsPlacementView *placement, void *context)
 	glTexCoordPointer(2, GL_FLOAT, sizeof(GpuVertex), toff);
 	glColorPointer(4, GL_FLOAT, sizeof(GpuVertex), coff);
 	glDrawArrays(GL_TRIANGLES, 0, 6);
+	if (selected_image) {
+		/* The image is one atomic visual character. Tint its full rendered
+		 * rectangle when any occupied cell is selected, including image-only
+		 * rows whose underlying terminal glyphs are blank. */
+		gpucolor(selectionbg, selection);
+		for (int i = 0; i < 6; i++) {
+			vertices[i].r = selection[0];
+			vertices[i].g = selection[1];
+			vertices[i].b = selection[2];
+			vertices[i].a = 0.45f;
+		}
+		glDisable(GL_ALPHA_TEST);
+		glDisable(GL_TEXTURE_2D);
+		glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+		glDrawArrays(GL_TRIANGLES, 0, 6);
+	}
 }
 
 static void

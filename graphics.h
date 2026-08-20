@@ -54,6 +54,7 @@ typedef struct {
 typedef void (*GraphicsDrawCallback)(const GraphicsPlacementView *, void *);
 typedef void (*GraphicsImageFreeCallback)(uint64_t, void *);
 typedef Line (*GraphicsReflowLineAt)(void *, long long);
+typedef int (*GraphicsSelectionCallback)(int, int, int, int, void *);
 
 int graphics_handle_apc(const char *data, size_t length, Line anchor,
 		int column, int alt, int cell_width, int cell_height,
@@ -69,6 +70,9 @@ void graphics_reanchor_line_address(uintptr_t oldline, Line newline);
 void graphics_reflow_line(Line oldline, int logical_offset, int new_columns,
 		long long first_output, GraphicsReflowLineAt line_at, void *context);
 int graphics_line_extent(Line line);
+int graphics_selection_png(int alt, int (*line_to_row)(Line, int),
+		GraphicsSelectionCallback selected, void *context,
+		unsigned char **png, size_t *png_length);
 void graphics_clear_buffer(int alt);
 void graphics_reset(void);
 void graphics_set_image_free_callback(GraphicsImageFreeCallback callback,

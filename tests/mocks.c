@@ -332,6 +332,25 @@ getsel(void)
 	return buf;
 }
 
+unsigned char *
+getselimage(size_t *length)
+{
+	static const unsigned char fake_png[] = {
+		0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'
+	};
+	unsigned char *copy;
+
+	mock_state.getselimage_calls++;
+	if (length)
+		*length = 0;
+	if (!mock_state.provide_selection_image || !length)
+		return NULL;
+	copy = malloc(sizeof(fake_png));
+	memcpy(copy, fake_png, sizeof(fake_png));
+	*length = sizeof(fake_png);
+	return copy;
+}
+
 void
 kscrolldown(const Arg *a)
 {
@@ -372,6 +391,14 @@ xsetsel(char *str)
 {
 	mock_state.xsetsel_calls++;
 	mock_state.last_xsetsel = str;
+}
+
+void
+xsetimage(unsigned char *png, size_t length)
+{
+	mock_state.xsetimage_calls++;
+	mock_state.last_xsetimage_length = length;
+	free(png);
 }
 
 void

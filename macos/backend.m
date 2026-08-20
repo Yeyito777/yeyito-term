@@ -108,6 +108,7 @@ static int cursorKind;
 static int imeCol, imeRow;
 static uint pressedButtons;
 static char *primarySelection;
+static NSData *primaryImage;
 static STPasteboard5522 *pasteboard5522;
 static double defaultFontSize;
 static double fontWidthSpacing = 1.0;
@@ -596,6 +597,13 @@ drawGraphicsPlacement(const GraphicsPlacementView *placement, void *context)
 	    placement->source_x, placement->source_y,
 	    placement->source_width, placement->source_height,
 	    x, y, width, height);
+	if (selection_active() && selectedregion(placement->column, placement->row,
+	    placement->columns, placement->rows)) {
+		MacColor color = indexedColor(selectionbg);
+		color.a = 0.45f;
+		mac_renderer_rect(MAC_LAYER_OVERLAY_DECORATION, x, y, width,
+		    height, color);
+	}
 }
 
 static void
@@ -756,6 +764,19 @@ xsetsel(char *selection)
 		return;
 	free(primarySelection);
 	primarySelection = selection;
+	primaryImage = nil;
+}
+
+void
+xsetimage(unsigned char *png, size_t length)
+{
+	primaryImage = nil;
+	if (!png || !length) {
+		free(png);
+		return;
+	}
+	primaryImage = [NSData dataWithBytesNoCopy:png length:length
+	    freeWhenDone:YES];
 }
 
 static void
@@ -812,12 +833,20 @@ static void
 clipcopy(const Arg *unused)
 {
 	(void)unused;
-	if (!primarySelection)
+	if (!primarySelection && !primaryImage)
 		return;
 	NSPasteboard *pasteboard = NSPasteboard.generalPasteboard;
-	[pasteboard clearContents];
-	[pasteboard setString:[NSString stringWithUTF8String:primarySelection]
-	    forType:NSPasteboardTypeString];
+	NSMutableArray<NSPasteboardType> *types = [NSMutableArray array];
+	if (primarySelection)
+		[types addObject:NSPasteboardTypeString];
+	if (primaryImage)
+		[types addObject:NSPasteboardTypePNG];
+	[pasteboard declareTypes:types owner:nil];
+	if (primarySelection)
+		[pasteboard setString:[NSString stringWithUTF8String:primarySelection]
+		    forType:NSPasteboardTypeString];
+	if (primaryImage)
+		[pasteboard setData:primaryImage forType:NSPasteboardTypePNG];
 }
 
 void xclipcopy(void) { clipcopy(NULL); }
@@ -1324,7 +1353,10 @@ mouseReport(int type, uint button, uint state, int x, int y)
 	selstart(0, 0, SNAP_LINE);
 	selextend(MAX(0, win.tw / MAX(1, win.cw) - 1), MAX(0, trow() - 1),
 	    SEL_REGULAR, 1);
+	size_t pngLength = 0;
+	unsigned char *png = getselimage(&pngLength);
 	xsetsel(getsel());
+	xsetimage(png, pngLength);
 	clipcopy(NULL);
 	macos_request_redraw();
 }
@@ -1366,7 +1398,10 @@ mouseReport(int type, uint button, uint state, int x, int y)
 	}
 	if (mouseAction(button, state, 1)) return;
 	selextend(x, y, selectionType(state), 1);
+	size_t pngLength = 0;
+	unsigned char *png = getselimage(&pngLength);
 	xsetsel(getsel());
+	xsetimage(png, pngLength);
 	macos_request_redraw();
 }
 

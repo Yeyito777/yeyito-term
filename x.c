@@ -122,9 +122,22 @@ typedef XftGlyphFontSpec GlyphFontSpec;
 typedef struct {
 	Atom xtarget;
 	char *primary, *clipboard;
+	unsigned char *primaryimage, *clipboardimage;
+	size_t primaryimagelen, clipboardimagelen;
 	struct timespec tclick1;
 	struct timespec tclick2;
 } XSelection;
+
+typedef struct {
+	Window requestor;
+	Atom property, target;
+	unsigned char *data;
+	size_t length, offset;
+	int active;
+} XSelectionSend;
+
+#define XSEL_INCR_THRESHOLD (256U * 1024U)
+#define XSEL_INCR_CHUNK     (128U * 1024U)
 
 /* Font structure */
 #define Font Font_
@@ -208,6 +221,10 @@ static void selnotify(XEvent *);
 static void selclear_(XEvent *);
 static void selrequest(XEvent *);
 static void setsel(char *, Time);
+static void setimage(unsigned char *, size_t, Time);
+static void selsendclear(void);
+static int selsendbegin(XSelectionRequestEvent *, const unsigned char *, size_t);
+static int selsendpropnotify(XPropertyEvent *);
 static void mousesel(XEvent *, int);
 static void mousereport(XEvent *);
 static char *kmap(KeySym, uint);
@@ -251,6 +268,7 @@ static void (*handler[LASTEvent])(XEvent *) = {
 DC dc;
 XWindow xw;          /* shared with X11 child-overlay modules via xstate.h */
 static XSelection xsel;
+static XSelectionSend xselsend;
 TermWindow win;      /* shared with X11 child-overlay modules via xstate.h */
 static SyncUpdate syncUpdate;
 
@@ -710,9 +728,19 @@ clipcopy(const Arg *dummy)
 
 	free(xsel.clipboard);
 	xsel.clipboard = NULL;
+	free(xsel.clipboardimage);
+	xsel.clipboardimage = NULL;
+	xsel.clipboardimagelen = 0;
 
-	if (xsel.primary != NULL) {
+	if (xsel.primary != NULL)
 		xsel.clipboard = xstrdup(xsel.primary);
+	if (xsel.primaryimage != NULL) {
+		xsel.clipboardimage = xmalloc(xsel.primaryimagelen);
+		memcpy(xsel.clipboardimage, xsel.primaryimage,
+		    xsel.primaryimagelen);
+		xsel.clipboardimagelen = xsel.primaryimagelen;
+	}
+	if (xsel.clipboard != NULL || xsel.clipboardimage != NULL) {
 		clipboard = XInternAtom(xw.dpy, "CLIPBOARD", 0);
 		XSetSelectionOwner(xw.dpy, clipboard, xw.win, CurrentTime);
 	}
@@ -879,6 +907,8 @@ void
 mousesel(XEvent *e, int done)
 {
 	int type, seltype = SEL_REGULAR;
+	unsigned char *png = NULL;
+	size_t png_length = 0;
 	uint state = e->xbutton.state & ~(Button1Mask | forcemousemod);
 
 	for (type = 1; type < LEN(selmasks); ++type) {
@@ -888,8 +918,11 @@ mousesel(XEvent *e, int done)
 		}
 	}
 	selextend(evcol(e), evrow(e), seltype, done);
-	if (done)
+	if (done) {
+		png = getselimage(&png_length);
 		setsel(getsel(), e->xbutton.time);
+		setimage(png, png_length, e->xbutton.time);
+	}
 }
 
 void
@@ -1041,6 +1074,8 @@ propnotify(XEvent *e)
 	Atom clipboard = XInternAtom(xw.dpy, "CLIPBOARD", 0);
 
 	xpev = &e->xproperty;
+	if (selsendpropnotify(xpev))
+		return;
 	if (xpev->state == PropertyNewValue &&
 			(xpev->atom == XA_PRIMARY ||
 			 xpev->atom == clipboard)) {
@@ -1174,6 +1209,68 @@ xclipcopy(void)
 	clipcopy(NULL);
 }
 
+static void
+selsendclear(void)
+{
+	if (xselsend.active && xselsend.requestor != xw.win)
+		XSelectInput(xw.dpy, xselsend.requestor, NoEventMask);
+	free(xselsend.data);
+	memset(&xselsend, 0, sizeof(xselsend));
+}
+
+/* ICCCM INCR keeps large PNGs below the X server's maximum request size.
+ * The requestor deletes the property to ask for each subsequent chunk. */
+static int
+selsendbegin(XSelectionRequestEvent *request, const unsigned char *data,
+		size_t length)
+{
+	unsigned long advertised = (unsigned long)length;
+	Atom incr;
+
+	if (xselsend.active || !data || !length)
+		return 0;
+	xselsend.data = malloc(length);
+	if (!xselsend.data)
+		return 0;
+	memcpy(xselsend.data, data, length);
+	xselsend.requestor = request->requestor;
+	xselsend.property = request->property;
+	xselsend.target = request->target;
+	xselsend.length = length;
+	xselsend.active = 1;
+	if (request->requestor != xw.win)
+		XSelectInput(xw.dpy, request->requestor, PropertyChangeMask);
+	incr = XInternAtom(xw.dpy, "INCR", False);
+	XChangeProperty(xw.dpy, request->requestor, request->property, incr, 32,
+	    PropModeReplace, (unsigned char *)&advertised, 1);
+	return 1;
+}
+
+static int
+selsendpropnotify(XPropertyEvent *event)
+{
+	size_t length;
+
+	if (!xselsend.active || event->window != xselsend.requestor ||
+	    event->atom != xselsend.property)
+		return 0;
+	if (event->state != PropertyDelete)
+		return 1;
+	if (xselsend.offset < xselsend.length) {
+		length = MIN((size_t)XSEL_INCR_CHUNK,
+		    xselsend.length - xselsend.offset);
+		XChangeProperty(xw.dpy, xselsend.requestor, xselsend.property,
+		    xselsend.target, 8, PropModeReplace,
+		    xselsend.data + xselsend.offset, (int)length);
+		xselsend.offset += length;
+	} else {
+		XChangeProperty(xw.dpy, xselsend.requestor, xselsend.property,
+		    xselsend.target, 8, PropModeReplace, NULL, 0);
+		selsendclear();
+	}
+	return 1;
+}
+
 void
 selclear_(XEvent *e)
 {
@@ -1185,8 +1282,10 @@ selrequest(XEvent *e)
 {
 	XSelectionRequestEvent *xsre;
 	XSelectionEvent xev;
-	Atom xa_targets, string, clipboard;
+	Atom xa_targets, image_png, clipboard, targets[4];
 	char *seltext;
+	unsigned char *selimage;
+	size_t selimagelen;
 
 	xsre = (XSelectionRequestEvent *) e;
 	xev.type = SelectionNotify;
@@ -1201,34 +1300,52 @@ selrequest(XEvent *e)
 	xev.property = None;
 
 	xa_targets = XInternAtom(xw.dpy, "TARGETS", 0);
+	image_png = XInternAtom(xw.dpy, "image/png", 0);
+	clipboard = XInternAtom(xw.dpy, "CLIPBOARD", 0);
+	if (xsre->selection == XA_PRIMARY) {
+		seltext = xsel.primary;
+		selimage = xsel.primaryimage;
+		selimagelen = xsel.primaryimagelen;
+	} else if (xsre->selection == clipboard) {
+		seltext = xsel.clipboard;
+		selimage = xsel.clipboardimage;
+		selimagelen = xsel.clipboardimagelen;
+	} else {
+		fprintf(stderr, "Unhandled clipboard selection 0x%lx\n",
+		    xsre->selection);
+		return;
+	}
 	if (xsre->target == xa_targets) {
-		/* respond with the supported type */
-		string = xsel.xtarget;
+		int count = 0;
+		targets[count++] = xa_targets;
+		if (seltext) {
+			targets[count++] = xsel.xtarget;
+			targets[count++] = XA_STRING;
+		}
+		if (selimage)
+			targets[count++] = image_png;
 		XChangeProperty(xsre->display, xsre->requestor, xsre->property,
 				XA_ATOM, 32, PropModeReplace,
-				(uchar *) &string, 1);
+				(uchar *)targets, count);
 		xev.property = xsre->property;
 	} else if (xsre->target == xsel.xtarget || xsre->target == XA_STRING) {
 		/*
 		 * xith XA_STRING non ascii characters may be incorrect in the
 		 * requestor. It is not our problem, use utf8.
 		 */
-		clipboard = XInternAtom(xw.dpy, "CLIPBOARD", 0);
-		if (xsre->selection == XA_PRIMARY) {
-			seltext = xsel.primary;
-		} else if (xsre->selection == clipboard) {
-			seltext = xsel.clipboard;
-		} else {
-			fprintf(stderr,
-				"Unhandled clipboard selection 0x%lx\n",
-				xsre->selection);
-			return;
-		}
 		if (seltext != NULL) {
 			XChangeProperty(xsre->display, xsre->requestor,
 					xsre->property, xsre->target,
 					8, PropModeReplace,
 					(uchar *)seltext, strlen(seltext));
+				xev.property = xsre->property;
+		}
+	} else if (xsre->target == image_png && selimage != NULL) {
+		if (selimagelen <= XSEL_INCR_THRESHOLD) {
+			XChangeProperty(xsre->display, xsre->requestor, xsre->property,
+			    image_png, 8, PropModeReplace, selimage, (int)selimagelen);
+			xev.property = xsre->property;
+		} else if (selsendbegin(xsre, selimage, selimagelen)) {
 			xev.property = xsre->property;
 		}
 	}
@@ -1246,6 +1363,9 @@ setsel(char *str, Time t)
 
 	free(xsel.primary);
 	xsel.primary = str;
+	free(xsel.primaryimage);
+	xsel.primaryimage = NULL;
+	xsel.primaryimagelen = 0;
 
 	XSetSelectionOwner(xw.dpy, XA_PRIMARY, xw.win, t);
 	if (XGetSelectionOwner(xw.dpy, XA_PRIMARY) != xw.win)
@@ -1256,6 +1376,25 @@ void
 xsetsel(char *str)
 {
 	setsel(str, CurrentTime);
+}
+
+static void
+setimage(unsigned char *png, size_t length, Time t)
+{
+	free(xsel.primaryimage);
+	xsel.primaryimage = png;
+	xsel.primaryimagelen = png ? length : 0;
+	if (png) {
+		XSetSelectionOwner(xw.dpy, XA_PRIMARY, xw.win, t);
+		if (XGetSelectionOwner(xw.dpy, XA_PRIMARY) != xw.win)
+			selclear();
+	}
+}
+
+void
+xsetimage(unsigned char *png, size_t length)
+{
+	setimage(png, length, CurrentTime);
 }
 
 void
@@ -1916,6 +2055,10 @@ xinit(int cols, int rows)
 	clock_gettime(CLOCK_MONOTONIC, &xsel.tclick2);
 	xsel.primary = NULL;
 	xsel.clipboard = NULL;
+	xsel.primaryimage = NULL;
+	xsel.clipboardimage = NULL;
+	xsel.primaryimagelen = 0;
+	xsel.clipboardimagelen = 0;
 	xsel.xtarget = XInternAtom(xw.dpy, "UTF8_STRING", 0);
 	if (xsel.xtarget == None)
 		xsel.xtarget = XA_STRING;

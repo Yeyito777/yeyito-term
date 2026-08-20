@@ -21,7 +21,7 @@ creation and drawing are platform-specific.
 | `x.c` | Supplies X11/OpenGL geometry and integrates graphics into frame drawing. |
 | `render/gpu.c` | Cache RGBA data as OpenGL textures and draw the image layers. |
 | `vendor/stb_image.h` | Vendored PNG decoder, compiled in PNG-only mode. |
-| `tests/test_graphics.c` | Protocol, decoding, placement, deletion, culling, reflow, and quota tests. |
+| `tests/test_graphics.c` | Protocol, decoding, placement, deletion, culling, reflow, selection export, and quota tests. |
 
 The common code communicates with a renderer using `GraphicsPlacementView` and
 callbacks declared in `graphics.h`. It has no Cocoa, Metal, X11, or OpenGL
@@ -206,6 +206,25 @@ clients.
 Unless `C=1` is supplied, a displayed placement advances the terminal cursor as
 a cell rectangle. This makes subsequent text begin after the placement in the
 same way it would after occupying the requested rows and columns.
+
+## Selection and clipboard export
+
+A placement is an atomic visual object for terminal selections. Intersecting
+any cell in its placement rectangle selects the complete source crop, including
+when `V` selects an otherwise blank row below the placement's anchor. The Metal
+and OpenGL backends tint the full displayed rectangle to make that atomic state
+visible instead of relying on selection backgrounds hidden behind the image.
+
+`getselimage()` asks the graphics store for the one placement intersected by the
+current selection. The common code restores compacted PNG pixels on demand,
+crops the normalized RGBA source, and emits a standalone RGBA PNG with zlib.
+This also makes direct RGB/RGBA transfers and cropped placements independently
+copyable. The X11 selection owner advertises `image/png` beside its UTF-8
+targets and uses ICCCM `INCR` transfers for PNGs too large for one X request,
+while the native backend publishes `NSPasteboardTypePNG`. Text-only consumers
+receive `U+FFFC` for an image-only yank. A selection intersecting more than one
+placement does not publish an arbitrary image because conventional system
+clipboards have no portable ordered multi-image representation.
 
 ## Resource and parser limits
 

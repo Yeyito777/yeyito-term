@@ -570,6 +570,34 @@ selected(int x, int y)
 	    && (y != sel.ne.y || x <= sel.ne.x);
 }
 
+/* Images occupy a rectangle of cells but behave as one atomic object.  Unlike
+ * selected(), this intentionally does not clip against glyph line length:
+ * image-only rows are virtual terminal content and a line-wise selection must
+ * be able to touch them even when every underlying glyph is blank. */
+int
+selectedregion(int x, int y, int width, int height)
+{
+	int first, last, row, left, right;
+
+	if (width <= 0 || height <= 0 || sel.mode == SEL_EMPTY ||
+	    sel.ob.x == -1 || sel.alt != IS_SET(MODE_ALTSCREEN))
+		return 0;
+	first = MAX(y, sel.nb.y);
+	last = MIN(y + height - 1, sel.ne.y);
+	if (first > last)
+		return 0;
+	if (sel.type == SEL_RECTANGULAR)
+		return x <= sel.ne.x && x + width - 1 >= sel.nb.x;
+
+	for (row = first; row <= last; row++) {
+		left = row == sel.nb.y ? sel.nb.x : 0;
+		right = row == sel.ne.y ? sel.ne.x : term.col - 1;
+		if (x <= right && x + width - 1 >= left)
+			return 1;
+	}
+	return 0;
+}
+
 int
 selection_active(void)
 {
@@ -703,6 +731,30 @@ getsel(void)
 	}
 	*ptr = 0;
 	return str;
+}
+
+static int
+selectedregion_callback(int x, int y, int width, int height, void *context)
+{
+	(void)context;
+	return selectedregion(x, y, width, height);
+}
+
+unsigned char *
+getselimage(size_t *length)
+{
+	unsigned char *png = NULL;
+	size_t png_length = 0;
+
+	if (length)
+		*length = 0;
+	if (!length || !selection_active())
+		return NULL;
+	if (!graphics_selection_png(IS_SET(MODE_ALTSCREEN), tlineviewrowslow,
+	    selectedregion_callback, NULL, &png, &png_length))
+		return NULL;
+	*length = png_length;
+	return png;
 }
 
 void

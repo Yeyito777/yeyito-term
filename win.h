@@ -69,6 +69,7 @@ int xdrawrowbottom(int);
 void xsetpointermotion(int);
 void xsetmousecursor(int);
 void xsetsel(char *);
+void xsetimage(unsigned char *, size_t);
 int xstartdraw(void);
 void xximspot(int, int);
 void xsetdwmsaveargv(const char *);
