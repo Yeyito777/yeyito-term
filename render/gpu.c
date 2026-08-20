@@ -943,7 +943,7 @@ gpudrawline(Line line, int x1, int y, int x2)
 }
 
 static void
-gpudrawcell(Glyph g, int x, int y, int overlay)
+gpudrawcell(Glyph g, int x, int y, int overlay, int applyhighlights)
 {
 	int cellx = gpucellx(x), celly = gpucelly(y);
 	int cellw, cellh = gpurowbottom(y) - celly;
@@ -958,9 +958,9 @@ gpudrawcell(Glyph g, int x, int y, int overlay)
 
 	if (g.mode == ATTR_WDUMMY)
 		return;
-	if (selactive && selected(x, y))
+	if (applyhighlights && selactive && selected(x, y))
 		g.mode |= ATTR_SELECTED;
-	if (searchactive && search_matched(x, y))
+	if (applyhighlights && searchactive && search_matched(x, y))
 		g.mode |= ATTR_MATCH;
 	gpuresolve(g, x, y, fg, bg);
 	cellw = gpucellright(x, g.mode & ATTR_WIDE) - cellx;
@@ -1005,7 +1005,7 @@ gpudrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 		og.mode |= ATTR_SELECTED;
 	if (searchactive && search_matched(ox, oy))
 		og.mode |= ATTR_MATCH;
-	gpudrawcell(og, ox, oy, 1);
+	gpudrawcell(og, ox, oy, 1, 1);
 	if ((IS_SET(MODE_HIDE) && !vimnav.forced) || cmdline_active())
 		return;
 	cg.mode &= ATTR_BOLD|ATTR_ITALIC|ATTR_UNDERLINE|ATTR_STRUCK|ATTR_WIDE;
@@ -1034,7 +1034,10 @@ gpudrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 			cg.u = 0x2603;
 			/* FALLTHROUGH */
 		case 0: case 1: case 2:
-			gpudrawcell(cg, cx, cy, 1);
+			/* The cursor's explicit color must win over visual/block selection
+			 * highlights. Otherwise ATTR_SELECTED replaces the forced-nav coral
+			 * background and makes the cursor disappear inside Ctrl+V regions. */
+			gpudrawcell(cg, cx, cy, 1, 0);
 			break;
 		case 3: case 4:
 			gpubatchrect(&gpu.odeco, cellx,
@@ -1132,8 +1135,8 @@ gpudrawimage(const GraphicsPlacementView *placement, void *context)
 	    gpucellx(placement->column);
 	h = placement->natural_size ? placement->source_height * gpuyscale() :
 	    gpucelly(placement->row + placement->rows) - gpucelly(placement->row);
-	if (x >= borderpx + win.tw || x + w <= borderpx ||
-	    y >= borderpx + win.th || y + h <= borderpx)
+	if (x >= win.w - borderpx || x + w <= borderpx ||
+	    y >= win.h - borderpx || y + h <= borderpx)
 		return;
 	image = gpuimagetexture(placement);
 	if (!image)
@@ -1194,8 +1197,15 @@ gpudrawimage(const GraphicsPlacementView *placement, void *context)
 static void
 gpudrawimages(int stage)
 {
+	int width = MAX(0, win.w - 2 * borderpx);
+	int height = MAX(0, win.h - 2 * borderpx);
+
 	glEnable(GL_SCISSOR_TEST);
-	glScissor(borderpx, MAX(0, win.h - borderpx - win.th), win.tw, win.th);
+	/* Cell vertices are scaled to the actual drawable content rectangle, not
+	 * the nominal integer cell grid (win.tw/win.th). Scissoring to that nominal
+	 * size can remove nearly a full final row when the tiled window has leftover
+	 * pixels, exposing the terminal background under bottom-edge images. */
+	glScissor(borderpx, borderpx, width, height);
 	graphics_draw(tisaltscreen(), stage, win.cw, win.ch, trow(),
 	    tlineviewrow, gpudrawimage, NULL);
 	glDisable(GL_SCISSOR_TEST);

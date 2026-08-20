@@ -37,13 +37,23 @@ xenv start "$env_name" >/dev/null
 display=$(xenv display -e "$env_name")
 
 DISPLAY=$display "$st_bin" -T "$title" -e python3 -c '
-import sys, time
+import os, sys, time
 for i in range(36):
     print(f"GPUREGRESS-ROW-{i:02d} The quick brown fox lambda漢 emoji-ish text", flush=True)
 time.sleep(0.7)
 print("GPUREGRESS-LATE redraw sentinel", flush=True)
+deadline = time.monotonic() + 10
+while not os.path.exists(sys.argv[1]) and time.monotonic() < deadline:
+    time.sleep(0.02)
+if os.path.exists(sys.argv[1]):
+    # Put an opaque magenta image on the final terminal row. C=1 leaves
+    # the terminal cursor there so forced Ctrl+V can exercise cursor layering.
+    sys.stdout.buffer.write(
+        b"\x1b[999;1H\x1b_Ga=T,f=32,s=1,v=1,c=8,r=1,C=1,q=2;/wD//w==\x1b\\"
+    )
+    sys.stdout.buffer.flush()
 time.sleep(30)
-' >"$tmpdir/st.out" 2>"$tmpdir/st.err" &
+' "$tmpdir/image-trigger" >"$tmpdir/st.out" 2>"$tmpdir/st.err" &
 st_pid=$!
 
 # Wait until dwm has mapped the terminal at its initial tiled size.
@@ -130,6 +140,63 @@ if textish < 1800:
     raise SystemExit(f"initial rows vanished or rendered black after later redraw: only {textish} text-like pixels")
 PY
 
+# Image quads use scaled cell geometry. If their scissor still uses the smaller
+# nominal integer grid, a tiled window's leftover pixels clip most of the final
+# terminal row and expose the background below the image.
+touch "$tmpdir/image-trigger"
+sleep 0.4
+imageshot="$tmpdir/image-bottom.png"
+xenv screenshot -e "$env_name" -o "$imageshot" >/dev/null
+
+python3 - "$imageshot" <<'PY'
+import sys
+from PIL import Image
+
+im = Image.open(sys.argv[1]).convert('RGB')
+ys = []
+for y in range(im.height):
+    count = 0
+    for x in range(min(160, im.width)):
+        r, g, b = im.getpixel((x, y))
+        if r > 240 and g < 25 and b > 240:
+            count += 1
+    if count >= 30:
+        ys.append(y)
+
+if not ys:
+    raise SystemExit("bottom-row image did not render")
+height = max(ys) - min(ys) + 1
+if height < 14:
+    raise SystemExit(f"bottom-row image was clipped to {height}px")
+PY
+
+# Forced nav uses a coral-red block cursor. Ctrl+V selects the cursor cell, so
+# the GPU cursor draw must ignore selection highlighting rather than replacing
+# its explicit red background with the gray selection color.
+xenv -e "$env_name" key Shift+Escape ctrl+v >/dev/null
+sleep 0.2
+blockshot="$tmpdir/block-cursor.png"
+xenv screenshot -e "$env_name" -o "$blockshot" >/dev/null
+
+python3 - "$blockshot" <<'PY'
+import sys
+from PIL import Image
+
+im = Image.open(sys.argv[1]).convert('RGB')
+coral = 0
+for y in range(im.height):
+    for x in range(min(160, im.width)):
+        r, g, b = im.getpixel((x, y))
+        if r > 235 and 75 < g < 145 and 75 < b < 145:
+            coral += 1
+if coral < 100:
+    raise SystemExit(f"forced Ctrl+V cursor was not visibly coral: {coral}px")
+PY
+
+# Leave forced block mode so the existing cmdline test can enter forced mode
+# from a clean state.
+xenv -e "$env_name" key Shift+Escape >/dev/null
+
 # The vim-style command line is an Xft child overlay even when the grid is drawn
 # by the GPU.  It should align with the actual rendered bottom row, including
 # descenders, rather than stale integer-grid geometry.
@@ -168,4 +235,4 @@ if bottom14 < 20:
     raise SystemExit(f"cmdline descenders/bottom strokes look clipped: only {bottom14} low pixels")
 PY
 
-echo "GPU regression tests passed: initial full-size mapping, preserved redraw content, and cmdline bottom alignment"
+echo "GPU regression tests passed: full-size mapping, preserved redraws, bottom-row images, forced block cursor, and cmdline alignment"

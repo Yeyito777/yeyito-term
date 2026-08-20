@@ -189,7 +189,7 @@ static void gpureleaseimages(void);
 static double gpuxscale(void);
 static double gpuyscale(void);
 static void gpudrawline(Line, int, int, int);
-static void gpudrawcell(Glyph, int, int, int);
+static void gpudrawcell(Glyph, int, int, int, int);
 static void gpudrawcursor(int, int, Glyph, int, int, Glyph);
 static int xloadcolor(int, const char *, Color *);
 static int xloadfont(Font *, FcPattern *);
@@ -2365,7 +2365,7 @@ xdrawglyph(Glyph g, int x, int y)
 	XftGlyphFontSpec spec;
 
 	if (gpu.active) {
-		gpudrawcell(g, x, y, 1);
+		gpudrawcell(g, x, y, 1, 1);
 		return;
 	}
 
