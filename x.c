@@ -2365,7 +2365,7 @@ xdrawglyph(Glyph g, int x, int y)
 	XftGlyphFontSpec spec;
 
 	if (gpu.active) {
-		gpudrawcell(g, x, y, 1, 1);
+		gpudrawcell(g, x, y, GPU_CELL_OVERLAY, 1);
 		return;
 	}
 
@@ -2562,6 +2562,7 @@ xstartdraw(void)
 			gpu.frame = 1;
 			for (image = gpu.images; image; image = image->next)
 				image->frame = 0;
+			gpuclearbaselineframes();
 		}
 		gpuresize();
 		gpudamageensure();
@@ -2696,11 +2697,16 @@ xfinishdraw(void)
 		gpudrawbatch(&gpu.ctext, 2);
 		gpudrawbatch(&gpu.deco, 0);
 		gpudrawimages(GRAPHICS_STAGE_ABOVE_TEXT);
+		gpudrawbatch(&gpu.ibg, 0);
+		gpudrawbatch(&gpu.itext, 1);
+		gpudrawbatch(&gpu.ictext, 2);
+		gpudrawbatch(&gpu.ideco, 0);
 		gpudrawbatch(&gpu.obg, 0);
 		gpudrawbatch(&gpu.otext, 1);
 		gpudrawbatch(&gpu.octext, 2);
 		gpudrawbatch(&gpu.odeco, 0);
 		gpupruneimages();
+		gpuprunebaselines();
 		graphics_compact_images();
 		glDisableClientState(GL_VERTEX_ARRAY);
 		glDisableClientState(GL_COLOR_ARRAY);

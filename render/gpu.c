@@ -46,6 +46,40 @@ typedef struct GpuImageTexture {
 	int width, height;
 } GpuImageTexture;
 
+#define GPU_IMAGE_BASELINE_CELL_MAX (1024U * 1024U)
+
+/* Positive-z images remember the original terminal cell beneath each part of
+ * their footprint. Keep that protocol-controlled cache bounded independently
+ * of decoded image data so a client cannot grow renderer memory indefinitely. */
+typedef struct {
+	Line line;
+	int column;
+	Glyph glyph;
+} GpuImageBaselineCell;
+
+typedef struct GpuImageBaseline {
+	struct GpuImageBaseline *next;
+	uint64_t serial;
+	uint64_t frame;
+	uint32_t image_id;
+	uint32_t placement_id;
+	Line anchor;
+	int alt;
+	int column;
+	int columns;
+	int rows;
+	int source_x;
+	int source_y;
+	int source_width;
+	int source_height;
+	int pixel_x;
+	int pixel_y;
+	int natural_size;
+	GpuImageBaselineCell *cells;
+	size_t celllen;
+	size_t cellcap;
+} GpuImageBaseline;
+
 typedef struct {
 	int active, doublebuf;
 	int bufferage;
@@ -71,12 +105,22 @@ typedef struct {
 	int glyphhash[GPU_GLYPH_HASH];
 	GpuFallbackFace *fallbacks;
 	int fallbacklen, fallbackcap;
-	GpuBatch bg, text, ctext, deco, obg, otext, octext, odeco;
+	GpuBatch bg, text, ctext, deco;
+	GpuBatch ibg, itext, ictext, ideco;
+	GpuBatch obg, otext, octext, odeco;
 	GpuImageTexture *images;
+	GpuImageBaseline *imagebaselines;
+	size_t imagebaselinecells;
 	uint64_t frame;
 } Gpu;
 
 static Gpu gpu;
+
+enum {
+	GPU_CELL_BASE,
+	GPU_CELL_IMAGE_OCCLUSION,
+	GPU_CELL_OVERLAY,
+};
 
 static double
 gpuxscale(void)
@@ -482,9 +526,15 @@ gpureleaseimages(void)
 static void
 gpudestroy(void)
 {
+	GpuImageBaseline *baseline, *nextbaseline;
 	int i;
 
 	gpureleaseimages();
+	for (baseline = gpu.imagebaselines; baseline; baseline = nextbaseline) {
+		nextbaseline = baseline->next;
+		free(baseline->cells);
+		free(baseline);
+	}
 	if (gpu.atlas)
 		glDeleteTextures(1, &gpu.atlas);
 	if (gpu.catlas)
@@ -511,6 +561,10 @@ gpudestroy(void)
 	free(gpu.text.v);
 	free(gpu.ctext.v);
 	free(gpu.deco.v);
+	free(gpu.ibg.v);
+	free(gpu.itext.v);
+	free(gpu.ictext.v);
+	free(gpu.ideco.v);
 	free(gpu.obg.v);
 	free(gpu.otext.v);
 	free(gpu.octext.v);
@@ -754,6 +808,10 @@ gpubatchreset(void)
 	gpubatchclear(&gpu.text);
 	gpubatchclear(&gpu.ctext);
 	gpubatchclear(&gpu.deco);
+	gpubatchclear(&gpu.ibg);
+	gpubatchclear(&gpu.itext);
+	gpubatchclear(&gpu.ictext);
+	gpubatchclear(&gpu.ideco);
 	gpubatchclear(&gpu.obg);
 	gpubatchclear(&gpu.otext);
 	gpubatchclear(&gpu.octext);
@@ -943,18 +1001,32 @@ gpudrawline(Line line, int x1, int y, int x2)
 }
 
 static void
-gpudrawcell(Glyph g, int x, int y, int overlay, int applyhighlights)
+gpudrawcell(Glyph g, int x, int y, int layer, int applyhighlights)
 {
 	int cellx = gpucellx(x), celly = gpucelly(y);
 	int cellw, cellh = gpurowbottom(y) - celly;
 	int baseline = gpubaseline(y);
 	float fg[3], bg[3], white[3] = {1.0f, 1.0f, 1.0f};
 	GpuGlyph *gg;
-	GpuBatch *bb = overlay ? &gpu.obg : &gpu.bg;
-	GpuBatch *tb = overlay ? &gpu.otext : &gpu.text;
-	GpuBatch *ctb = overlay ? &gpu.octext : &gpu.ctext;
-	GpuBatch *db = overlay ? &gpu.odeco : &gpu.deco;
+	GpuBatch *bb, *tb, *ctb, *db;
 	int selactive = selection_active(), searchactive = search_active();
+
+	if (layer == GPU_CELL_OVERLAY) {
+		bb = &gpu.obg;
+		tb = &gpu.otext;
+		ctb = &gpu.octext;
+		db = &gpu.odeco;
+	} else if (layer == GPU_CELL_IMAGE_OCCLUSION) {
+		bb = &gpu.ibg;
+		tb = &gpu.itext;
+		ctb = &gpu.ictext;
+		db = &gpu.ideco;
+	} else {
+		bb = &gpu.bg;
+		tb = &gpu.text;
+		ctb = &gpu.ctext;
+		db = &gpu.deco;
+	}
 
 	if (g.mode == ATTR_WDUMMY)
 		return;
@@ -1011,7 +1083,7 @@ gpudrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 	 * graphics, so moving the cursor away paints a cell-sized hole in an image
 	 * until the next frame.  The base layers preserve image z-order while the
 	 * new cursor below remains an intentional overlay. */
-	gpudrawcell(og, ox, oy, 0, 1);
+	gpudrawcell(og, ox, oy, GPU_CELL_BASE, 1);
 	if ((IS_SET(MODE_HIDE) && !terminal_owned) || cmdline_active())
 		return;
 	cg.mode &= ATTR_BOLD|ATTR_ITALIC|ATTR_UNDERLINE|ATTR_STRUCK|ATTR_WIDE;
@@ -1043,7 +1115,7 @@ gpudrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 			/* The cursor's explicit color must win over visual/block selection
 			 * highlights. Otherwise ATTR_SELECTED replaces the nav-mode coral
 			 * background and makes the cursor disappear inside Ctrl+V regions. */
-			gpudrawcell(cg, cx, cy, 1, 0);
+			gpudrawcell(cg, cx, cy, GPU_CELL_OVERLAY, 0);
 			break;
 		case 3: case 4:
 			gpubatchrect(&gpu.odeco, cellx,
@@ -1124,6 +1196,203 @@ gpupruneimages(void)
 }
 
 static void
+gpuclearbaselineframes(void)
+{
+	GpuImageBaseline *baseline;
+	for (baseline = gpu.imagebaselines; baseline; baseline = baseline->next)
+		baseline->frame = 0;
+}
+
+static void
+gpuprunebaselines(void)
+{
+	GpuImageBaseline **link, *baseline;
+
+	for (link = &gpu.imagebaselines; (baseline = *link); ) {
+		if (baseline->frame == gpu.frame) {
+			link = &baseline->next;
+			continue;
+		}
+		*link = baseline->next;
+		gpu.imagebaselinecells -= baseline->celllen;
+		free(baseline->cells);
+		free(baseline);
+	}
+}
+
+static int
+gpuimagebaselineequal(const GpuImageBaseline *baseline,
+		const GraphicsPlacementView *placement)
+{
+	return baseline->image_id == placement->image_id &&
+	    (placement->image_id || baseline->serial == placement->serial) &&
+	    baseline->placement_id == placement->placement_id &&
+	    baseline->anchor == placement->anchor &&
+	    baseline->alt == placement->alt &&
+	    baseline->column == placement->column &&
+	    baseline->columns == placement->columns &&
+	    baseline->rows == placement->rows &&
+	    baseline->source_x == placement->source_x &&
+	    baseline->source_y == placement->source_y &&
+	    baseline->source_width == placement->source_width &&
+	    baseline->source_height == placement->source_height &&
+	    baseline->pixel_x == placement->pixel_x &&
+	    baseline->pixel_y == placement->pixel_y &&
+	    baseline->natural_size == placement->natural_size;
+}
+
+static GpuImageBaseline *
+gpuimagebaseline(const GraphicsPlacementView *placement)
+{
+	GpuImageBaseline *baseline;
+
+	for (baseline = gpu.imagebaselines; baseline; baseline = baseline->next)
+		if (gpuimagebaselineequal(baseline, placement)) {
+			baseline->frame = gpu.frame;
+			return baseline;
+		}
+	baseline = calloc(1, sizeof(*baseline));
+	if (!baseline)
+		return NULL;
+	baseline->serial = placement->serial;
+	baseline->frame = gpu.frame;
+	baseline->image_id = placement->image_id;
+	baseline->placement_id = placement->placement_id;
+	baseline->anchor = placement->anchor;
+	baseline->alt = placement->alt;
+	baseline->column = placement->column;
+	baseline->columns = placement->columns;
+	baseline->rows = placement->rows;
+	baseline->source_x = placement->source_x;
+	baseline->source_y = placement->source_y;
+	baseline->source_width = placement->source_width;
+	baseline->source_height = placement->source_height;
+	baseline->pixel_x = placement->pixel_x;
+	baseline->pixel_y = placement->pixel_y;
+	baseline->natural_size = placement->natural_size;
+	baseline->next = gpu.imagebaselines;
+	gpu.imagebaselines = baseline;
+	return baseline;
+}
+
+static size_t
+gpuimagebaselinehash(Line line, int column, size_t capacity)
+{
+	uint64_t value = (uint64_t)(uintptr_t)line >> 4;
+	value ^= (uint32_t)column * UINT64_C(11400714819323198485);
+	value ^= value >> 33;
+	value *= UINT64_C(0xff51afd7ed558ccd);
+	value ^= value >> 33;
+	return (size_t)value & (capacity - 1);
+}
+
+static int
+gpuimagebaselineresize(GpuImageBaseline *baseline, size_t capacity)
+{
+	GpuImageBaselineCell *cells;
+	size_t i, slot;
+
+	cells = calloc(capacity, sizeof(*cells));
+	if (!cells)
+		return 0;
+	for (i = 0; i < baseline->cellcap; i++) {
+		if (!baseline->cells[i].line)
+			continue;
+		slot = gpuimagebaselinehash(baseline->cells[i].line,
+		    baseline->cells[i].column, capacity);
+		while (cells[slot].line)
+			slot = (slot + 1) & (capacity - 1);
+		cells[slot] = baseline->cells[i];
+	}
+	free(baseline->cells);
+	baseline->cells = cells;
+	baseline->cellcap = capacity;
+	return 1;
+}
+
+static GpuImageBaselineCell *
+gpuimagebaselinecell(GpuImageBaseline *baseline, Line line, int column,
+		Glyph glyph)
+{
+	GpuImageBaselineCell *cell;
+	size_t slot;
+
+	if (baseline->cellcap) {
+		slot = gpuimagebaselinehash(line, column, baseline->cellcap);
+		while (baseline->cells[slot].line) {
+			cell = &baseline->cells[slot];
+			if (cell->line == line && cell->column == column)
+				return cell;
+			slot = (slot + 1) & (baseline->cellcap - 1);
+		}
+	}
+	if (gpu.imagebaselinecells >= GPU_IMAGE_BASELINE_CELL_MAX)
+		return NULL;
+	if (!baseline->cellcap ||
+	    (baseline->celllen + 1) * 2 >= baseline->cellcap) {
+		if (!gpuimagebaselineresize(baseline,
+		    baseline->cellcap ? baseline->cellcap * 2 : 16))
+			return NULL;
+	}
+	slot = gpuimagebaselinehash(line, column, baseline->cellcap);
+	while (baseline->cells[slot].line)
+		slot = (slot + 1) & (baseline->cellcap - 1);
+	cell = &baseline->cells[slot];
+	cell->line = line;
+	cell->column = column;
+	cell->glyph = glyph;
+	baseline->celllen++;
+	gpu.imagebaselinecells++;
+	return cell;
+}
+
+static int
+gpuglyphequal(Glyph left, Glyph right)
+{
+	return left.u == right.u && left.mode == right.mode &&
+	    left.fg == right.fg && left.bg == right.bg;
+}
+
+static void
+gpuoccludeimagecells(const GraphicsPlacementView *placement)
+{
+	GpuImageBaseline *baseline;
+	GpuImageBaselineCell *cell;
+	Line line;
+	int x, y, firstx, lastx, firsty, lasty;
+
+	if (placement->z < 0)
+		return;
+	baseline = gpuimagebaseline(placement);
+	if (!baseline)
+		return;
+	firstx = MAX(0, placement->column);
+	lastx = MIN(tcol(), placement->column + placement->columns);
+	firsty = MAX(0, placement->row);
+	lasty = MIN(trow(), placement->row + placement->rows);
+	for (y = firsty; y < lasty; y++) {
+		line = tlineviewline(y);
+		if (!line)
+			continue;
+		for (x = firstx; x < lastx; x++) {
+			/* Snapshot every covered grid cell independently. The original
+			 * glyph/background stays below the positive-z image; only a changed
+			 * cell is composited above it. Restoring that exact cell reveals only
+			 * the corresponding part of the image again. */
+			cell = gpuimagebaselinecell(baseline, line, x, line[x]);
+			if (!cell || gpuglyphequal(cell->glyph, line[x]))
+				continue;
+			if ((line[x].mode & ATTR_WDUMMY) && x > 0) {
+				gpudrawcell(line[x - 1], x - 1, y,
+				    GPU_CELL_IMAGE_OCCLUSION, 1);
+				continue;
+			}
+			gpudrawcell(line[x], x, y, GPU_CELL_IMAGE_OCCLUSION, 1);
+		}
+	}
+}
+
+static void
 gpudrawimage(const GraphicsPlacementView *placement, void *context)
 {
 	GpuImageTexture *image;
@@ -1198,6 +1467,7 @@ gpudrawimage(const GraphicsPlacementView *placement, void *context)
 		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 		glDrawArrays(GL_TRIANGLES, 0, 6);
 	}
+	gpuoccludeimagecells(placement);
 }
 
 static void

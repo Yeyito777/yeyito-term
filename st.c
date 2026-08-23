@@ -462,6 +462,12 @@ tlinelen(int y)
 }
 
 int
+tcol(void)
+{
+	return term.col;
+}
+
+int
 trow(void)
 {
 	return term.row;
@@ -1160,6 +1166,14 @@ tlineviewprepare(void)
 	}
 	for (i = 0; i < term.row; i++)
 		lineviewinsert(term.line[i], term.histn + i - top);
+}
+
+Line
+tlineviewline(int row)
+{
+	if (row < 0 || row >= term.row)
+		return NULL;
+	return TLINE(row);
 }
 
 int

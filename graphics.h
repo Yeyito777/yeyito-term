@@ -41,8 +41,10 @@ typedef struct {
 	int source_y;
 	int source_width;
 	int source_height;
+	Line anchor;
 	int column;
 	int row;
+	int alt;
 	int columns;
 	int rows;
 	int pixel_x;

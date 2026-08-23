@@ -153,6 +153,8 @@ TEST(chunked_rgba_placement)
 	ASSERT_EQ(7, (int)last_draw.placement_id);
 	ASSERT_EQ(2, last_draw.column);
 	ASSERT_EQ(4, last_draw.row);
+	ASSERT(last_draw.anchor == line_a);
+	ASSERT_EQ(0, last_draw.alt);
 	ASSERT_EQ(2, last_draw.columns);
 	ASSERT_EQ(3, last_draw.rows);
 	ASSERT_EQ(255, last_draw.rgba[0]);

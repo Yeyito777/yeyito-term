@@ -1357,8 +1357,10 @@ graphics_draw(int alt, int stage, int cell_width, int cell_height,
 		view.source_y = placement->source_y;
 		view.source_width = placement->source_width;
 		view.source_height = placement->source_height;
+		view.anchor = placement->anchor;
 		view.column = placement->column;
 		view.row = row;
+		view.alt = placement->alt;
 		view.columns = placement->columns;
 		view.rows = placement->rows;
 		view.pixel_x = placement->pixel_x;

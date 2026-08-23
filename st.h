@@ -105,7 +105,9 @@ void toggleprinter(const Arg *);
 
 int tattrset(int);
 int tisaltscreen(void);
+int tcol(void);
 int tlinelen(int);
+Line tlineviewline(int);
 int tlineviewrow(Line, int);
 void tlineviewprepare(void);
 int trow(void);
