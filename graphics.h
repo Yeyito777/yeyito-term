@@ -51,6 +51,8 @@ typedef struct {
 	int pixel_y;
 	int natural_size;
 	int z;
+	/** st extension set by V=1: tint this placement as an atomic selection. */
+	int selected;
 } GraphicsPlacementView;
 
 typedef void (*GraphicsDrawCallback)(const GraphicsPlacementView *, void *);

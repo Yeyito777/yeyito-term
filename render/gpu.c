@@ -1354,7 +1354,7 @@ gpuglyphequal(Glyph left, Glyph right)
 }
 
 static void
-gpuoccludeimagecells(const GraphicsPlacementView *placement)
+gpuoccludeimagecells(const GraphicsPlacementView *placement, int draw)
 {
 	GpuImageBaseline *baseline;
 	GpuImageBaselineCell *cell;
@@ -1381,6 +1381,8 @@ gpuoccludeimagecells(const GraphicsPlacementView *placement)
 			 * the corresponding part of the image again. */
 			cell = gpuimagebaselinecell(baseline, line, x, line[x]);
 			if (!cell || gpuglyphequal(cell->glyph, line[x]))
+				continue;
+			if (!draw)
 				continue;
 			if ((line[x].mode & ATTR_WDUMMY) && x > 0) {
 				gpudrawcell(line[x - 1], x - 1, y,
@@ -1431,8 +1433,9 @@ gpudrawimage(const GraphicsPlacementView *placement, void *context)
 	vertices[4] = IVERTEX(x, y+h, u0, v1);
 	vertices[5] = IVERTEX(x+w, y+h, u1, v1);
 #undef IVERTEX
-	selected_image = selection_active() && selectedregion(placement->column,
-	    placement->row, placement->columns, placement->rows);
+	selected_image = placement->selected ||
+	    (selection_active() && selectedregion(placement->column,
+	    placement->row, placement->columns, placement->rows));
 	voff = &vertices[0].x;
 	toff = &vertices[0].u;
 	coff = &vertices[0].r;
@@ -1452,8 +1455,8 @@ gpudrawimage(const GraphicsPlacementView *placement, void *context)
 	glDrawArrays(GL_TRIANGLES, 0, 6);
 	if (selected_image) {
 		/* The image is one atomic visual character. Tint its full rendered
-		 * rectangle when any occupied cell is selected, including image-only
-		 * rows whose underlying terminal glyphs are blank. */
+		 * rectangle when either the terminal or the application selects any
+		 * occupied cell, including image-only rows whose glyphs are blank. */
 		gpucolor(selectionbg, selection);
 		for (int i = 0; i < 6; i++) {
 			vertices[i].r = selection[0];
@@ -1467,7 +1470,10 @@ gpudrawimage(const GraphicsPlacementView *placement, void *context)
 		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 		glDrawArrays(GL_TRIANGLES, 0, 6);
 	}
-	gpuoccludeimagecells(placement);
+	/* Keep the original per-cell baseline alive while selected, but do not draw
+	 * later cell changes over the atomic selection. Once selection ends, menus
+	 * and other changed cells immediately resume occluding their own regions. */
+	gpuoccludeimagecells(placement, !selected_image);
 }
 
 static void

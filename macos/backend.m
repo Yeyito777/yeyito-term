@@ -598,8 +598,9 @@ drawGraphicsPlacement(const GraphicsPlacementView *placement, void *context)
 	    placement->source_x, placement->source_y,
 	    placement->source_width, placement->source_height,
 	    x, y, width, height);
-	if (selection_active() && selectedregion(placement->column, placement->row,
-	    placement->columns, placement->rows)) {
+	if (placement->selected || (selection_active() &&
+	    selectedregion(placement->column, placement->row,
+	    placement->columns, placement->rows))) {
 		MacColor color = indexedColor(selectionbg);
 		color.a = 0.45f;
 		mac_renderer_rect(MAC_LAYER_OVERLAY_DECORATION, x, y, width,

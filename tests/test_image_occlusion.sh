@@ -95,6 +95,20 @@ if wait_for("move-menu-left"):
     emit(b"\x1b_Ga=p,i=424242,c=8,r=4,C=1,z=1478,q=2\x1b\\")
     ready("left-menu-ready")
 
+if wait_for("select-image"):
+    # Application-level visual selection is atomic: selecting any occupied cell
+    # asks st to reveal and tint the complete image above ordinary cell covers.
+    emit(b"\x1b[5;10H\x1b_Ga=d,d=z,z=1478,q=2\x1b\\")
+    emit(b"\x1b_Ga=p,i=424242,c=8,r=4,C=1,z=1478,V=1,q=2\x1b\\")
+    ready("selected-ready")
+
+if wait_for("unselect-image"):
+    # Ending selection must restore the exact per-cell menu occlusion rather
+    # than adopting the menu as a new image baseline.
+    emit(b"\x1b[5;10H\x1b_Ga=d,d=z,z=1478,q=2\x1b\\")
+    emit(b"\x1b_Ga=p,i=424242,c=8,r=4,C=1,z=1478,q=2\x1b\\")
+    ready("unselected-ready")
+
 if wait_for("restore-image"):
     # Restoring every original cell must reveal the retained image again.
     for row in range(5, 9):
@@ -127,16 +141,26 @@ wait_file "$tmpdir/left-menu-ready"
 sleep 0.15
 xenv screenshot -e "$env_name" -o "$tmpdir/left-menu.png" >/dev/null
 
+touch "$tmpdir/select-image"
+wait_file "$tmpdir/selected-ready"
+sleep 0.15
+xenv screenshot -e "$env_name" -o "$tmpdir/selected.png" >/dev/null
+
+touch "$tmpdir/unselect-image"
+wait_file "$tmpdir/unselected-ready"
+sleep 0.15
+xenv screenshot -e "$env_name" -o "$tmpdir/unselected.png" >/dev/null
+
 touch "$tmpdir/restore-image"
 wait_file "$tmpdir/restore-ready"
 sleep 0.15
 xenv screenshot -e "$env_name" -o "$tmpdir/restored.png" >/dev/null
 
-python3 - "$tmpdir/baseline.png" "$tmpdir/right-menu.png" "$tmpdir/left-menu.png" "$tmpdir/restored.png" <<'PY'
+python3 - "$tmpdir/baseline.png" "$tmpdir/right-menu.png" "$tmpdir/left-menu.png" "$tmpdir/selected.png" "$tmpdir/unselected.png" "$tmpdir/restored.png" <<'PY'
 import sys
 from PIL import Image
 
-baseline, right_menu, left_menu, restored = [Image.open(path).convert("RGB") for path in sys.argv[1:5]]
+baseline, right_menu, left_menu, selected, unselected, restored = [Image.open(path).convert("RGB") for path in sys.argv[1:7]]
 
 def magenta(pixel):
     r, g, b = pixel
@@ -145,6 +169,10 @@ def magenta(pixel):
 def blue(pixel):
     r, g, b = pixel
     return r < 45 and 45 < g < 135 and b > 180
+
+def selected_purple(pixel):
+    r, g, b = pixel
+    return 145 < r < 215 and 20 < g < 75 and 145 < b < 220
 
 def longest_run(image):
     best = None
@@ -237,6 +265,42 @@ if left_menu_right_magenta < covered_area * 0.80:
         f"right magenta={left_menu_right_magenta}/{covered_area}"
     )
 
+image_area = width * (y1 - y0 + 1)
+selected_pixels = sum(
+    selected_purple(selected.getpixel((x, y)))
+    for y in range(y0, y1 + 1)
+    for x in range(x0, x1 + 1)
+)
+selected_blue = sum(
+    blue(selected.getpixel((x, y)))
+    for y in range(y0, y1 + 1)
+    for x in range(x0, x1 + 1)
+)
+if selected_pixels < image_area * 0.90:
+    raise SystemExit(
+        f"selected image was not fully revealed and tinted atomically: "
+        f"purple={selected_pixels}/{image_area}, blue={selected_blue}/{image_area}"
+    )
+if selected_blue > image_area * 0.02:
+    raise SystemExit(f"menu remained over selected image: blue={selected_blue}/{image_area}")
+
+unselected_left_blue = sum(
+    blue(unselected.getpixel((x, y)))
+    for y in range(y0, y1 + 1)
+    for x in range(x0, covered0)
+)
+unselected_right_magenta = sum(
+    magenta(unselected.getpixel((x, y)))
+    for y in range(y0, y1 + 1)
+    for x in range(covered0, covered1 + 1)
+)
+if unselected_left_blue < covered_area * 0.35 or unselected_right_magenta < covered_area * 0.80:
+    raise SystemExit(
+        f"ending selection did not restore per-cell menu occlusion: "
+        f"left blue={unselected_left_blue}/{covered_area}, "
+        f"right magenta={unselected_right_magenta}/{covered_area}"
+    )
+
 restored_run = longest_run(restored)
 if restored_run is None or restored_run[0] < width - 2:
     raise SystemExit(
@@ -248,12 +312,11 @@ restored_magenta = sum(
     for y in range(y0, y1 + 1)
     for x in range(x0, x1 + 1)
 )
-image_area = width * (y1 - y0 + 1)
 if restored_magenta < image_area * 0.95:
     raise SystemExit(
         f"only part of the image reappeared after restoring its cells: "
         f"magenta={restored_magenta}/{image_area}"
     )
 
-print("Image occlusion regression passed: either half is covered independently and restoration reveals the whole image")
+print("Image occlusion regression passed: halves occlude independently, selection is atomic, and both states restore correctly")
 PY

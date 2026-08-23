@@ -58,6 +58,7 @@
 #define FIELD_SIZE      (1ULL << 23)
 #define FIELD_OFFSET    (1ULL << 24)
 #define FIELD_TRANSIENT (1ULL << 25)
+#define FIELD_SELECTED  (1ULL << 26)
 
 #define CONTINUATION_FIELDS (FIELD_MORE | FIELD_QUIET)
 
@@ -87,6 +88,7 @@ typedef struct {
 	int32_t z;
 	int no_cursor_move;
 	int unicode_placeholder;
+	int selected;
 	uint64_t fields;
 } GraphicsCommand;
 
@@ -130,6 +132,7 @@ struct GraphicsPlacement {
 	int pixel_y;
 	int natural_size;
 	int z;
+	int selected;
 };
 
 typedef struct {
@@ -381,6 +384,13 @@ parse_command(const char *data, size_t length, GraphicsCommand *command,
 		case 'N':
 			if (!command_value_uint(value, value_length, &number)) goto invalid_value;
 			command->fields |= FIELD_TRANSIENT;
+			break;
+		case 'V':
+			/* st extension: applications with semantic selections can request
+			 * the same atomic full-placement tint as a terminal selection. */
+			if (!command_value_uint(value, value_length, &number) || number > 1) goto invalid_value;
+			command->selected = (int)number;
+			command->fields |= FIELD_SELECTED;
 			break;
 		default:
 			/* Unknown keys are ignored for forward compatibility. */
@@ -965,6 +975,7 @@ place_image(GraphicsImage *image, const GraphicsCommand *command, Line anchor,
 	placement->pixel_y = (int)command->pixel_y;
 	placement->natural_size = natural;
 	placement->z = command->z;
+	placement->selected = command->selected;
 	placement->next = placements;
 	placements = placement;
 	placement_count++;
@@ -1367,6 +1378,7 @@ graphics_draw(int alt, int stage, int cell_width, int cell_height,
 		view.pixel_y = placement->pixel_y;
 		view.natural_size = placement->natural_size;
 		view.z = placement->z;
+		view.selected = placement->selected;
 		draw(&view, context);
 		placement->access = placement->image->access = access_clock++;
 	}

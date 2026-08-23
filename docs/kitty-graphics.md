@@ -86,6 +86,12 @@ Placements support:
 - Signed z-index (`z`)
 - Alpha from RGBA and PNG input
 
+`st` also accepts an application-selection extension on placements: `V=1`
+marks the complete placement as one selected visual object. The renderer tints
+the full image and temporarily suppresses per-cell text occlusion until a
+replacement placement uses `V=0` (or omits `V`). Other Kitty implementations
+ignore the unknown key, so applications can send it without a terminal fork.
+
 Deletion selectors `a`, `i`, `n`, `c`, `p`, `q`, `x`, `y`, `z`, and `r` are
 implemented. Uppercase selectors perform hard deletion: after matching
 placements are removed, image data with no remaining placements is reclaimed.

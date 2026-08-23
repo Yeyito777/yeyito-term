@@ -163,6 +163,25 @@ TEST(chunked_rgba_placement)
 	ASSERT_EQ(255, last_draw.rgba[3]);
 }
 
+TEST(application_selected_placement_flag)
+{
+	reset_state();
+	command("Ga=T,f=32,s=1,v=1,i=43,p=8,c=2,r=3,C=1,V=1,m=1;/wAA",
+	    line_a);
+	command("Gm=0;/w==", line_a);
+	graphics_draw(0, GRAPHICS_STAGE_ABOVE_TEXT, 10, 20, 24,
+	    line_row, capture_draw, NULL);
+	ASSERT_EQ(1, drawn);
+	ASSERT_EQ(1, last_draw.selected);
+
+	command("Ga=p,i=43,p=8,c=2,r=3,C=1,V=0", line_a);
+	drawn = 0;
+	graphics_draw(0, GRAPHICS_STAGE_ABOVE_TEXT, 10, 20, 24,
+	    line_row, capture_draw, NULL);
+	ASSERT_EQ(1, drawn);
+	ASSERT_EQ(0, last_draw.selected);
+}
+
 TEST(natural_size_and_cursor_movement)
 {
 	GraphicsCommandResult result;
@@ -461,6 +480,7 @@ TEST_SUITE(graphics)
 {
 	RUN_TEST(query_direct_rgb);
 	RUN_TEST(chunked_rgba_placement);
+	RUN_TEST(application_selected_placement_flag);
 	RUN_TEST(natural_size_and_cursor_movement);
 	RUN_TEST(negative_z_stage_and_reanchor);
 	RUN_TEST(fully_offscreen_placement_is_culled);
