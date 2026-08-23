@@ -88,6 +88,8 @@ typedef struct {
 	unsigned int backage;
 	int damageidx, damagerows;
 	uchar *damage[GPU_DAMAGE_HISTORY];
+	int redrawnrows;
+	uchar *redrawn;
 	int vw, vh;
 	GLXContext ctx;
 	FT_Library ft;
@@ -389,7 +391,14 @@ gpudamageensure(void)
 {
 	int i, rows = trow();
 
-	if (!gpu.doublebuf || rows <= 0)
+	if (rows <= 0)
+		return;
+	if (gpu.redrawnrows != rows || !gpu.redrawn) {
+		gpu.redrawn = xrealloc(gpu.redrawn, rows * sizeof(*gpu.redrawn));
+		memset(gpu.redrawn, 0, rows * sizeof(*gpu.redrawn));
+		gpu.redrawnrows = rows;
+	}
+	if (!gpu.doublebuf)
 		return;
 	if (gpu.damagerows == rows && gpu.damage[0])
 		return;
@@ -541,6 +550,7 @@ gpudestroy(void)
 		glDeleteTextures(1, &gpu.catlas);
 	for (i = 0; i < GPU_DAMAGE_HISTORY; i++)
 		free(gpu.damage[i]);
+	free(gpu.redrawn);
 	for (i = 0; i < 4; i++)
 		if (gpu.face[i])
 			FT_Done_Face(gpu.face[i]);
@@ -929,6 +939,8 @@ gpudrawline(Line line, int x1, int y, int x2)
 
 	if (gpu.doublebuf && gpu.damage[0] && BETWEEN(y, 0, gpu.damagerows - 1))
 		gpu.damage[gpu.damageidx][y] = 1;
+	if (gpu.redrawn && BETWEEN(y, 0, gpu.redrawnrows - 1))
+		gpu.redrawn[y] = 1;
 
 	gpucolor(defaultfg, dfg);
 	gpucolor(defaultbg, dbg);
@@ -1078,12 +1090,14 @@ gpudrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 		og.mode |= ATTR_SELECTED;
 	if (searchactive && search_matched(ox, oy))
 		og.mode |= ATTR_MATCH;
-	/* Restore the old cursor cell through the ordinary grid layers.  Putting
-	 * this restoration in the overlay batches draws it after above-text Kitty
-	 * graphics, so moving the cursor away paints a cell-sized hole in an image
-	 * until the next frame.  The base layers preserve image z-order while the
-	 * new cursor below remains an intentional overlay. */
-	gpudrawcell(og, ox, oy, GPU_CELL_BASE, 1);
+	/* Restore the old cursor cell only when its row was not already rebuilt.
+	 * Appending the same glyph to a freshly redrawn base text batch blends its
+	 * antialiased pixels twice, making the character look bold/brighter.  A row
+	 * redraw already removes the old cursor; retained rows still need this
+	 * explicit base-layer restoration to preserve image z-order. */
+	if (!gpu.redrawn || !BETWEEN(oy, 0, gpu.redrawnrows - 1) ||
+	    !gpu.redrawn[oy])
+		gpudrawcell(og, ox, oy, GPU_CELL_BASE, 1);
 	if ((IS_SET(MODE_HIDE) && !terminal_owned) || cmdline_active())
 		return;
 	cg.mode &= ATTR_BOLD|ATTR_ITALIC|ATTR_UNDERLINE|ATTR_STRUCK|ATTR_WIDE;

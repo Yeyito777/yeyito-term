@@ -268,6 +268,7 @@ endif
 
 test_gpu_regressions: st
 	@./tests/test_gpu_regressions.sh
+	@./tests/test_cursor_rendering.sh
 	@./tests/test_image_occlusion.sh
 
 test_aerospace_launcher:

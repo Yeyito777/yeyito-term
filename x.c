@@ -2566,6 +2566,9 @@ xstartdraw(void)
 		}
 		gpuresize();
 		gpudamageensure();
+		if (gpu.redrawn)
+			memset(gpu.redrawn, 0,
+			       gpu.redrawnrows * sizeof(*gpu.redrawn));
 		if (gpu.doublebuf && gpu.damage[0]) {
 			gpu.damageidx = (gpu.damageidx + 1) % GPU_DAMAGE_HISTORY;
 			memset(gpu.damage[gpu.damageidx], 0,
