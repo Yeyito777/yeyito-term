@@ -46,15 +46,32 @@ deadline = time.monotonic() + 10
 while not os.path.exists(sys.argv[1]) and time.monotonic() < deadline:
     time.sleep(0.02)
 if os.path.exists(sys.argv[1]):
-    # Put an opaque magenta image on the final terminal row. C=1 leaves
-    # the terminal cursor there so regular Ctrl+V can exercise cursor layering.
+    # Put an opaque magenta image on the final terminal row, then put the
+    # cursor inside it. C=1 leaves placement itself from moving the cursor.
     sys.stdout.buffer.write(
         b"\x1b[999;1H\x1b_Ga=T,f=32,s=1,v=1,c=8,r=1,C=1,q=2;/wD//w==\x1b\\"
-        b"\x1b]777;cursor;0\x07\x1b]777;vim-mode;enter\x07"
+        b"\x1b[999;4H"
+    )
+    sys.stdout.buffer.flush()
+deadline = time.monotonic() + 10
+while not os.path.exists(sys.argv[2]) and time.monotonic() < deadline:
+    time.sleep(0.02)
+if os.path.exists(sys.argv[2]):
+    # Move beyond the image. The old cursor cell must be restored below the
+    # above-text image rather than punching a hole through it.
+    sys.stdout.buffer.write(b"\x1b[999;12H")
+    sys.stdout.buffer.flush()
+deadline = time.monotonic() + 10
+while not os.path.exists(sys.argv[3]) and time.monotonic() < deadline:
+    time.sleep(0.02)
+if os.path.exists(sys.argv[3]):
+    # Return to the image before exercising terminal-owned Ctrl+V layering.
+    sys.stdout.buffer.write(
+        b"\x1b[999;4H\x1b]777;cursor;0\x07\x1b]777;vim-mode;enter\x07"
     )
     sys.stdout.buffer.flush()
 time.sleep(30)
-' "$tmpdir/image-trigger" >"$tmpdir/st.out" 2>"$tmpdir/st.err" &
+' "$tmpdir/image-trigger" "$tmpdir/cursor-trigger" "$tmpdir/vim-trigger" >"$tmpdir/st.out" 2>"$tmpdir/st.err" &
 st_pid=$!
 
 # Wait until dwm has mapped the terminal at its initial tiled size.
@@ -171,6 +188,47 @@ if height < 14:
     raise SystemExit(f"bottom-row image was clipped to {height}px")
 PY
 
+# Moving a cursor away from an above-text image used to restore the old cursor
+# cell in the overlay background batch, after the image itself. Verify that the
+# opaque image remains one continuous horizontal run on that very next frame;
+# do this before the 800 ms cursor blink can cause a coincidental later redraw.
+touch "$tmpdir/cursor-trigger"
+sleep 0.12
+cursorleftshot="$tmpdir/image-after-cursor.png"
+xenv screenshot -e "$env_name" -o "$cursorleftshot" >/dev/null
+
+python3 - "$cursorleftshot" <<'PY'
+import sys
+from PIL import Image
+
+im = Image.open(sys.argv[1]).convert('RGB')
+best = []
+for y in range(im.height):
+    xs = []
+    for x in range(min(160, im.width)):
+        r, g, b = im.getpixel((x, y))
+        if r > 240 and g < 25 and b > 240:
+            xs.append(x)
+    if len(xs) > len(best):
+        best = xs
+
+if len(best) < 30:
+    raise SystemExit(f"cursor-move image row was not visible: only {len(best)} magenta pixels")
+magenta = set(best)
+longest_gap = gap = 0
+for x in range(min(best), max(best) + 1):
+    if x in magenta:
+        gap = 0
+    else:
+        gap += 1
+        longest_gap = max(longest_gap, gap)
+if longest_gap > 2:
+    raise SystemExit(f"old cursor restoration punched a {longest_gap}px hole in the image")
+PY
+
+touch "$tmpdir/vim-trigger"
+sleep 0.12
+
 # Regular Ctrl+V is terminal-owned and uses the forced-nav coral block cursor.
 # It selects the cursor cell, so GPU cursor drawing must also ignore selection
 # highlighting rather than replacing red with the gray selection color.
@@ -236,4 +294,4 @@ if bottom14 < 20:
     raise SystemExit(f"cmdline descenders/bottom strokes look clipped: only {bottom14} low pixels")
 PY
 
-echo "GPU regression tests passed: full-size mapping, preserved redraws, bottom-row images, regular block cursor, and cmdline alignment"
+echo "GPU regression tests passed: full-size mapping, preserved redraws, bottom-row images, cursor/image restoration, regular block cursor, and cmdline alignment"

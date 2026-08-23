@@ -1006,7 +1006,12 @@ gpudrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 		og.mode |= ATTR_SELECTED;
 	if (searchactive && search_matched(ox, oy))
 		og.mode |= ATTR_MATCH;
-	gpudrawcell(og, ox, oy, 1, 1);
+	/* Restore the old cursor cell through the ordinary grid layers.  Putting
+	 * this restoration in the overlay batches draws it after above-text Kitty
+	 * graphics, so moving the cursor away paints a cell-sized hole in an image
+	 * until the next frame.  The base layers preserve image z-order while the
+	 * new cursor below remains an intentional overlay. */
+	gpudrawcell(og, ox, oy, 0, 1);
 	if ((IS_SET(MODE_HIDE) && !terminal_owned) || cmdline_active())
 		return;
 	cg.mode &= ATTR_BOLD|ATTR_ITALIC|ATTR_UNDERLINE|ATTR_STRUCK|ATTR_WIDE;
