@@ -40,6 +40,7 @@ char *argv0;
 #include "locale.h"
 #include "pty.h"
 #include "reveal.h"
+#include "text_input.h"
 #include "pasteboard5522.h"
 #include "../sync.h"
 
@@ -1495,6 +1496,17 @@ mouseReport(int type, uint button, uint state, int x, int y)
 static void
 nativeHandleKey(NSEvent *event, int release)
 {
+	NSEventModifierFlags flags = event.modifierFlags &
+	    NSEventModifierFlagDeviceIndependentFlagsMask;
+	if (!release && macos_is_em_dash_keystroke(event.keyCode,
+	    (flags & NSEventModifierFlagShift) != 0,
+	    (flags & NSEventModifierFlagOption) != 0,
+	    (flags & NSEventModifierFlagControl) != 0,
+	    (flags & NSEventModifierFlagCommand) != 0)) {
+		ttywrite("\xe2\x80\x94", 3, 1);
+		macos_request_redraw();
+		return;
+	}
 	KeySym symbol = nativeKeysym(event);
 	uint state = nativeModifiers(event);
 	NSString *characters = (state & Mod1Mask) ?

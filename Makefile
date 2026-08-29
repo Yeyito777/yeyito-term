@@ -31,7 +31,7 @@ st.o: config.h st.h win.h graphics.h vimnav.h persist.h macos/emoji.h
 x.o: arg.h config.h st.h win.h xstate.h graphics.h sync.h clipboard5522.h sshind.h notif.h persist.h cmdline.h search.h render/gpu.c
 graphics.o: graphics.c graphics.h st.h vendor/stb_image.h
 clipboard5522.o: clipboard5522.c clipboard5522.h
-macos/backend.o: macos/backend.m macos/native.h macos/renderer.h macos/pty.h macos/pasteboard5522.h macos/keysyms.h macos/reveal.h config.h st.h win.h graphics.h sync.h
+macos/backend.o: macos/backend.m macos/native.h macos/renderer.h macos/pty.h macos/pasteboard5522.h macos/keysyms.h macos/reveal.h macos/text_input.h config.h st.h win.h graphics.h sync.h
 macos/pasteboard5522.o: macos/pasteboard5522.m macos/pasteboard5522.h clipboard5522.h
 macos/locale.o: macos/locale.c macos/locale.h
 	$(CC) $(STCFLAGS) -c macos/locale.c -o macos/locale.o
@@ -103,7 +103,7 @@ dist: clean
 	cp -R docs/kitty-graphics.md st-$(VERSION)/docs
 	mkdir -p st-$(VERSION)/vendor
 	cp -R vendor/stb_image.h st-$(VERSION)/vendor
-	cp -R macos/README.md macos/Info.plist macos/backend.m macos/pasteboard5522.h macos/pasteboard5522.m macos/keysyms.h macos/native.h macos/reveal.h\
+	cp -R macos/README.md macos/Info.plist macos/backend.m macos/pasteboard5522.h macos/pasteboard5522.m macos/keysyms.h macos/native.h macos/reveal.h macos/text_input.h\
 		macos/renderer.h macos/renderer.m macos/glyph_layout.h macos/emoji.h macos/emoji.c\
 		macos/pty.h macos/pty.m macos/locale.h macos/locale.c\
 		macos/st-icon.png macos/st.icns\
@@ -238,6 +238,12 @@ tests/test_macos_reveal.o: tests/test_macos_reveal.c tests/test.h macos/reveal.h
 test_macos_reveal: tests/test_macos_reveal.o
 	$(CC) -o tests/test_macos_reveal tests/test_macos_reveal.o
 
+tests/test_macos_text_input.o: tests/test_macos_text_input.c tests/test.h macos/text_input.h
+	$(CC) $(TESTFLAGS) -c tests/test_macos_text_input.c -o tests/test_macos_text_input.o
+
+test_macos_text_input: tests/test_macos_text_input.o
+	$(CC) -o tests/test_macos_text_input tests/test_macos_text_input.o
+
 tests/test_macos_locale.o: tests/test_macos_locale.c tests/test.h macos/locale.h
 	$(CC) $(TESTFLAGS) -c tests/test_macos_locale.c -o tests/test_macos_locale.o
 
@@ -276,7 +282,7 @@ test_aerospace_launcher:
 
 test: test_vimnav test_sshind test_scrollback test_cwd test_notif test_persist test_search test_cmdline_layout test_mode_reset test_sync test_clipboard5522 test_graphics test_aerospace_launcher
 ifeq ($(UNAME_S),Darwin)
-test: test_macos_pty test_macos_reveal test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522
+test: test_macos_pty test_macos_reveal test_macos_text_input test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522
 endif
 	@echo "Running tests..."
 	@./tests/test_vimnav
@@ -294,6 +300,7 @@ endif
 ifeq ($(UNAME_S),Darwin)
 	@./tests/test_macos_pty
 	@./tests/test_macos_reveal
+	@./tests/test_macos_text_input
 	@./tests/test_macos_locale
 	@./tests/test_macos_glyph_layout
 	@./tests/test_macos_emoji
@@ -301,6 +308,6 @@ ifeq ($(UNAME_S),Darwin)
 endif
 
 clean-tests:
-	rm -f tests/*.o tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search tests/test_cmdline_layout tests/test_mode_reset tests/test_sync tests/test_clipboard5522 tests/test_graphics tests/test_macos_pty tests/test_macos_reveal tests/test_macos_locale tests/test_macos_glyph_layout tests/test_macos_emoji tests/test_macos_pasteboard5522
+	rm -f tests/*.o tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search tests/test_cmdline_layout tests/test_mode_reset tests/test_sync tests/test_clipboard5522 tests/test_graphics tests/test_macos_pty tests/test_macos_reveal tests/test_macos_text_input tests/test_macos_locale tests/test_macos_glyph_layout tests/test_macos_emoji tests/test_macos_pasteboard5522
 
-.PHONY: all app install-app uninstall-app install-hint clean dist install uninstall test test_gpu_regressions test_aerospace_launcher test_mode_reset test_sync test_graphics test_macos_pty test_macos_reveal test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522 clean-tests
+.PHONY: all app install-app uninstall-app install-hint clean dist install uninstall test test_gpu_regressions test_aerospace_launcher test_mode_reset test_sync test_graphics test_macos_pty test_macos_reveal test_macos_text_input test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522 clean-tests
