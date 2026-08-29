@@ -16,6 +16,8 @@ TEST(gui_environment_uses_utf8_widths)
 	ASSERT(wcwidth(0x1f600) < 0);
 	ASSERT(macos_init_utf8_locale());
 	ASSERT(strcmp(setlocale(LC_CTYPE, NULL), "C") != 0);
+	ASSERT_NOT_NULL(getenv("LC_CTYPE"));
+	ASSERT_STR_EQ(setlocale(LC_CTYPE, NULL), getenv("LC_CTYPE"));
 	ASSERT_EQ(wcwidth(L'A'), 1);
 	ASSERT_EQ(wcwidth(0x1f600), 2);
 }

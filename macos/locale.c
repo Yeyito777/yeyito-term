@@ -1,4 +1,5 @@
 #include <locale.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "locale.h"
@@ -19,5 +20,12 @@ macos_init_utf8_locale(void)
 		if (!name)
 			name = setlocale(LC_CTYPE, "en_US.UTF-8");
 	}
+	/*
+	 * setlocale changes only this process.  Export the resolved character
+	 * locale so the shell created after fork/exec does not fall back to the
+	 * byte-oriented C locale and split UTF-8 input into invalid characters.
+	 */
+	if (name)
+		setenv("LC_CTYPE", name, 1);
 	return name != NULL;
 }
