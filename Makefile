@@ -31,7 +31,7 @@ st.o: config.h st.h win.h graphics.h vimnav.h persist.h macos/emoji.h
 x.o: arg.h config.h st.h win.h xstate.h graphics.h sync.h clipboard5522.h sshind.h notif.h persist.h cmdline.h search.h render/gpu.c
 graphics.o: graphics.c graphics.h st.h vendor/stb_image.h
 clipboard5522.o: clipboard5522.c clipboard5522.h
-macos/backend.o: macos/backend.m macos/native.h macos/renderer.h macos/pty.h macos/pasteboard5522.h macos/keysyms.h macos/reveal.h macos/text_input.h config.h st.h win.h graphics.h sync.h
+macos/backend.o: macos/backend.m macos/native.h macos/renderer.h macos/glyph_layout.h macos/pty.h macos/pasteboard5522.h macos/keysyms.h macos/reveal.h macos/text_input.h config.h st.h win.h graphics.h sync.h
 macos/pasteboard5522.o: macos/pasteboard5522.m macos/pasteboard5522.h clipboard5522.h
 macos/locale.o: macos/locale.c macos/locale.h
 	$(CC) $(STCFLAGS) -c macos/locale.c -o macos/locale.o

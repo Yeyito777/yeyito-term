@@ -36,6 +36,7 @@ char *argv0;
 #include "../cmdline.h"
 #include "../search.h"
 #include "keysyms.h"
+#include "glyph_layout.h"
 #include "native.h"
 #include "locale.h"
 #include "pty.h"
@@ -459,12 +460,19 @@ drawCell(Glyph glyph, int x, int y, int overlay, int applyHighlights)
 	if (bg.r != clear.r || bg.g != clear.g || bg.b != clear.b || bg.a != clear.a)
 		mac_renderer_rect(bgLayer, left, top, width, height, bg);
 	if (glyph.u != ' ' && glyph.u != 0) {
-		unsigned int style = 0;
-		if (glyph.mode & ATTR_BOLD) style |= MAC_FONT_BOLD;
-		if (glyph.mode & ATTR_ITALIC) style |= MAC_FONT_ITALIC;
-		if (glyph.mode & ATTR_EMOJI) style |= MAC_FONT_EMOJI;
-		mac_renderer_rune(textLayer, glyph.u, style, left, top,
-		    rowBaseline(y), width, height, fg);
+		MacGlyphRect block;
+		if (blockdraw && macos_filled_block_rect(glyph.u, left, top,
+		    width, height, mac_renderer_scale(), &block)) {
+			mac_renderer_rect(textLayer, block.x, block.y, block.width,
+			    block.height, fg);
+		} else {
+			unsigned int style = 0;
+			if (glyph.mode & ATTR_BOLD) style |= MAC_FONT_BOLD;
+			if (glyph.mode & ATTR_ITALIC) style |= MAC_FONT_ITALIC;
+			if (glyph.mode & ATTR_EMOJI) style |= MAC_FONT_EMOJI;
+			mac_renderer_rune(textLayer, glyph.u, style, left, top,
+			    rowBaseline(y), width, height, fg);
+		}
 	}
 	if (glyph.mode & ATTR_UNDERLINE)
 		mac_renderer_rect(decoLayer, left, rowBaseline(y) + 1,

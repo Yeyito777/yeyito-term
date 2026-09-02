@@ -51,11 +51,57 @@ TEST(color_emoji_ink_stays_inside_narrow_cell)
 	ASSERT_NEAR(14 * MACOS_COLOR_GLYPH_CELL_FILL, ink_width);
 }
 
+TEST(filled_block_covers_the_exact_cell)
+{
+	MacGlyphRect rect;
+
+	ASSERT(macos_filled_block_rect(0x2588, 10, 20, 7, 15, 2, &rect));
+	ASSERT_NEAR(10, rect.x);
+	ASSERT_NEAR(20, rect.y);
+	ASSERT_NEAR(7, rect.width);
+	ASSERT_NEAR(15, rect.height);
+}
+
+TEST(half_blocks_meet_at_an_even_backing_pixel_boundary)
+{
+	MacGlyphRect upper, lower;
+
+	ASSERT(macos_filled_block_rect(0x2580, 10, 20, 7, 15, 2, &upper));
+	ASSERT(macos_filled_block_rect(0x2584, 10, 20, 7, 15, 2, &lower));
+	ASSERT_NEAR(7.5, upper.height);
+	ASSERT_NEAR(27.5, upper.y + upper.height);
+	ASSERT_NEAR(27.5, lower.y);
+	ASSERT_NEAR(7.5, lower.height);
+}
+
+TEST(half_blocks_overlap_an_odd_device_pixel_to_prevent_seams)
+{
+	MacGlyphRect upper, lower;
+
+	ASSERT(macos_filled_block_rect(0x2580, 10, 20, 7, 15, 1, &upper));
+	ASSERT(macos_filled_block_rect(0x2584, 10, 20, 7, 15, 1, &lower));
+	ASSERT_NEAR(8, upper.height);
+	ASSERT_NEAR(28, upper.y + upper.height);
+	ASSERT_NEAR(27, lower.y);
+	ASSERT_NEAR(8, lower.height);
+}
+
+TEST(ordinary_glyph_is_not_treated_as_a_filled_block)
+{
+	MacGlyphRect rect;
+
+	ASSERT(!macos_filled_block_rect('A', 10, 20, 7, 15, 2, &rect));
+}
+
 TEST_SUITE(macos_glyph_layout)
 {
 	RUN_TEST(color_emoji_upscales_to_fill_wide_cell);
 	RUN_TEST(color_emoji_is_centered_on_cell_not_baseline);
 	RUN_TEST(color_emoji_ink_stays_inside_narrow_cell);
+	RUN_TEST(filled_block_covers_the_exact_cell);
+	RUN_TEST(half_blocks_meet_at_an_even_backing_pixel_boundary);
+	RUN_TEST(half_blocks_overlap_an_odd_device_pixel_to_prevent_seams);
+	RUN_TEST(ordinary_glyph_is_not_treated_as_a_filled_block);
 }
 
 int

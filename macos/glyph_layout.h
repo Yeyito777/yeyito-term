@@ -1,6 +1,9 @@
 #ifndef MACOS_GLYPH_LAYOUT_H
 #define MACOS_GLYPH_LAYOUT_H
 
+#include <math.h>
+#include <stdint.h>
+
 #define MACOS_COLOR_GLYPH_CELL_FILL 0.94
 
 typedef struct {
@@ -9,6 +12,46 @@ typedef struct {
 	double width;
 	double height;
 } MacGlyphRect;
+
+/*
+ * Filled block elements are terminal-cell graphics rather than ordinary text.
+ * Snap them to backing pixels and construct them from rectangles so adjacent
+ * QR-code cells have neither font side bearings nor antialiased seams. For an
+ * odd device-pixel height, the half blocks overlap by one pixel, matching the
+ * X11 renderer's integer geometry.
+ */
+static inline int
+macos_filled_block_rect(uint32_t rune, double cell_x, double cell_y,
+		double cell_width, double cell_height, double backing_scale,
+		MacGlyphRect *rect)
+{
+	double left, top, right, bottom, height;
+
+	if (!rect || (rune != 0x2580 && rune != 0x2584 && rune != 0x2588))
+		return 0;
+	if (backing_scale <= 0)
+		backing_scale = 1;
+
+	left = round(cell_x * backing_scale);
+	top = round(cell_y * backing_scale);
+	right = round((cell_x + cell_width) * backing_scale);
+	bottom = round((cell_y + cell_height) * backing_scale);
+	height = bottom - top;
+
+	if (rune == 0x2580) {
+		bottom = top + floor((height + 1) / 2);
+	} else if (rune == 0x2584) {
+		top += floor(height / 2);
+	}
+
+	*rect = (MacGlyphRect){
+		.x = left / backing_scale,
+		.y = top / backing_scale,
+		.width = (right - left) / backing_scale,
+		.height = (bottom - top) / backing_scale,
+	};
+	return 1;
+}
 
 /*
  * Color-font glyph atlases include transparent padding around the actual ink.
