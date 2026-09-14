@@ -31,6 +31,7 @@ char *argv0;
 #include "../st.h"
 #include "../win.h"
 #include "../graphics.h"
+#include "../render/image_occlusion.h"
 #include "../persist.h"
 #include "../vimnav.h"
 #include "../cmdline.h"
@@ -44,6 +45,14 @@ char *argv0;
 #include "text_input.h"
 #include "pasteboard5522.h"
 #include "../sync.h"
+
+static ImageOcclusion imageOcclusion;
+
+enum MacCellLayer {
+	MAC_CELL_BASE,
+	MAC_CELL_OVERLAY,
+	MAC_CELL_IMAGE_OCCLUSION,
+};
 
 typedef struct {
 	uint mod;
@@ -437,7 +446,7 @@ resolveGlyph(Glyph glyph, int x, int y, MacColor *foreground,
 }
 
 static void
-drawCell(Glyph glyph, int x, int y, int overlay, int applyHighlights)
+drawCell(Glyph glyph, int x, int y, enum MacCellLayer layer, int applyHighlights)
 {
 	MacColor fg, bg;
 	if (glyph.mode == ATTR_WDUMMY)
@@ -450,14 +459,20 @@ drawCell(Glyph glyph, int x, int y, int overlay, int applyHighlights)
 	double left = cellX(x), top = cellY(y);
 	double width = cellRight(x, glyph.mode & ATTR_WIDE) - left;
 	double height = rowBottom(y) - top;
-	enum MacRenderLayer bgLayer = overlay ? MAC_LAYER_OVERLAY_BACKGROUND :
-	    MAC_LAYER_BACKGROUND;
-	enum MacRenderLayer textLayer = overlay ? MAC_LAYER_OVERLAY_TEXT :
-	    MAC_LAYER_TEXT;
-	enum MacRenderLayer decoLayer = overlay ? MAC_LAYER_OVERLAY_DECORATION :
-	    MAC_LAYER_DECORATION;
+	enum MacRenderLayer bgLayer = layer == MAC_CELL_OVERLAY ?
+	    MAC_LAYER_OVERLAY_BACKGROUND : layer == MAC_CELL_IMAGE_OCCLUSION ?
+	    MAC_LAYER_IMAGE_BACKGROUND : MAC_LAYER_BACKGROUND;
+	enum MacRenderLayer textLayer = layer == MAC_CELL_OVERLAY ?
+	    MAC_LAYER_OVERLAY_TEXT : layer == MAC_CELL_IMAGE_OCCLUSION ?
+	    MAC_LAYER_IMAGE_TEXT : MAC_LAYER_TEXT;
+	enum MacRenderLayer decoLayer = layer == MAC_CELL_OVERLAY ?
+	    MAC_LAYER_OVERLAY_DECORATION : layer == MAC_CELL_IMAGE_OCCLUSION ?
+	    MAC_LAYER_IMAGE_DECORATION : MAC_LAYER_DECORATION;
 	MacColor clear = indexedColor(IS_SET(MODE_REVERSE) ? defaultfg : defaultbg);
-	if (bg.r != clear.r || bg.g != clear.g || bg.b != clear.b || bg.a != clear.a)
+	/* Only base cells may omit the clear-color background. Above an image,
+	 * even a blank/default-background cell must erase the pixels beneath it. */
+	if (layer != MAC_CELL_BASE || bg.r != clear.r || bg.g != clear.g ||
+	    bg.b != clear.b || bg.a != clear.a)
 		mac_renderer_rect(bgLayer, left, top, width, height, bg);
 	if (glyph.u != ' ' && glyph.u != 0) {
 		MacGlyphRect block;
@@ -495,6 +510,7 @@ xstartdraw(void)
 	MacColor clear = indexedColor(IS_SET(MODE_REVERSE) ? defaultfg : defaultbg);
 	if (!mac_renderer_begin(clear))
 		return 0;
+	image_occlusion_begin(&imageOcclusion);
 	/* CAMetalLayer rotates drawables; rebuild a complete correct frame. */
 	tfulldirt();
 	return 1;
@@ -504,7 +520,7 @@ void
 xdrawline(Line line, int x1, int y, int x2)
 {
 	for (int x = x1; x < x2; x++)
-		drawCell(line[x], x, y, 0, 1);
+		drawCell(line[x], x, y, MAC_CELL_BASE, 1);
 
 	if (debug_mode) {
 		int start, end;
@@ -562,7 +578,7 @@ xdrawcursor(int cx, int cy, Glyph glyph, int ox, int oy, Glyph oldGlyph)
 		switch (win.cursor) {
 		case 7: glyph.u = 0x2603; /* fallthrough */
 		case 0: case 1: case 2:
-			drawCell(glyph, cx, cy, 1, 0);
+			drawCell(glyph, cx, cy, MAC_CELL_OVERLAY, 0);
 			break;
 		case 3: case 4:
 			mac_renderer_rect(MAC_LAYER_OVERLAY_DECORATION, left,
@@ -587,6 +603,13 @@ xdrawcursor(int cx, int cy, Glyph glyph, int ox, int oy, Glyph oldGlyph)
 static void drawMarkedText(void);
 
 static void
+drawImageOcclusionCell(Glyph glyph, int x, int y, void *context)
+{
+	(void)context;
+	drawCell(glyph, x, y, MAC_CELL_IMAGE_OCCLUSION, 1);
+}
+
+static void
 drawGraphicsPlacement(const GraphicsPlacementView *placement, void *context)
 {
 	int stage = (int)(intptr_t)context;
@@ -607,9 +630,12 @@ drawGraphicsPlacement(const GraphicsPlacementView *placement, void *context)
 	    placement->source_x, placement->source_y,
 	    placement->source_width, placement->source_height,
 	    x, y, width, height);
-	if (placement->selected || (selection_active() &&
+	int selectedImage = placement->selected || (selection_active() &&
 	    selectedregion(placement->column, placement->row,
-	    placement->columns, placement->rows))) {
+	    placement->columns, placement->rows));
+	image_occlusion_draw(&imageOcclusion, placement, tcol(), trow(),
+	    tlineviewline, selectedImage ? NULL : drawImageOcclusionCell, NULL);
+	if (selectedImage) {
 		MacColor color = indexedColor(selectionbg);
 		color.a = 0.45f;
 		mac_renderer_rect(MAC_LAYER_OVERLAY_DECORATION, x, y, width,
@@ -635,6 +661,7 @@ xfinishdraw(void)
 			    tlineviewrow, drawGraphicsPlacement,
 			    (void *)(intptr_t)stage);
 	}
+	image_occlusion_end(&imageOcclusion);
 	sshind_draw();
 	notif_draw();
 	cmdline_draw();
@@ -2170,6 +2197,7 @@ cleanupNative(void)
 	shuttingDown = 1;
 	xcleanup();
 	if (persist_active()) { persist_save(); persist_cleanup(); }
+	image_occlusion_clear(&imageOcclusion);
 	mac_renderer_destroy();
 }
 

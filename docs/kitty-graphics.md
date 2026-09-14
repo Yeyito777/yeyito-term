@@ -20,6 +20,7 @@ creation and drawing are platform-specific.
 | `macos/renderer.m`, `macos/renderer.h` | Cache RGBA data as `MTLTexture` objects and composite image layers with the terminal grid. |
 | `x.c` | Supplies X11/OpenGL geometry and integrates graphics into frame drawing. |
 | `render/gpu.c` | Cache RGBA data as OpenGL textures and draw the image layers. |
+| `render/image_occlusion.c`, `render/image_occlusion.h` | Shared per-cell baseline tracking for text/background changes above positive-z images. |
 | `vendor/stb_image.h` | Vendored PNG decoder, compiled in PNG-only mode. |
 | `tests/test_graphics.c` | Protocol, decoding, placement, deletion, culling, reflow, selection export, and quota tests. |
 
@@ -177,6 +178,22 @@ Placements are divided into three passes:
 1. Extremely negative z-index values are drawn below cell backgrounds.
 2. Other negative values are drawn after backgrounds but before text.
 3. Nonnegative values are drawn above terminal text.
+
+Both OpenGL and Metal use `render/image_occlusion.c` to remember the original
+terminal cells under nonnegative-z placements. Later changes to an individual
+cell (text, attributes, or background, including blank/default-background cells)
+are composited above the image, but below the cursor and terminal overlays.
+Restoring a cell to its baseline reveals that part of the image again. This lets
+TUI menus cover inline images without permanently deleting the placements.
+Named-image retransmissions retain the baseline; selected images temporarily
+suppress occlusion without replacing it. The cache is bounded to 1,048,576 cells
+and pruned after each frame when placements are no longer visible.
+
+`make test` covers this shared policy on both platforms. On macOS it also runs
+`test_macos_image_occlusion`, which uses the real Cocoa cell emitter and Metal
+frame encoder to verify rendered pixels in an offscreen texture (no visible
+window or screen-recording permission). That pixel test skips if Metal is
+unavailable.
 
 Both renderers clip image draws to the terminal content rectangle, excluding
 the window border. Vertically invisible placements are removed by the common

@@ -756,13 +756,9 @@ encodeImages(id<MTLRenderCommandEncoder> encoder, int stage)
 	[encoder setScissorRect:(MTLScissorRect){0, 0, drawableWidth, drawableHeight}];
 }
 
-void
-mac_renderer_end(void)
+static void
+encodeFrame(id<MTLRenderCommandEncoder> encoder)
 {
-	if (!r.command || !r.pass || !r.drawable)
-		return;
-	id<MTLRenderCommandEncoder> encoder =
-	    [r.command renderCommandEncoderWithDescriptor:r.pass];
 	[encoder setRenderPipelineState:r.pipeline];
 	vector_float2 viewport = {(float)r.view.drawableSize.width,
 	    (float)r.view.drawableSize.height};
@@ -774,9 +770,22 @@ mac_renderer_end(void)
 	encodeLayer(encoder, &r.layers[MAC_LAYER_TEXT], r.atlas);
 	encodeLayer(encoder, &r.layers[MAC_LAYER_DECORATION], r.atlas);
 	encodeImages(encoder, 2);
+	encodeLayer(encoder, &r.layers[MAC_LAYER_IMAGE_BACKGROUND], r.atlas);
+	encodeLayer(encoder, &r.layers[MAC_LAYER_IMAGE_TEXT], r.atlas);
+	encodeLayer(encoder, &r.layers[MAC_LAYER_IMAGE_DECORATION], r.atlas);
 	encodeLayer(encoder, &r.layers[MAC_LAYER_OVERLAY_BACKGROUND], r.atlas);
 	encodeLayer(encoder, &r.layers[MAC_LAYER_OVERLAY_TEXT], r.atlas);
 	encodeLayer(encoder, &r.layers[MAC_LAYER_OVERLAY_DECORATION], r.atlas);
+}
+
+void
+mac_renderer_end(void)
+{
+	if (!r.command || !r.pass || !r.drawable)
+		return;
+	id<MTLRenderCommandEncoder> encoder =
+	    [r.command renderCommandEncoderWithDescriptor:r.pass];
+	encodeFrame(encoder);
 	[encoder endEncoding];
 	[r.command presentDrawable:r.drawable];
 	[r.command commit];

@@ -2562,8 +2562,8 @@ xstartdraw(void)
 			gpu.frame = 1;
 			for (image = gpu.images; image; image = image->next)
 				image->frame = 0;
-			gpuclearbaselineframes();
 		}
+		image_occlusion_begin(&gpu.imageocclusion);
 		gpuresize();
 		gpudamageensure();
 		if (gpu.redrawn)
@@ -2709,7 +2709,7 @@ xfinishdraw(void)
 		gpudrawbatch(&gpu.octext, 2);
 		gpudrawbatch(&gpu.odeco, 0);
 		gpupruneimages();
-		gpuprunebaselines();
+		image_occlusion_end(&gpu.imageocclusion);
 		graphics_compact_images();
 		glDisableClientState(GL_VERTEX_ARRAY);
 		glDisableClientState(GL_COLOR_ARRAY);

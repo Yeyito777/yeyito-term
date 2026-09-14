@@ -14,6 +14,7 @@ else
 SRC = st.c x.c graphics.c clipboard5522.c vimnav.c sshind.c notif.c persist.c cmdline.c search.c
 OBJ = $(SRC:.c=.o)
 endif
+OBJ += render/image_occlusion.o
 APP = .build/st.app
 
 all: st install-hint
@@ -30,6 +31,9 @@ config.h:
 st.o: config.h st.h win.h graphics.h vimnav.h persist.h macos/emoji.h
 x.o: arg.h config.h st.h win.h xstate.h graphics.h sync.h clipboard5522.h sshind.h notif.h persist.h cmdline.h search.h render/gpu.c
 graphics.o: graphics.c graphics.h st.h vendor/stb_image.h
+render/image_occlusion.o: render/image_occlusion.c render/image_occlusion.h graphics.h st.h
+	$(CC) $(STCFLAGS) -c render/image_occlusion.c -o $@
+x.o macos/backend.o: render/image_occlusion.h
 clipboard5522.o: clipboard5522.c clipboard5522.h
 macos/backend.o: macos/backend.m macos/native.h macos/renderer.h macos/glyph_layout.h macos/pty.h macos/pasteboard5522.h macos/keysyms.h macos/reveal.h macos/text_input.h config.h st.h win.h graphics.h sync.h
 macos/pasteboard5522.o: macos/pasteboard5522.m macos/pasteboard5522.h clipboard5522.h
@@ -99,7 +103,7 @@ dist: clean
 	cp -R CLAUDE.md Makefile README.md TODO.md config.mk\
 		config.def.h st.info st.1 arg.h st.h win.h xstate.h sync.h vimnav.h sshind.h notif.h persist.h cmdline.h cmdline_layout.h search.h $(DIST_SRC)\
 		st-$(VERSION)
-	cp -R render/gpu.c render/README.md st-$(VERSION)/render
+	cp -R render/gpu.c render/image_occlusion.c render/image_occlusion.h render/README.md st-$(VERSION)/render
 	cp -R docs/kitty-graphics.md st-$(VERSION)/docs
 	mkdir -p st-$(VERSION)/vendor
 	cp -R vendor/stb_image.h st-$(VERSION)/vendor
@@ -148,6 +152,12 @@ tests/vimnav.o: vimnav.c vimnav.h st.h
 
 test_vimnav: $(TEST_OBJ)
 	$(CC) -o tests/test_vimnav $(TEST_OBJ)
+
+tests/test_image_occlusion.o: tests/test_image_occlusion.c tests/test.h render/image_occlusion.h graphics.h st.h
+	$(CC) $(TESTFLAGS) -c tests/test_image_occlusion.c -o $@
+
+test_image_occlusion: tests/test_image_occlusion.o render/image_occlusion.o
+	$(CC) -o tests/test_image_occlusion tests/test_image_occlusion.o render/image_occlusion.o
 
 # sshind tests (self-contained with X11 mocks - includes sshind.c directly)
 tests/test_sshind.o: tests/test_sshind.c tests/test.h sshind.h sshind.c
@@ -226,6 +236,15 @@ test_graphics: tests/test_graphics.o graphics.o
 	$(CC) -o tests/test_graphics tests/test_graphics.o graphics.o -lz
 
 ifeq ($(UNAME_S),Darwin)
+# Include the production backend/renderer to test their actual private emitters
+# against an offscreen Metal target; link the normal terminal core.
+MAC_IMAGE_TEST_OBJ = $(filter-out macos/backend.o macos/renderer.o,$(OBJ))
+tests/test_macos_image_occlusion.o: tests/test_macos_image_occlusion.m tests/test.h macos/backend.o macos/renderer.o
+	$(CC) $(STOBJCFLAGS) -c tests/test_macos_image_occlusion.m -o $@
+
+test_macos_image_occlusion: tests/test_macos_image_occlusion.o $(MAC_IMAGE_TEST_OBJ)
+	$(CC) -o tests/test_macos_image_occlusion tests/test_macos_image_occlusion.o $(MAC_IMAGE_TEST_OBJ) $(STLDFLAGS)
+
 tests/test_macos_pty.o: tests/test_macos_pty.m tests/test.h macos/pty.h
 	$(CC) $(STOBJCFLAGS) -c tests/test_macos_pty.m -o tests/test_macos_pty.o
 
@@ -280,9 +299,9 @@ test_gpu_regressions: st
 test_aerospace_launcher:
 	@./tests/test_aerospace_launcher.sh
 
-test: test_vimnav test_sshind test_scrollback test_cwd test_notif test_persist test_search test_cmdline_layout test_mode_reset test_sync test_clipboard5522 test_graphics test_aerospace_launcher
+test: test_image_occlusion test_vimnav test_sshind test_scrollback test_cwd test_notif test_persist test_search test_cmdline_layout test_mode_reset test_sync test_clipboard5522 test_graphics test_aerospace_launcher
 ifeq ($(UNAME_S),Darwin)
-test: test_macos_pty test_macos_reveal test_macos_text_input test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522
+test: test_macos_image_occlusion test_macos_pty test_macos_reveal test_macos_text_input test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522
 endif
 	@echo "Running tests..."
 	@./tests/test_vimnav
@@ -297,7 +316,9 @@ endif
 	@./tests/test_sync
 	@./tests/test_clipboard5522
 	@./tests/test_graphics
+	@./tests/test_image_occlusion
 ifeq ($(UNAME_S),Darwin)
+	@./tests/test_macos_image_occlusion
 	@./tests/test_macos_pty
 	@./tests/test_macos_reveal
 	@./tests/test_macos_text_input
@@ -308,6 +329,6 @@ ifeq ($(UNAME_S),Darwin)
 endif
 
 clean-tests:
-	rm -f tests/*.o tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search tests/test_cmdline_layout tests/test_mode_reset tests/test_sync tests/test_clipboard5522 tests/test_graphics tests/test_macos_pty tests/test_macos_reveal tests/test_macos_text_input tests/test_macos_locale tests/test_macos_glyph_layout tests/test_macos_emoji tests/test_macos_pasteboard5522
+	rm -f tests/*.o tests/test_macos_image_occlusion tests/test_image_occlusion tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search tests/test_cmdline_layout tests/test_mode_reset tests/test_sync tests/test_clipboard5522 tests/test_graphics tests/test_macos_pty tests/test_macos_reveal tests/test_macos_text_input tests/test_macos_locale tests/test_macos_glyph_layout tests/test_macos_emoji tests/test_macos_pasteboard5522
 
-.PHONY: all app install-app uninstall-app install-hint clean dist install uninstall test test_gpu_regressions test_aerospace_launcher test_mode_reset test_sync test_graphics test_macos_pty test_macos_reveal test_macos_text_input test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522 clean-tests
+.PHONY: all app install-app uninstall-app install-hint clean dist install uninstall test test_image_occlusion test_macos_image_occlusion test_gpu_regressions test_aerospace_launcher test_mode_reset test_sync test_graphics test_macos_pty test_macos_reveal test_macos_text_input test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522 clean-tests
