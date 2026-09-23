@@ -31,6 +31,8 @@ make install-app
 The app is installed at `~/Applications/st.app`, appears in Spotlight as `st`,
 uses an ordinary macOS window that tiling managers can control, and bundles the
 `st-notify`, `st-save-cmd`, and `st-aerospace-launch` helper scripts.
+The terminal fills the entire window, with no visible title bar or traffic-light
+buttons. Window-manager controls and the Window menu still work.
 
 ## Inline images, including over SSH
 

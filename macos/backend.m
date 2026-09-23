@@ -1979,9 +1979,18 @@ initializeNativeWindow(int columns, int rows)
 	    2 * borderpx + rows * win.ch);
 	NSRect rect = NSMakeRect(0, 0, content.width, content.height);
 	NSUInteger style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
-	    NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable;
+	    NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable |
+	    NSWindowStyleMaskFullSizeContentView;
 	nativeWindow = [[NSWindow alloc] initWithContentRect:rect styleMask:style
 	    backing:NSBackingStoreBuffered defer:NO];
+	/* Keep a normal, tilable window but let the terminal fill its title bar. */
+	nativeWindow.titleVisibility = NSWindowTitleHidden;
+	nativeWindow.titlebarAppearsTransparent = YES;
+	nativeWindow.titlebarSeparatorStyle = NSTitlebarSeparatorStyleNone;
+	[nativeWindow standardWindowButton:NSWindowCloseButton].hidden = YES;
+	[nativeWindow standardWindowButton:NSWindowMiniaturizeButton].hidden = YES;
+	[nativeWindow standardWindowButton:NSWindowZoomButton].hidden = YES;
+	nativeWindow.movableByWindowBackground = NO;
 	nativeWindow.releasedWhenClosed = NO;
 	nativeWindow.animationBehavior = NSWindowAnimationBehaviorNone;
 	nativeWindow.alphaValue = 0.0;
