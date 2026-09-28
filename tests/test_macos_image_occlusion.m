@@ -9,12 +9,15 @@
 static id<MTLTexture> target;
 static unsigned char pixels[128 * 128 * 4];
 static GraphicsPlacementView imagePlacement;
+static GraphicsPlacementView upperPlacement;
 static const unsigned char redPixel[] = {255, 0, 0, 255};
+static const unsigned char greenPixel[] = {0, 255, 0, 255};
 
 static void
 resetScene(void)
 {
 	image_occlusion_clear(&imageOcclusion);
+	upperPlacement = (GraphicsPlacementView){0};
 	for (int y = 0; y < trow(); y++)
 		for (int x = 0; x < tcol(); x++)
 			tlineviewline(y)[x] = (Glyph){.u = ' ',
@@ -39,6 +42,9 @@ renderScene(int cursor)
 	mac_renderer_set_image_clip(borderpx, borderpx, win.tw, win.th);
 	drawGraphicsPlacement(&imagePlacement,
 	    (void *)(intptr_t)GRAPHICS_STAGE_ABOVE_TEXT);
+	if (upperPlacement.rgba)
+		drawGraphicsPlacement(&upperPlacement,
+		    (void *)(intptr_t)GRAPHICS_STAGE_ABOVE_TEXT);
 	image_occlusion_end(&imageOcclusion);
 	if (cursor) {
 		Glyph g = {.u = ' ', .fg = defaultfg, .bg = TRUECOLOR(0, 255, 0)};
@@ -124,6 +130,39 @@ TEST(metal_cursor_above_occlusion_and_selection_keeps_baseline)
 	ASSERT(cellIsColor(1, 1, 0, 0, 255));
 }
 
+TEST(metal_stacked_images_keep_masks_and_tints_below_higher_image)
+{
+	resetScene();
+	renderScene(0);
+	/* The modal's blue border/blank cells mask the existing red preview. */
+	tlineviewline(1)[1].bg = TRUECOLOR(0, 0, 255);
+	tlineviewline(1)[2].bg = TRUECOLOR(0, 0, 255);
+	upperPlacement = imagePlacement;
+	upperPlacement.serial = upperPlacement.image_id = 2;
+	upperPlacement.rgba = greenPixel;
+	upperPlacement.column = 2;
+	upperPlacement.columns = 2;
+	upperPlacement.z = 2;
+	renderScene(0);
+	ASSERT(cellIsColor(1, 1, 0, 0, 255)); /* border */
+	ASSERT(cellIsColor(2, 1, 0, 255, 0)); /* not lower image's blue mask */
+	ASSERT(cellIsColor(4, 1, 255, 0, 0)); /* untouched preview */
+	/* Upper images still get their own text masks. */
+	tlineviewline(1)[2].bg = TRUECOLOR(255, 255, 255);
+	renderScene(0);
+	ASSERT(cellIsColor(2, 1, 255, 255, 255));
+	tlineviewline(1)[2].bg = TRUECOLOR(0, 0, 255);
+	imagePlacement.selected = 1;
+	renderScene(0);
+	ASSERT(cellIsColor(2, 1, 0, 255, 0)); /* lower selection cannot tint modal */
+	imagePlacement.selected = 0;
+	upperPlacement.rgba = NULL;
+	tlineviewline(1)[1].bg = tlineviewline(1)[2].bg = defaultbg;
+	renderScene(0);
+	ASSERT(cellIsColor(1, 1, 255, 0, 0));
+	ASSERT(cellIsColor(2, 1, 255, 0, 0)); /* closing restores original image */
+}
+
 int
 main(void)
 {
@@ -158,6 +197,7 @@ main(void)
 		RUN_TEST(metal_menu_covers_image_and_restoration_reveals_it);
 		RUN_TEST(metal_default_background_blank_is_opaque_above_image);
 		RUN_TEST(metal_cursor_above_occlusion_and_selection_keeps_baseline);
+		RUN_TEST(metal_stacked_images_keep_masks_and_tints_below_higher_image);
 		image_occlusion_clear(&imageOcclusion);
 		mac_renderer_destroy();
 		return test_summary();

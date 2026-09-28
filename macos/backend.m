@@ -638,7 +638,8 @@ drawGraphicsPlacement(const GraphicsPlacementView *placement, void *context)
 	if (selectedImage) {
 		MacColor color = indexedColor(selectionbg);
 		color.a = 0.45f;
-		mac_renderer_rect(MAC_LAYER_OVERLAY_DECORATION, x, y, width,
+		mac_renderer_rect(stage == GRAPHICS_STAGE_ABOVE_TEXT ?
+		    MAC_LAYER_IMAGE_DECORATION : MAC_LAYER_OVERLAY_DECORATION, x, y, width,
 		    height, color);
 	}
 }

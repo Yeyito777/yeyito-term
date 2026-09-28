@@ -185,6 +185,9 @@ cell (text, attributes, or background, including blank/default-background cells)
 are composited above the image, but below the cursor and terminal overlays.
 Restoring a cell to its baseline reveals that part of the image again. This lets
 TUI menus cover inline images without permanently deleting the placements.
+On Metal, cell masks and selection tints are composited immediately after their
+own positive-z placement, before the next image. Thus a lower image's mask
+cannot punch holes in a higher-z image viewer; cursors remain above all images.
 Named-image retransmissions retain the baseline; selected images temporarily
 suppress occlusion without replacing it. The cache is bounded to 1,048,576 cells
 and pruned after each frame when placements are no longer visible.

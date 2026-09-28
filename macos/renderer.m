@@ -30,6 +30,8 @@ typedef struct {
 typedef struct {
 	uint64_t serial;
 	MacVertex vertices[6];
+	/* Cell masks belong to this placement, not the whole image pass. */
+	size_t occlusionStart[3];
 } MacImageDraw;
 
 typedef struct {
@@ -679,6 +681,9 @@ mac_renderer_image(int stage, uint64_t serial, const uint8_t *rgba,
 	}
 	draw = imageappend(&r.imageLayers[stage]);
 	draw->serial = serial;
+	for (int layer = 0; layer < 3; layer++)
+		draw->occlusionStart[layer] =
+		    r.layers[MAC_LAYER_IMAGE_BACKGROUND + layer].count;
 	scale = (float)r.scale;
 	left = (float)x * scale;
 	top = (float)y * scale;
@@ -752,6 +757,23 @@ encodeImages(id<MTLRenderCommandEncoder> encoder, int stage)
 		    atIndex:0];
 		[encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0
 		    vertexCount:6];
+		if (stage == 2) {
+			/* A lower image's changed cells must not erase a higher image.
+			 * Preserve background/text/decoration order within each placement,
+			 * then continue with the next z-sorted image. */
+			for (int layer = 0; layer < 3; layer++) {
+				MacVertexList *vertices =
+				    &r.layers[MAC_LAYER_IMAGE_BACKGROUND + layer];
+				size_t start = draw->occlusionStart[layer];
+				size_t end = i + 1 < list->count ?
+				    list->items[i + 1].occlusionStart[layer] : vertices->count;
+				if (end > start) {
+					MacVertexList slice = {
+					    .items = vertices->items + start, .count = end - start};
+					encodeLayer(encoder, &slice, r.atlas);
+				}
+			}
+		}
 	}
 	[encoder setScissorRect:(MTLScissorRect){0, 0, drawableWidth, drawableHeight}];
 }
@@ -770,9 +792,6 @@ encodeFrame(id<MTLRenderCommandEncoder> encoder)
 	encodeLayer(encoder, &r.layers[MAC_LAYER_TEXT], r.atlas);
 	encodeLayer(encoder, &r.layers[MAC_LAYER_DECORATION], r.atlas);
 	encodeImages(encoder, 2);
-	encodeLayer(encoder, &r.layers[MAC_LAYER_IMAGE_BACKGROUND], r.atlas);
-	encodeLayer(encoder, &r.layers[MAC_LAYER_IMAGE_TEXT], r.atlas);
-	encodeLayer(encoder, &r.layers[MAC_LAYER_IMAGE_DECORATION], r.atlas);
 	encodeLayer(encoder, &r.layers[MAC_LAYER_OVERLAY_BACKGROUND], r.atlas);
 	encodeLayer(encoder, &r.layers[MAC_LAYER_OVERLAY_TEXT], r.atlas);
 	encodeLayer(encoder, &r.layers[MAC_LAYER_OVERLAY_DECORATION], r.atlas);

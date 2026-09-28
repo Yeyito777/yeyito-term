@@ -12,7 +12,7 @@ enum MacRenderLayer {
 	MAC_LAYER_BACKGROUND = 0,
 	MAC_LAYER_TEXT,
 	MAC_LAYER_DECORATION,
-	/* Changed terminal cells sit above positive-z images, below the cursor. */
+	/* Per-placement changed cells: above their image, below higher images. */
 	MAC_LAYER_IMAGE_BACKGROUND,
 	MAC_LAYER_IMAGE_TEXT,
 	MAC_LAYER_IMAGE_DECORATION,
