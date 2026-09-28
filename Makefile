@@ -62,7 +62,7 @@ app: st macos/Info.plist macos/st.icns
 	chmod 755 $(APP)/Contents/MacOS/st
 	cp -f macos/Info.plist $(APP)/Contents/Info.plist
 	cp -f macos/st.icns $(APP)/Contents/Resources/st.icns
-	cp -f scripts/st-notify scripts/st-save-cmd scripts/st-aerospace-launch $(APP)/Contents/Resources/bin/
+	cp -f scripts/st-notify scripts/st-save-cmd scripts/st-aerospace-launch scripts/st-shell-context.zsh $(APP)/Contents/Resources/bin/
 	chmod 755 $(APP)/Contents/Resources/bin/st-notify $(APP)/Contents/Resources/bin/st-save-cmd \
 		$(APP)/Contents/Resources/bin/st-aerospace-launch
 	codesign --force --deep --sign - $(APP)
@@ -112,7 +112,7 @@ dist: clean
 		macos/pty.h macos/pty.m macos/locale.h macos/locale.c\
 		macos/st-icon.png macos/st.icns\
 		st-$(VERSION)/macos
-	cp -R scripts/st-notify scripts/st-save-cmd scripts/st-aerospace-launch st-$(VERSION)/scripts
+	cp -R scripts/st-notify scripts/st-save-cmd scripts/st-aerospace-launch scripts/st-shell-context.zsh st-$(VERSION)/scripts
 	tar -cf - st-$(VERSION) | gzip > st-$(VERSION).tar.gz
 	rm -rf st-$(VERSION)
 
@@ -298,6 +298,9 @@ test_gpu_regressions: st
 
 test_aerospace_launcher:
 	@./tests/test_aerospace_launcher.sh
+ifeq ($(UNAME_S),Darwin)
+	@zsh -f ./tests/test_shell_context.zsh
+endif
 
 test: test_image_occlusion test_vimnav test_sshind test_scrollback test_cwd test_notif test_persist test_search test_cmdline_layout test_mode_reset test_sync test_clipboard5522 test_graphics test_aerospace_launcher
 ifeq ($(UNAME_S),Darwin)

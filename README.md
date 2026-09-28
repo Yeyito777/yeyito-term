@@ -93,7 +93,30 @@ AeroSpace bindings do not expand `~` in executable paths:
 
 ```toml
 alt-shift-enter = 'exec-and-forget /Users/you/Applications/st.app/Contents/Resources/bin/st-aerospace-launch'
+alt-shift-space = 'exec-and-forget /Users/you/Applications/st.app/Contents/Resources/bin/st-aerospace-launch --inherit-cwd'
 ```
+
+On macOS, `--inherit-cwd` starts in the focused native st window's PTY
+child's current directory. With no st focused, or if that directory cannot
+be read or accessed, it falls back to `$HOME`. Without the option, the
+launcher always starts in `$HOME`. This uses the local process directory,
+not a remote SSH directory.
+
+To also reactivate the focused shell's Python venv/virtualenv, add this at
+the **end** of `~/.zshrc`:
+
+```zsh
+[[ -r "$HOME/Applications/st.app/Contents/Resources/bin/st-shell-context.zsh" ]] &&
+  source "$HOME/Applications/st.app/Contents/Resources/bin/st-shell-context.zsh"
+```
+
+Existing shells need to source that file once. The hook records only
+`VIRTUAL_ENV` in a private per-shell file, updates it at each prompt and
+before commands, and clears it on deactivation/exit. The new shell sources
+that environment's `bin/activate` after its normal setup, including a working
+`deactivate` function. No focused venv means a normal shell. This does not
+clone arbitrary sourced shell functions, Conda environments, or remote SSH
+state.
 
 The helper records the new `st` process ID and asks AeroSpace for the window
 owned by that exact process before moving and focusing it. This remains

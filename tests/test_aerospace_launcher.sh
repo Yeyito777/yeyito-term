@@ -6,6 +6,7 @@ CDPATH=
 repo=$(cd -- "$(dirname -- "$0")/.." && pwd)
 tmp=${TMPDIR:-/tmp}/st-aerospace-launcher-test.$$
 mkdir -p "$tmp/home" "$tmp/bin"
+tmp=$(cd "$tmp" && pwd -P)
 log=$tmp/aerospace.log
 pids=$tmp/st.pids
 ready=$tmp/ready
@@ -26,6 +27,8 @@ trap cleanup EXIT INT TERM
 cat > "$tmp/bin/st" <<'EOF'
 #!/bin/sh
 printf 'managed %s %s\n' "$$" "${ST_AEROSPACE_MANAGED:-}" >> "$FAKE_REVEAL_LOG"
+printf '%s\n' "$PWD" > "$FAKE_ST_READY_DIR/$$.cwd"
+printf '%s\n' "${ST_INHERIT_VIRTUAL_ENV-}" > "$FAKE_ST_READY_DIR/$$.venv"
 trap 'printf "reveal %s\n" "$$" >> "$FAKE_REVEAL_LOG"' USR1
 printf '%s\n' "$$" >> "$FAKE_ST_PIDS"
 : > "$FAKE_ST_READY_DIR/$$"
@@ -45,6 +48,10 @@ case "$command" in
 		printf 'TEST\n'
 		;;
 	list-windows)
+		if [ "${1:-}" = --focused ]; then
+			printf '%s\n' "${FAKE_FOCUSED:-}"
+			exit 0
+		fi
 		pid=
 		while [ "$#" -gt 0 ]; do
 			if [ "$1" = --pid ]; then
@@ -84,7 +91,7 @@ run_launcher()
 	AEROSPACE_BIN=$tmp/bin/aerospace \
 	ST_BINARY=$tmp/bin/st \
 	ST_AEROSPACE_POLL_INTERVAL=0.001 \
-	"$repo/scripts/st-aerospace-launch"
+	"$repo/scripts/st-aerospace-launch" "$@"
 }
 
 launch_count=12
@@ -139,3 +146,72 @@ for window_id in $focus_ids; do
 done
 
 printf 'AeroSpace launcher concurrency and reveal handshake test passed\n'
+
+check_directory()
+{
+	expected=$1
+	shift
+	run_launcher "$@"
+	pid=$(tail -n 1 "$pids")
+	actual=$(cat "$ready/$pid.cwd")
+	if [ "$actual" != "$expected" ]; then
+		printf 'Expected cwd <%s>, got <%s>\n' "$expected" "$actual" >&2
+		exit 1
+	fi
+}
+
+# No focus and non-terminal focus both retain the normal home-directory launch.
+export FAKE_FOCUSED=
+check_directory "$tmp/home" --inherit-cwd
+export FAKE_FOCUSED="com.apple.finder $$"
+check_directory "$tmp/home" --inherit-cwd
+
+# Real parent/PTY-child stand-in: only the child changes directory, so reading
+# the terminal parent's cwd would fail this test. Include spaces and punctuation.
+directory="$tmp/project with spaces ' and \$"
+mkdir -p "$directory"
+sh -c 'sh -c '\''cd "$1"; exec sleep 60'\'' sh "$1" & wait' sh "$directory" &
+terminal_pid=$!
+printf '%s\n' "$terminal_pid" >> "$pids"
+attempt=0
+child_pid=
+while [ "$attempt" -lt 100 ]; do
+	child_pid=$(/usr/bin/pgrep -P "$terminal_pid" | sed -n '1p')
+	if [ -n "$child_pid" ]; then
+		actual=$(/usr/sbin/lsof -a -p "$child_pid" -d cwd -Fn 2>/dev/null |
+			sed -n 's/^n//p')
+		[ "$actual" = "$directory" ] && break
+	fi
+	attempt=$((attempt + 1))
+	sleep 0.01
+done
+[ -n "$child_pid" ]
+printf '%s\n' "$child_pid" >> "$pids"
+export FAKE_FOCUSED="io.yeyito.st $terminal_pid"
+check_directory "$directory" --inherit-cwd
+venv="$directory/venv with spaces"
+mkdir -p "$venv/bin" "$tmp/home/.cache/st-shell-context"
+: > "$venv/bin/activate"
+context="$tmp/home/.cache/st-shell-context/$terminal_pid-$child_pid.venv"
+printf '%s\n' "$venv" > "$context"
+check_directory "$directory" --inherit-cwd
+[ "$(cat "$ready/$pid.venv")" = "$venv" ]
+# The original shortcut must still open at home even with a terminal focused.
+check_directory "$tmp/home"
+[ -z "$(cat "$ready/$pid.venv")" ]
+# Other windows must not inherit the previously focused terminal's venv.
+export FAKE_FOCUSED="com.apple.finder $$"
+check_directory "$tmp/home" --inherit-cwd
+[ -z "$(cat "$ready/$pid.venv")" ]
+export FAKE_FOCUSED="io.yeyito.st $terminal_pid"
+# Deactivation and a deleted venv both launch a clean shell.
+printf '\n' > "$context"
+check_directory "$directory" --inherit-cwd
+[ -z "$(cat "$ready/$pid.venv")" ]
+printf '%s\n' "$venv/missing" > "$context"
+check_directory "$directory" --inherit-cwd
+[ -z "$(cat "$ready/$pid.venv")" ]
+kill "$child_pid" "$terminal_pid" 2>/dev/null || true
+wait "$terminal_pid" 2>/dev/null || true
+check_directory "$tmp/home" --inherit-cwd
+printf 'AeroSpace launcher cwd inheritance and fallback tests passed\n'
