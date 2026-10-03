@@ -4,6 +4,14 @@
 #define ST_MACOS_TEXT_INPUT_H
 
 static inline int
+macos_is_legacy_ctrl_slash(unsigned long symbol, int shift, int option,
+		int control, int command)
+{
+	/* AppKit leaves Ctrl+/ as '/', unlike the legacy terminal byte ^_. */
+	return symbol == '/' && control && !shift && !option && !command;
+}
+
+static inline int
 macos_is_em_dash_keystroke(int key_code, int shift, int option,
 		int control, int command)
 {

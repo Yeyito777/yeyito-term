@@ -1159,6 +1159,14 @@ handleKeyEvent(KeySym symbol, uint state, const char *buffer, int length,
 	if (IS_SET(MODE_KITTYKBD) && kittyWrite(symbol, state, buffer,
 	    length, repeat ? 2 : 1))
 		return 1;
+	/* Without the Kitty protocol, Cocoa gives us a literal '/' for Ctrl+/.
+	 * Send the conventional Ctrl+_ byte so TUIs can distinguish it from
+	 * search. Keep Kitty's disambiguated encoding when it is enabled. */
+	if (macos_is_legacy_ctrl_slash(symbol, state & ShiftMask,
+	    state & Mod1Mask, state & ControlMask, state & Mod4Mask)) {
+		ttywrite("\037", 1, 1);
+		return 1;
+	}
 	/* AppKit routes Escape and Tab through doCommandBySelector: instead of
 	 * insertText:. Emit the bytes XLookupString supplies on the X11 backend,
 	 * while leaving ordinary and composed text on the NSTextInput path. */
