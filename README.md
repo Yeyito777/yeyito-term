@@ -125,6 +125,11 @@ mistake another terminal's window for their own. An `st` started by this helper
 also remains transparent until AeroSpace has completed its layout and native
 focus pass, so its initial centered frame is never shown before the tiled one.
 Direct launches keep the normal standalone reveal behavior.
+`ST_AEROSPACE_MANAGED` is a one-window launch flag: st consumes it before
+starting its PTY child, so shells, Exocortex, and editor windows cannot inherit
+the hidden-until-signaled mode. After upgrading from a version that leaked
+this flag, reopen existing terminal sessions (or unset it in their shells);
+already-running child processes retain their old environment.
 
 # Zsh integration
 

@@ -2283,7 +2283,7 @@ run:
 
 	[NSApplication sharedApplication];
 	[NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
-	managedWindowReveal = getenv("ST_AEROSPACE_MANAGED") != NULL;
+	managedWindowReveal = macos_consume_managed_reveal();
 	setupManagedWindowRevealSource();
 	appDelegate = [STAppDelegate new];
 	NSApp.delegate = appDelegate;
