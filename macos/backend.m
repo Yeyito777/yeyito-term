@@ -736,13 +736,44 @@ xresetmode(void)
 	xsetmode(0, win.mode ^ winmoderestore(win.mode));
 }
 
+/* The view's tracking area always delivers mouseMoved:, and mouseReport()
+ * filters motion by the 1002/1003 modes, so there is no event mask to flip. */
 void xsetpointermotion(int set) { (void)set; }
+
+static NSCursor *
+nativeMouseCursor(void)
+{
+	return cursorKind == 1 ? NSCursor.arrowCursor :
+	    cursorKind == 2 ? NSCursor.pointingHandCursor : NSCursor.IBeamCursor;
+}
+
+/* Whether the pointer is over the terminal in the key window, with no other
+ * window covering it there: only then may st take over the cursor. */
+static BOOL
+nativePointerInView(void)
+{
+	if (!nativeWindow || !nativeView || !NSApp.isActive ||
+	    !nativeWindow.isKeyWindow)
+		return NO;
+	NSPoint screen = NSEvent.mouseLocation;
+	if ([NSWindow windowNumberAtPoint:screen belowWindowWithWindowNumber:0] !=
+	    nativeWindow.windowNumber)
+		return NO;
+	NSPoint point = [nativeView convertPoint:
+	    [nativeWindow convertPointFromScreen:screen] fromView:nil];
+	return NSPointInRect(point, nativeView.visibleRect);
+}
 
 void
 xsetmousecursor(int shape)
 {
 	cursorKind = shape;
 	[nativeWindow invalidateCursorRectsForView:nativeView];
+	/* Rebuilt cursor rects only take effect once the pointer moves again,
+	 * but apps send OSC 777 mouseshape in reply to the motion that already
+	 * happened.  Show the new shape now, as XDefineCursor does on X11. */
+	if (nativePointerInView())
+		[nativeMouseCursor() set];
 }
 
 void
@@ -1530,9 +1561,15 @@ mouseReport(int type, uint button, uint state, int x, int y)
 
 - (void)resetCursorRects
 {
-	NSCursor *cursor = cursorKind == 1 ? NSCursor.arrowCursor :
-	    cursorKind == 2 ? NSCursor.pointingHandCursor : NSCursor.IBeamCursor;
-	[self addCursorRect:self.bounds cursor:cursor];
+	[self addCursorRect:self.bounds cursor:nativeMouseCursor()];
+}
+
+/* Sent by the NSTrackingCursorUpdate area when the pointer enters the view;
+ * answer with the app-chosen shape rather than the responder chain's. */
+- (void)cursorUpdate:(NSEvent *)event
+{
+	(void)event;
+	[nativeMouseCursor() set];
 }
 
 @end
