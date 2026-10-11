@@ -1178,6 +1178,23 @@ gpuoccludecell(Glyph glyph, int x, int y, void *context)
 	gpudrawcell(glyph, x, y, GPU_CELL_IMAGE_OCCLUSION, 1);
 }
 
+/* Composite the cells that cover one positive-z placement before the next
+ * placement is drawn, as Metal does. Batching every placement's covers until
+ * all images were drawn let a lower image's cover cells (an image viewer's
+ * text) punch holes in a higher-z placement such as the viewer's image. */
+static void
+gpudrawimageocclusion(void)
+{
+	gpudrawbatch(&gpu.ibg, 0);
+	gpudrawbatch(&gpu.itext, 1);
+	gpudrawbatch(&gpu.ictext, 2);
+	gpudrawbatch(&gpu.ideco, 0);
+	gpubatchclear(&gpu.ibg);
+	gpubatchclear(&gpu.itext);
+	gpubatchclear(&gpu.ictext);
+	gpubatchclear(&gpu.ideco);
+}
+
 static void
 gpudrawimage(const GraphicsPlacementView *placement, void *context)
 {
@@ -1259,6 +1276,7 @@ gpudrawimage(const GraphicsPlacementView *placement, void *context)
 	 * and other changed cells immediately resume occluding their own regions. */
 	image_occlusion_draw(&gpu.imageocclusion, placement, tcol(), trow(),
 	    tlineviewline, selected_image ? NULL : gpuoccludecell, NULL);
+	gpudrawimageocclusion();
 }
 
 static void

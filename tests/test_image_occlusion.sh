@@ -132,6 +132,16 @@ if wait_for("reselect-under-highlight"):
     emit(b"\x1b[5;10H\x1b_Ga=p,i=424242,c=8,r=4,C=1,z=1478,q=2\x1b\\")
     ready("reselected-ready")
 
+if wait_for("open-viewer"):
+    # An image viewer: its box text covers the lower image, then a higher-z
+    # image is placed over the same cells. Cover cells of the lower image must
+    # be composited before the viewer, never punched through it.
+    for row in range(5, 9):
+        emit(f"\x1b[{row};10H".encode() + b"\x1b[38;2;255;255;255;48;2;0;90;230mVIEWVIEW\x1b[0m")
+    emit(b"\x1b_Ga=t,t=d,f=32,s=1,v=1,i=434343,q=2;AP8A/w==\x1b\\")
+    emit(b"\x1b[5;10H\x1b_Ga=p,i=434343,c=8,r=4,C=1,z=1479,q=2\x1b\\")
+    ready("viewer-ready")
+
 time.sleep(20)
 ' "$tmpdir" >"$tmpdir/st.out" 2>"$tmpdir/st.err" &
 st_pid=$!
@@ -176,15 +186,24 @@ wait_file "$tmpdir/reselected-ready"
 sleep 0.15
 xenv screenshot -e "$env_name" -o "$tmpdir/reselected.png" >/dev/null
 
-python3 - "$tmpdir/baseline.png" "$tmpdir/right-menu.png" "$tmpdir/left-menu.png" "$tmpdir/selected.png" "$tmpdir/unselected.png" "$tmpdir/restored.png" "$tmpdir/reselected.png" <<'PY'
+touch "$tmpdir/open-viewer"
+wait_file "$tmpdir/viewer-ready"
+sleep 0.15
+xenv screenshot -e "$env_name" -o "$tmpdir/viewer.png" >/dev/null
+
+python3 - "$tmpdir/baseline.png" "$tmpdir/right-menu.png" "$tmpdir/left-menu.png" "$tmpdir/selected.png" "$tmpdir/unselected.png" "$tmpdir/restored.png" "$tmpdir/reselected.png" "$tmpdir/viewer.png" <<'PY'
 import sys
 from PIL import Image
 
-baseline, right_menu, left_menu, selected, unselected, restored, reselected = [Image.open(path).convert("RGB") for path in sys.argv[1:8]]
+baseline, right_menu, left_menu, selected, unselected, restored, reselected, viewer = [Image.open(path).convert("RGB") for path in sys.argv[1:9]]
 
 def magenta(pixel):
     r, g, b = pixel
     return r > 235 and g < 35 and b > 235
+
+def green(pixel):
+    r, g, b = pixel
+    return r < 35 and g > 235 and b < 35
 
 def blue(pixel):
     r, g, b = pixel
@@ -349,5 +368,21 @@ if reselected_magenta < image_area * 0.95:
         f"erasing it hid image rows: magenta={reselected_magenta}/{image_area}"
     )
 
-print("Image occlusion regression passed: halves occlude independently, selection is atomic, both states restore correctly, and selection decoration never becomes a baseline")
+viewer_green = sum(
+    green(viewer.getpixel((x, y)))
+    for y in range(y0, y1 + 1)
+    for x in range(x0, x1 + 1)
+)
+viewer_blue = sum(
+    blue(viewer.getpixel((x, y)))
+    for y in range(y0, y1 + 1)
+    for x in range(x0, x1 + 1)
+)
+if viewer_green < image_area * 0.95 or viewer_blue > image_area * 0.02:
+    raise SystemExit(
+        f"cells covering a lower image punched through a higher-z viewer image: "
+        f"green={viewer_green}/{image_area}, blue={viewer_blue}/{image_area}"
+    )
+
+print("Image occlusion regression passed: halves occlude independently, selection is atomic, both states restore correctly, selection decoration never becomes a baseline, and covers stay below higher-z images")
 PY

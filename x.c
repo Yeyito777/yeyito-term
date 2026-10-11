@@ -2700,10 +2700,6 @@ xfinishdraw(void)
 		gpudrawbatch(&gpu.ctext, 2);
 		gpudrawbatch(&gpu.deco, 0);
 		gpudrawimages(GRAPHICS_STAGE_ABOVE_TEXT);
-		gpudrawbatch(&gpu.ibg, 0);
-		gpudrawbatch(&gpu.itext, 1);
-		gpudrawbatch(&gpu.ictext, 2);
-		gpudrawbatch(&gpu.ideco, 0);
 		gpudrawbatch(&gpu.obg, 0);
 		gpudrawbatch(&gpu.otext, 1);
 		gpudrawbatch(&gpu.octext, 2);
