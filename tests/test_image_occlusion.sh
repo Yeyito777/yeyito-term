@@ -117,6 +117,21 @@ if wait_for("restore-image"):
     emit(b"\x1b_Ga=p,i=424242,c=8,r=4,C=1,z=1478,q=2\x1b\\")
     ready("restore-ready")
 
+if wait_for("reselect-under-highlight"):
+    # Like a TUI closing its image viewer with the history cursor on a
+    # thumbnail row: the placement leaves, then returns already selected while
+    # a cursor-line highlight paints one covered row.
+    emit(b"\x1b[5;10H\x1b_Ga=d,d=z,z=1478,q=2\x1b\\")
+    time.sleep(0.3)
+    emit(b"\x1b[6;1H\x1b[48;2;0;90;230m\x1b[2K\x1b[6;10H" + underlay + b"\x1b[0m")
+    emit(b"\x1b[5;10H\x1b_Ga=p,i=424242,c=8,r=4,C=1,z=1478,V=1,q=2\x1b\\")
+    time.sleep(0.3)
+    # The cursor leaves: the highlight is erased and the image deselected.
+    # The plain row is the original background under the image, not a cover.
+    emit(b"\x1b[6;1H\x1b[2K\x1b[6;10H" + underlay)
+    emit(b"\x1b[5;10H\x1b_Ga=p,i=424242,c=8,r=4,C=1,z=1478,q=2\x1b\\")
+    ready("reselected-ready")
+
 time.sleep(20)
 ' "$tmpdir" >"$tmpdir/st.out" 2>"$tmpdir/st.err" &
 st_pid=$!
@@ -156,11 +171,16 @@ wait_file "$tmpdir/restore-ready"
 sleep 0.15
 xenv screenshot -e "$env_name" -o "$tmpdir/restored.png" >/dev/null
 
-python3 - "$tmpdir/baseline.png" "$tmpdir/right-menu.png" "$tmpdir/left-menu.png" "$tmpdir/selected.png" "$tmpdir/unselected.png" "$tmpdir/restored.png" <<'PY'
+touch "$tmpdir/reselect-under-highlight"
+wait_file "$tmpdir/reselected-ready"
+sleep 0.15
+xenv screenshot -e "$env_name" -o "$tmpdir/reselected.png" >/dev/null
+
+python3 - "$tmpdir/baseline.png" "$tmpdir/right-menu.png" "$tmpdir/left-menu.png" "$tmpdir/selected.png" "$tmpdir/unselected.png" "$tmpdir/restored.png" "$tmpdir/reselected.png" <<'PY'
 import sys
 from PIL import Image
 
-baseline, right_menu, left_menu, selected, unselected, restored = [Image.open(path).convert("RGB") for path in sys.argv[1:7]]
+baseline, right_menu, left_menu, selected, unselected, restored, reselected = [Image.open(path).convert("RGB") for path in sys.argv[1:8]]
 
 def magenta(pixel):
     r, g, b = pixel
@@ -318,5 +338,16 @@ if restored_magenta < image_area * 0.95:
         f"magenta={restored_magenta}/{image_area}"
     )
 
-print("Image occlusion regression passed: halves occlude independently, selection is atomic, and both states restore correctly")
+reselected_magenta = sum(
+    magenta(reselected.getpixel((x, y)))
+    for y in range(y0, y1 + 1)
+    for x in range(x0, x1 + 1)
+)
+if reselected_magenta < image_area * 0.95:
+    raise SystemExit(
+        f"a highlight under an image placed while selected became its baseline; "
+        f"erasing it hid image rows: magenta={reselected_magenta}/{image_area}"
+    )
+
+print("Image occlusion regression passed: halves occlude independently, selection is atomic, both states restore correctly, and selection decoration never becomes a baseline")
 PY

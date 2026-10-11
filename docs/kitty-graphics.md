@@ -189,7 +189,10 @@ On Metal, cell masks and selection tints are composited immediately after their
 own positive-z placement, before the next image. Thus a lower image's mask
 cannot punch holes in a higher-z image viewer; cursors remain above all images.
 Named-image retransmissions retain the baseline; selected images temporarily
-suppress occlusion without replacing it. The cache is bounded to 1,048,576 cells
+suppress occlusion without replacing it. A selected image never snapshots cells,
+because applications decorate the cells under it (a TUI cursor-line highlight,
+for example); a placement first shown selected takes its baseline once it is
+deselected, so the undecorated row that returns is not mistaken for a cover. The cache is bounded to 1,048,576 cells
 and pruned after each frame when placements are no longer visible.
 
 `make test` covers this shared policy on both platforms. On macOS it also runs

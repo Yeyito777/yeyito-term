@@ -16,8 +16,9 @@ typedef void (*ImageOcclusionDraw)(Glyph, int, int, void *);
 
 /* Call begin/end once per completed frame, even when no images are visible.
  * Baselines follow Line identity through scrollback and are bounded separately
- * from decoded image memory. A selected image keeps its baseline but passes a
- * NULL draw callback so it remains one atomic visual object. */
+ * from decoded image memory. A selected image passes a NULL draw callback so
+ * it remains one atomic visual object; that keeps its baseline alive but never
+ * snapshots cells, which may carry the application's selection decoration. */
 void image_occlusion_begin(ImageOcclusion *state);
 void image_occlusion_end(ImageOcclusion *state);
 void image_occlusion_clear(ImageOcclusion *state);

@@ -205,7 +205,12 @@ image_occlusion_draw(ImageOcclusion *state,
 	if (placement->z < 0)
 		return;
 	baseline = baseline_get(state, placement);
-	if (!baseline)
+	/* A selected image is drawn whole, so keep its baseline alive without
+	 * reading cells. Applications decorate the cells under a selected image
+	 * (a cursor-line highlight, for instance); snapshotting them would make
+	 * the undecorated cells that return on deselection occlude the image. A
+	 * placement first shown selected gets its baseline once deselected. */
+	if (!baseline || !draw)
 		return;
 	firstx = MAX(0, placement->column);
 	lastx = MIN(columns, placement->column + placement->columns);
@@ -222,8 +227,6 @@ image_occlusion_draw(ImageOcclusion *state,
 			 * the corresponding part of the image again. */
 			cell = baseline_cell(state, baseline, line, x, line[x]);
 			if (!cell || glyph_equal(cell->glyph, line[x]))
-				continue;
-			if (!draw)
 				continue;
 			if ((line[x].mode & ATTR_WDUMMY) && x > 0) {
 				draw(line[x - 1], x - 1, y, context);

@@ -97,6 +97,38 @@ TEST(selection_preserves_baseline)
 	ASSERT_EQ(1, count);
 }
 
+TEST(selected_placement_does_not_snapshot_decoration)
+{
+	/* A TUI re-places a thumbnail with V=1 while its cursor-line highlight
+	 * paints one covered row (after a viewer deleted and restored it). The
+	 * highlight must not become the baseline: once the cursor leaves, the
+	 * plain row is the image's original background, not an occluding change. */
+	setup();
+	frame(0);
+	image_occlusion_begin(&state); /* viewer open: placement absent */
+	image_occlusion_end(&state);
+	ASSERT_NULL(state.baselines);
+	for (int x = 0; x < 8; x++)
+		grid[2][x].bg = 4;
+	grid[2][3].mode = ATTR_REVERSE; /* inline history cursor */
+	frame(1);
+	ASSERT_EQ(0, count);
+	ASSERT_EQ(0, state.cells);
+	ASSERT_NOT_NULL(state.baselines);
+	for (int x = 0; x < 8; x++)
+		grid[2][x].bg = 0;
+	grid[2][3].mode = 0;
+	frame(0);
+	ASSERT_EQ(0, count);
+	ASSERT_EQ(8, state.cells);
+	/* The baseline taken after deselection is the plain row, so a later
+	 * decoration without selection still occludes as a menu would. */
+	grid[2][1].bg = 4;
+	frame(0);
+	ASSERT_EQ(1, count);
+	ASSERT_EQ(1, drawn[2][1]);
+}
+
 TEST(negative_z_never_occludes)
 {
 	setup();
@@ -215,6 +247,7 @@ main(void)
 	RUN_TEST(menu_cells_occlude_and_restore_independently);
 	RUN_TEST(erased_text_and_style_changes_occlude);
 	RUN_TEST(selection_preserves_baseline);
+	RUN_TEST(selected_placement_does_not_snapshot_decoration);
 	RUN_TEST(negative_z_never_occludes);
 	RUN_TEST(retransmit_keeps_named_image_baseline);
 	RUN_TEST(anonymous_images_use_serial);

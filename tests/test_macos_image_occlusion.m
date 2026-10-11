@@ -130,6 +130,25 @@ TEST(metal_cursor_above_occlusion_and_selection_keeps_baseline)
 	ASSERT(cellIsColor(1, 1, 0, 0, 255));
 }
 
+TEST(metal_image_first_shown_selected_reveals_undecorated_row)
+{
+	/* A thumbnail restored with V=1 under a TUI cursor-line highlight must
+	 * show its full row once the cursor leaves and the highlight is erased. */
+	resetScene();
+	imagePlacement.selected = 1;
+	for (int x = 0; x < tcol(); x++)
+		tlineviewline(2)[x].bg = TRUECOLOR(0, 0, 255);
+	renderScene(0);
+	ASSERT_EQ(0, imageOcclusion.cells);
+	imagePlacement.selected = 0;
+	for (int x = 0; x < tcol(); x++)
+		tlineviewline(2)[x].bg = defaultbg;
+	renderScene(0);
+	ASSERT(cellIsColor(1, 2, 255, 0, 0));
+	ASSERT(cellIsColor(4, 2, 255, 0, 0));
+	ASSERT_EQ(0, r.layers[MAC_LAYER_IMAGE_BACKGROUND].count);
+}
+
 TEST(metal_stacked_images_keep_masks_and_tints_below_higher_image)
 {
 	resetScene();
@@ -197,6 +216,7 @@ main(void)
 		RUN_TEST(metal_menu_covers_image_and_restoration_reveals_it);
 		RUN_TEST(metal_default_background_blank_is_opaque_above_image);
 		RUN_TEST(metal_cursor_above_occlusion_and_selection_keeps_baseline);
+		RUN_TEST(metal_image_first_shown_selected_reveals_undecorated_row);
 		RUN_TEST(metal_stacked_images_keep_masks_and_tints_below_higher_image);
 		image_occlusion_clear(&imageOcclusion);
 		mac_renderer_destroy();
