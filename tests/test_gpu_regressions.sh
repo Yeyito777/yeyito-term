@@ -261,9 +261,9 @@ xenv -e "$env_name" key ctrl+v >/dev/null
 # descenders, rather than stale integer-grid geometry.
 xenv -e "$env_name" key Shift+Escape >/dev/null
 sleep 0.1
-xenv -e "$env_name" type ':' >/dev/null
+printf ':' | xenv -e "$env_name" type >/dev/null
 sleep 0.1
-xenv -e "$env_name" type 'echo glyphs gjpqy' >/dev/null
+printf 'echo glyphs gjpqy' | xenv -e "$env_name" type >/dev/null
 sleep 0.2
 cmdshot="$tmpdir/cmdline.png"
 xenv screenshot -e "$env_name" -o "$cmdshot" >/dev/null
