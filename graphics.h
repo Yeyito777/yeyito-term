@@ -12,6 +12,7 @@
 #define GRAPHICS_STAGE_ABOVE_TEXT       2
 #define GRAPHICS_HEADER_MAX             2048U
 #define GRAPHICS_DATA_MAX        (64U * 1024U * 1024U)
+#define GR_SELECTION_TEXT_MAX    (64U * 1024U)
 /* A direct-transfer payload is base64, so its wire representation can be up
  * to four thirds the size of the bounded decoded image data.  Although Kitty
  * recommends 4096-byte chunks, clients such as kitten icat also emit a whole
@@ -53,7 +54,18 @@ typedef struct {
 	int z;
 	/** st extension set by V=1: tint this placement as an atomic selection. */
 	int selected;
+	/** The image's PNG "selection-text", or NULL: an atomic text object. */
+	const char *text;
 } GraphicsPlacementView;
+
+/** A placed image that copies as text (see graphics_text_objects). */
+typedef struct {
+	int column;
+	int row;
+	int columns;
+	int rows;
+	const char *text;
+} GraphicsTextObject;
 
 typedef void (*GraphicsDrawCallback)(const GraphicsPlacementView *, void *);
 typedef void (*GraphicsImageFreeCallback)(uint64_t, void *);
@@ -77,6 +89,10 @@ int graphics_line_extent(Line line);
 int graphics_selection_png(int alt, int (*line_to_row)(Line, int),
 		GraphicsSelectionCallback selected, void *context,
 		unsigned char **png, size_t *png_length);
+size_t graphics_text_objects(int alt, int (*line_to_row)(Line, int),
+		GraphicsTextObject *objects, size_t max);
+int graphics_row_has_text_object(int alt, int row,
+		int (*line_to_row)(Line, int));
 void graphics_clear_buffer(int alt);
 void graphics_reset(void);
 void graphics_set_image_free_callback(GraphicsImageFreeCallback callback,

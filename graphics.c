@@ -111,6 +111,8 @@ struct GraphicsImage {
 	unsigned char *encoded;
 	unsigned int placements;
 	int delete_candidate;
+	/* PNG "selection-text" chunk: what selecting this image copies. */
+	char *text;
 };
 
 struct GraphicsPlacement {
@@ -593,6 +595,7 @@ delete_image(GraphicsImage *image)
 			total_image_bytes -= image->bytes;
 			free(image->rgba);
 			free(image->encoded);
+			free(image->text);
 			free(image);
 			image_count--;
 			return;
@@ -808,6 +811,121 @@ set_response(GraphicsCommandResult *result, const GraphicsCommand *command,
 	}
 	if (length > 0 && (size_t)length < sizeof(result->response))
 		result->response_len = (size_t)length;
+}
+
+static uint32_t
+png_u32(const unsigned char *p)
+{
+	return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 |
+	    (uint32_t)p[2] << 8 | p[3];
+}
+
+/* Copy UTF-8 text, dropping control characters other than tab and newline
+ * (C0, DEL and C1) so a copied image cannot smuggle terminal controls.
+ * Returns NULL for malformed UTF-8. */
+static char *
+sanitize_selection_text(const unsigned char *text, size_t length, int latin1)
+{
+	char *out = malloc(length * 2 + 1), *p = out;
+	size_t i = 0;
+
+	if (!out)
+		return NULL;
+	while (i < length) {
+		unsigned char c = text[i];
+		size_t n = 1, k;
+		uint32_t cp;
+		if (latin1 || c < 0x80) {
+			cp = c;
+		} else if ((c & 0xe0) == 0xc0) {
+			n = 2, cp = c & 0x1f;
+		} else if ((c & 0xf0) == 0xe0) {
+			n = 3, cp = c & 0x0f;
+		} else if ((c & 0xf8) == 0xf0) {
+			n = 4, cp = c & 0x07;
+		} else {
+			goto invalid;
+		}
+		if (i + n > length)
+			goto invalid;
+		for (k = 1; k < n; k++) {
+			if ((text[i + k] & 0xc0) != 0x80)
+				goto invalid;
+			cp = cp << 6 | (text[i + k] & 0x3f);
+		}
+		if ((n == 2 && cp < 0x80) || (n == 3 && cp < 0x800) ||
+		    (n == 4 && (cp < 0x10000 || cp > 0x10ffff)) ||
+		    (cp >= 0xd800 && cp <= 0xdfff))
+			goto invalid;
+		i += n;
+		if ((cp < 0x20 && cp != '\t' && cp != '\n') || (cp >= 0x7f && cp < 0xa0))
+			continue;
+		if (cp < 0x80) {
+			*p++ = (char)cp;
+		} else if (cp < 0x800) {
+			*p++ = (char)(0xc0 | cp >> 6);
+			*p++ = (char)(0x80 | (cp & 0x3f));
+		} else if (cp < 0x10000) {
+			*p++ = (char)(0xe0 | cp >> 12);
+			*p++ = (char)(0x80 | (cp >> 6 & 0x3f));
+			*p++ = (char)(0x80 | (cp & 0x3f));
+		} else {
+			*p++ = (char)(0xf0 | cp >> 18);
+			*p++ = (char)(0x80 | (cp >> 12 & 0x3f));
+			*p++ = (char)(0x80 | (cp >> 6 & 0x3f));
+			*p++ = (char)(0x80 | (cp & 0x3f));
+		}
+	}
+	*p = '\0';
+	if (p == out) {
+		free(out);
+		return NULL;
+	}
+	return out;
+invalid:
+	free(out);
+	return NULL;
+}
+
+/* st extension: a PNG may carry the text its image shows (a typeset
+ * equation's TeX) in an uncompressed iTXt or tEXt chunk with the keyword
+ * "selection-text".  Selecting the image then copies that text. */
+static char *
+png_selection_text(const unsigned char *png, size_t length)
+{
+	static const char keyword[] = "selection-text";
+	const size_t keyword_size = sizeof(keyword);
+	size_t offset = 8;
+
+	if (length < 8 || memcmp(png, "\x89PNG\r\n\x1a\n", 8) != 0)
+		return NULL;
+	while (offset + 12 <= length) {
+		uint32_t chunk = png_u32(png + offset);
+		const unsigned char *type = png + offset + 4, *data = png + offset + 8;
+		if (chunk > length - offset - 12)
+			return NULL;
+		if (!memcmp(type, "IEND", 4))
+			return NULL;
+		if (chunk > keyword_size && chunk - keyword_size <= GR_SELECTION_TEXT_MAX &&
+		    !memcmp(data, keyword, keyword_size)) {
+			const unsigned char *rest = data + keyword_size;
+			size_t left = chunk - keyword_size;
+			if (!memcmp(type, "tEXt", 4))
+				return sanitize_selection_text(rest, left, 1);
+			if (!memcmp(type, "iTXt", 4) && left >= 2 && rest[0] == 0) {
+				/* Uncompressed; skip the language tag and translated keyword. */
+				const unsigned char *end = rest + left, *p = rest + 2;
+				int fields;
+				for (fields = 0; fields < 2 && p < end; p++)
+					if (!*p)
+						fields++;
+				if (fields == 2)
+					return sanitize_selection_text(p, (size_t)(end - p), 0);
+			}
+		}
+		offset += 12 + (size_t)chunk;
+	}
+	return NULL;
 }
 
 static GraphicsImage *
@@ -1125,6 +1243,8 @@ process_data_command(const GraphicsCommand *command, const unsigned char *data,
 		stbi_image_free(rgba);
 		goto failed;
 	}
+	if (command->format == 100 && command->compression != 'z')
+		image->text = png_selection_text(data, length);
 	response_id = image->id;
 	if (command->action == 'T') {
 		placement = place_image(image, command, anchor, column, alt,
@@ -1379,6 +1499,7 @@ graphics_draw(int alt, int stage, int cell_width, int cell_height,
 		view.natural_size = placement->natural_size;
 		view.z = placement->z;
 		view.selected = placement->selected;
+		view.text = placement->image->text;
 		draw(&view, context);
 		placement->access = placement->image->access = access_clock++;
 	}
@@ -1598,6 +1719,48 @@ graphics_selection_png(int alt, int (*line_to_row)(Line, int),
 		match = placement;
 	}
 	return match ? placement_png(match, png, png_length) : 0;
+}
+
+/* Placements of images that carry selection text, at their viewport rows. */
+size_t
+graphics_text_objects(int alt, int (*line_to_row)(Line, int),
+		GraphicsTextObject *objects, size_t max)
+{
+	GraphicsPlacement *placement;
+	size_t count = 0;
+
+	if (!line_to_row)
+		return 0;
+	for (placement = placements; placement && count < max;
+	    placement = placement->next) {
+		int row;
+		if (placement->alt != !!alt || !placement->image->text)
+			continue;
+		row = line_to_row(placement->anchor, placement->alt);
+		if (row == INT_MIN)
+			continue;
+		objects[count++] = (GraphicsTextObject){placement->column, row,
+		    placement->columns, placement->rows, placement->image->text};
+	}
+	return count;
+}
+
+int
+graphics_row_has_text_object(int alt, int row, int (*line_to_row)(Line, int))
+{
+	GraphicsPlacement *placement;
+
+	if (!line_to_row)
+		return 0;
+	for (placement = placements; placement; placement = placement->next) {
+		int top;
+		if (placement->alt != !!alt || !placement->image->text)
+			continue;
+		top = line_to_row(placement->anchor, placement->alt);
+		if (top != INT_MIN && row >= top && row < top + placement->rows)
+			return 1;
+	}
+	return 0;
 }
 
 void

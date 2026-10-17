@@ -264,6 +264,19 @@ Below-text (negative-z) placements are backgrounds, as in Kitty: they are never
 tinted or exported as images, and selecting over them copies the text in their
 cells. Each cell shows the selection background through transparent pixels.
 
+### Images that copy as text
+
+`st` also reads an uncompressed PNG `iTXt` (or `tEXt`) chunk with the keyword
+`selection-text`: the text the image stands for, such as a typeset equation's
+TeX (at most 64 KiB; control characters other than tab and newline are dropped).
+Every placement of such an image is an atomic text object, like one glyph. A
+selection touching any of its cells copies that text once, in order with the
+text around it, and never the cells' own contents; blanks before it on its row
+and rows holding only the rest of it add nothing. A below-text placement then
+highlights its whole cell rectangle with the selection background, under the
+image, and the blank rows it covers show no virtual-newline cell. Other
+terminals and decoders ignore the chunk, so applications can always send it.
+
 ## Resource and parser limits
 
 Terminal output is untrusted, especially when it comes from a remote host. The

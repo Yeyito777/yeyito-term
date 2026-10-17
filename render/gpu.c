@@ -1200,6 +1200,38 @@ gpudrawimageocclusion(void)
 	gpubatchclear(&gpu.ideco);
 }
 
+/* An image below text that copies as text selects as one unit: paint its
+ * whole cell rectangle with the selection background, under the image,
+ * instead of the ragged per-cell highlight of whatever its cells hold. */
+static void
+gpufillcells(int column, int row, int columns, int rows, unsigned int color)
+{
+	GpuVertex vertices[6];
+	float rgb[3];
+	double x0 = gpucellx(column), y0 = gpucelly(row);
+	double x1 = gpucellx(column + columns), y1 = gpucelly(row + rows);
+
+	gpucolor(color, rgb);
+#define FVERTEX(px, py) \
+	(GpuVertex){(GLfloat)(px), (GLfloat)(py), 0, 0, rgb[0], rgb[1], rgb[2], 1}
+	vertices[0] = FVERTEX(x0, y0);
+	vertices[1] = FVERTEX(x0, y1);
+	vertices[2] = FVERTEX(x1, y0);
+	vertices[3] = FVERTEX(x1, y0);
+	vertices[4] = FVERTEX(x0, y1);
+	vertices[5] = FVERTEX(x1, y1);
+#undef FVERTEX
+	glDisable(GL_BLEND);
+	glDisable(GL_ALPHA_TEST);
+	glDisable(GL_TEXTURE_2D);
+	glEnableClientState(GL_VERTEX_ARRAY);
+	glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+	glEnableClientState(GL_COLOR_ARRAY);
+	glVertexPointer(2, GL_FLOAT, sizeof(GpuVertex), &vertices[0].x);
+	glColorPointer(4, GL_FLOAT, sizeof(GpuVertex), &vertices[0].r);
+	glDrawArrays(GL_TRIANGLES, 0, 6);
+}
+
 static void
 gpudrawimage(const GraphicsPlacementView *placement, void *context)
 {
@@ -1242,6 +1274,11 @@ gpudrawimage(const GraphicsPlacementView *placement, void *context)
 	selected_image = placement->selected || (placement->z >= 0 &&
 	    selection_active() && selectedregion(placement->column,
 	    placement->row, placement->columns, placement->rows));
+	if (placement->text && placement->z < 0 && placement->z >= INT32_MIN / 2 &&
+	    selection_active() && selectedregion(placement->column,
+	    placement->row, placement->columns, placement->rows))
+		gpufillcells(placement->column, placement->row, placement->columns,
+		    placement->rows, selectionbg);
 	voff = &vertices[0].x;
 	toff = &vertices[0].u;
 	coff = &vertices[0].r;
