@@ -941,6 +941,9 @@ gpudrawline(Line line, int x1, int y, int x2)
 			runw = cellw;
 			memcpy(runbg, bg, sizeof runbg);
 		}
+		/* Concealed text paints nothing, so an image below text shows through. */
+		if (g.mode & ATTR_INVISIBLE)
+			continue;
 		if (g.u != ' ') {
 			if (!gpubatchfilledblock(&gpu.deco, g.u, cellx, basey,
 			                         cellw, rowh, fg)) {
@@ -1011,6 +1014,8 @@ gpudrawcell(Glyph g, int x, int y, int layer, int applyhighlights)
 	gpuresolve(g, x, y, fg, bg);
 	cellw = gpucellright(x, g.mode & ATTR_WIDE) - cellx;
 	gpubatchrect(bb, cellx, celly, cellw, cellh, bg);
+	if (g.mode & ATTR_INVISIBLE)
+		return;
 	if (g.u != ' ') {
 		if (!gpubatchfilledblock(db, g.u, cellx, celly, cellw, cellh, fg)) {
 			gg = gpuglyph(g.u, g.mode);
@@ -1234,8 +1239,8 @@ gpudrawimage(const GraphicsPlacementView *placement, void *context)
 	vertices[4] = IVERTEX(x, y+h, u0, v1);
 	vertices[5] = IVERTEX(x+w, y+h, u1, v1);
 #undef IVERTEX
-	selected_image = placement->selected ||
-	    (selection_active() && selectedregion(placement->column,
+	selected_image = placement->selected || (placement->z >= 0 &&
+	    selection_active() && selectedregion(placement->column,
 	    placement->row, placement->columns, placement->rows));
 	voff = &vertices[0].x;
 	toff = &vertices[0].u;

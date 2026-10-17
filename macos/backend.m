@@ -474,6 +474,9 @@ drawCell(Glyph glyph, int x, int y, enum MacCellLayer layer, int applyHighlights
 	if (layer != MAC_CELL_BASE || bg.r != clear.r || bg.g != clear.g ||
 	    bg.b != clear.b || bg.a != clear.a)
 		mac_renderer_rect(bgLayer, left, top, width, height, bg);
+	/* Concealed text paints nothing, so an image below text shows through. */
+	if (glyph.mode & ATTR_INVISIBLE)
+		return;
 	if (glyph.u != ' ' && glyph.u != 0) {
 		MacGlyphRect block;
 		if (blockdraw && macos_filled_block_rect(glyph.u, left, top,
@@ -630,7 +633,8 @@ drawGraphicsPlacement(const GraphicsPlacementView *placement, void *context)
 	    placement->source_x, placement->source_y,
 	    placement->source_width, placement->source_height,
 	    x, y, width, height);
-	int selectedImage = placement->selected || (selection_active() &&
+	int selectedImage = placement->selected || (placement->z >= 0 &&
+	    selection_active() &&
 	    selectedregion(placement->column, placement->row,
 	    placement->columns, placement->rows));
 	image_occlusion_draw(&imageOcclusion, placement, tcol(), trow(),
