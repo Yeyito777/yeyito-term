@@ -343,6 +343,22 @@ TEST(png_pixels_compact_and_restore)
 	ASSERT_EQ((int)compact, (int)graphics_image_bytes());
 }
 
+TEST(below_text_placement_is_not_a_selection_object)
+{
+	SelectedRegion selected = {0, 5, 8, 1};
+	unsigned char *png = NULL;
+	size_t png_length = 0;
+
+	reset_state();
+	/* Text drawn over a negative-z image is what a selection copies. */
+	ASSERT(command("Ga=T,f=32,s=2,v=1,c=3,r=2,C=1,z=-1;AQIDBAUGBwg=",
+	    line_a).redraw);
+	ASSERT(!graphics_selection_png(0, line_row, region_selected, &selected,
+	    &png, &png_length));
+	ASSERT(png == NULL);
+	ASSERT_EQ(0, (int)png_length);
+}
+
 TEST(selected_placement_copies_cropped_png_atomically)
 {
 	GraphicsCommandResult result;
@@ -494,6 +510,7 @@ TEST_SUITE(graphics)
 	RUN_TEST(png_query);
 	RUN_TEST(png_pixels_compact_and_restore);
 	RUN_TEST(selected_placement_copies_cropped_png_atomically);
+	RUN_TEST(below_text_placement_is_not_a_selection_object);
 	RUN_TEST(kitten_icat_unpadded_base64);
 	RUN_TEST(kitten_icat_large_single_apc);
 	RUN_TEST(zlib_compressed_raw_rgba);

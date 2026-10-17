@@ -179,6 +179,11 @@ Placements are divided into three passes:
 2. Other negative values are drawn after backgrounds but before text.
 3. Nonnegative values are drawn above terminal text.
 
+Concealed text (SGR 8) paints no glyphs or decorations, only its background, so
+an application can keep real, selectable text under a below-text image: the
+image shows through the concealed cells, and their backgrounds (a selection, a
+TUI's line highlight) show through the image's transparent pixels.
+
 Both OpenGL and Metal use `render/image_occlusion.c` to remember the original
 terminal cells under nonnegative-z placements. Later changes to an individual
 cell (text, attributes, or background, including blank/default-background cells)
@@ -238,7 +243,7 @@ same way it would after occupying the requested rows and columns.
 
 ## Selection and clipboard export
 
-A placement is an atomic visual object for terminal selections. Intersecting
+A nonnegative-z placement is an atomic visual object for terminal selections. Intersecting
 any cell in its placement rectangle selects the complete source crop, including
 when `V` selects an otherwise blank row below the placement's anchor. The Metal
 and OpenGL backends tint the full displayed rectangle to make that atomic state
@@ -254,6 +259,10 @@ while the native backend publishes `NSPasteboardTypePNG`. Text-only consumers
 receive `U+FFFC` for an image-only yank. A selection intersecting more than one
 placement does not publish an arbitrary image because conventional system
 clipboards have no portable ordered multi-image representation.
+
+Below-text (negative-z) placements are backgrounds, as in Kitty: they are never
+tinted or exported as images, and selecting over them copies the text in their
+cells. Each cell shows the selection background through transparent pixels.
 
 ## Resource and parser limits
 

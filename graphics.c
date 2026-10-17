@@ -1569,7 +1569,9 @@ failed:
 
 /* Images are atomic selection objects: touching any occupied cell selects the
  * entire placement.  A system clipboard has only one image/png representation,
- * so publish one only when the selection identifies exactly one placement. */
+ * so publish one only when the selection identifies exactly one placement.
+ * Images below text (negative z) are backgrounds of the text drawn over them;
+ * selecting there copies that text, as in Kitty. */
 int
 graphics_selection_png(int alt, int (*line_to_row)(Line, int),
 		GraphicsSelectionCallback selected, void *context,
@@ -1585,7 +1587,7 @@ graphics_selection_png(int alt, int (*line_to_row)(Line, int),
 		return 0;
 	for (placement = placements; placement; placement = placement->next) {
 		int row;
-		if (placement->alt != !!alt)
+		if (placement->alt != !!alt || placement->z < 0)
 			continue;
 		row = line_to_row(placement->anchor, placement->alt);
 		if (row == INT_MIN || !selected(placement->column, row,
