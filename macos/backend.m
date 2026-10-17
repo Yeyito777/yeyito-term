@@ -628,6 +628,18 @@ drawGraphicsPlacement(const GraphicsPlacementView *placement, void *context)
 	if (x >= borderpx + win.tw || x + width <= borderpx ||
 	    y >= borderpx + win.th || y + height <= borderpx)
 		return;
+	/* An image below text that copies as text selects as one unit: its whole
+	 * cell rectangle takes the selection background, under the image, after
+	 * every cell background (the background layer is encoded before it). */
+	if (placement->text && placement->z < 0 && placement->z >= INT32_MIN / 2 &&
+	    selection_active() && selectedregion(placement->column,
+	    placement->row, placement->columns, placement->rows)) {
+		double cellLeft = cellX(placement->column), cellTop = cellY(placement->row);
+		mac_renderer_rect(MAC_LAYER_BACKGROUND, cellLeft, cellTop,
+		    cellX(placement->column + placement->columns) - cellLeft,
+		    cellY(placement->row + placement->rows) - cellTop,
+		    indexedColor(selectionbg));
+	}
 	mac_renderer_image(stage, placement->serial, placement->rgba,
 	    placement->image_width, placement->image_height,
 	    placement->source_x, placement->source_y,

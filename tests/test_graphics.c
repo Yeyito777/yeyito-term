@@ -343,6 +343,37 @@ TEST(png_pixels_compact_and_restore)
 	ASSERT_EQ((int)compact, (int)graphics_image_bytes());
 }
 
+TEST(png_selection_text_makes_an_atomic_text_object)
+{
+	GraphicsTextObject objects[4];
+	size_t count;
+
+	reset_state();
+	/* A 1x1 PNG with an iTXt "selection-text" chunk; its ESC is dropped. */
+	ASSERT(command("Ga=T,f=100,i=7,c=3,r=2,C=1,z=-1;iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAMWlUWHRzZWxlY3Rpb24tdGV4dAAAAAAAJCR4XjIgKyBcZnJhY3sxfXsyfSQkChtbMzFt4oaShoSa1AAAAA1JREFUeJxjYGBg+A8AAQQBAB5znEAAAAAASUVORK5CYII=",
+	    line_a).redraw);
+	count = graphics_text_objects(0, line_row, objects, 4);
+	ASSERT_EQ(1, (int)count);
+	ASSERT_EQ(4, objects[0].row);
+	ASSERT_EQ(3, objects[0].columns);
+	ASSERT_EQ(2, objects[0].rows);
+	ASSERT(strcmp(objects[0].text, "$$x^2 + \\frac{1}{2}$$\n[31m\xe2\x86\x92") == 0);
+	ASSERT(graphics_row_has_text_object(0, 5, line_row));
+	ASSERT(!graphics_row_has_text_object(0, 6, line_row));
+	graphics_draw(0, GRAPHICS_STAGE_BELOW_TEXT, 10, 20, 24, line_row,
+	    capture_draw, NULL);
+	ASSERT(last_draw.text == objects[0].text);
+
+	/* A plain PNG carries no text. */
+	ASSERT(command("Ga=T,f=100,i=8,C=1;iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAHnOcQAAAAABJRU5ErkJggg==",
+	    line_c).redraw);
+	ASSERT_EQ(1, (int)graphics_text_objects(0, line_row, objects, 4));
+	/* Replacing the image drops its text. */
+	ASSERT(command("Ga=t,f=100,i=7;iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAHnOcQAAAAABJRU5ErkJggg==",
+	    line_a).handled);
+	ASSERT_EQ(0, (int)graphics_text_objects(0, line_row, objects, 4));
+}
+
 TEST(below_text_placement_is_not_a_selection_object)
 {
 	SelectedRegion selected = {0, 5, 8, 1};
@@ -511,6 +542,7 @@ TEST_SUITE(graphics)
 	RUN_TEST(png_pixels_compact_and_restore);
 	RUN_TEST(selected_placement_copies_cropped_png_atomically);
 	RUN_TEST(below_text_placement_is_not_a_selection_object);
+	RUN_TEST(png_selection_text_makes_an_atomic_text_object);
 	RUN_TEST(kitten_icat_unpadded_base64);
 	RUN_TEST(kitten_icat_large_single_apc);
 	RUN_TEST(zlib_compressed_raw_rgba);

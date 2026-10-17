@@ -571,6 +571,11 @@ selected(int x, int y)
 	maxcol = tisvimnav() ? MAX(linelen, 1) : MIN(linelen + 1, term.col);
 	if (x >= maxcol)
 		return 0;
+	/* A blank row through an image that copies as text has no virtual
+	 * newline cell: the image highlights as one unit (see getsel). */
+	if (linelen == 0 && graphics_placement_count() &&
+	    graphics_row_has_text_object(sel.alt, y, tlineviewrowslow))
+		return 0;
 
 	return (y != sel.nb.y || x >= sel.nb.x)
 	    && (y != sel.ne.y || x <= sel.ne.x);
@@ -684,58 +689,162 @@ selsnap(int *x, int *y, int direction)
 	}
 }
 
+/* A placed image that copies as text and that the selection touches. */
+typedef struct {
+	GraphicsTextObject object;
+	int copied;
+} SelTextObject;
+
+static SelTextObject *
+seltextobject(SelTextObject *objects, size_t count, int x, int y)
+{
+	for (size_t i = 0; i < count; i++) {
+		const GraphicsTextObject *o = &objects[i].object;
+		if (BETWEEN(y, o->row, o->row + o->rows - 1) &&
+		    BETWEEN(x, o->column, o->column + o->columns - 1))
+			return &objects[i];
+	}
+	return NULL;
+}
+
+/* Append a text object's text once.  Blanks before it on its row are layout
+ * (an indent or centring), not content, so they are dropped. */
+static char *
+seltextappend(char *ptr, char *rowstart, SelTextObject *object)
+{
+	size_t length = strlen(object->object.text);
+	char *p;
+
+	object->copied = 1;
+	for (p = rowstart; p < ptr && *p == ' '; p++)
+		;
+	if (p == ptr)
+		ptr = rowstart;
+	memcpy(ptr, object->object.text, length);
+	return ptr + length;
+}
+
 char *
 getsel(void)
 {
-	char *str, *ptr;
-	int y, bufsize, lastx, linelen;
+	char *str, *ptr, *rowstart, *textend;
+	int y, x, bufsize, lastx, linelen, firstx, scanend, objectrow;
 	const Glyph *gp, *last;
+	SelTextObject *objects = NULL, *object;
+	GraphicsTextObject *found = NULL;
+	size_t i, count = 0, nfound, textbytes = 0;
 
 	if (sel.ob.x == -1)
 		return NULL;
 
-	bufsize = (term.col+1) * (sel.ne.y-sel.nb.y+1) * UTF_SIZ;
+	/* Images that carry selection text are atomic, like one glyph: touching
+	 * any of their cells copies their whole text, once, and their cells'
+	 * own contents are never copied. */
+	if (graphics_placement_count()) {
+		found = xmalloc(graphics_placement_count() * sizeof(*found));
+		nfound = graphics_text_objects(IS_SET(MODE_ALTSCREEN),
+		    tlineviewrowslow, found, graphics_placement_count());
+		objects = xmalloc((nfound ? nfound : 1) * sizeof(*objects));
+		for (i = 0; i < nfound; i++) {
+			if (!selectedregion(found[i].column, found[i].row,
+			    found[i].columns, found[i].rows))
+				continue;
+			objects[count++] = (SelTextObject){found[i], 0};
+			textbytes += strlen(found[i].text);
+		}
+		free(found);
+	}
+
+	bufsize = (term.col+1) * (sel.ne.y-sel.nb.y+1) * UTF_SIZ + textbytes;
 	ptr = str = xmalloc(bufsize);
 
 	/* append every set & selected glyph to the selection */
 	for (y = sel.nb.y; y <= sel.ne.y; y++) {
-		if ((linelen = tlinelen(y)) == 0) {
+		linelen = tlinelen(y);
+		objectrow = 0;
+		for (i = 0; i < count; i++)
+			if (BETWEEN(y, objects[i].object.row,
+			    objects[i].object.row + objects[i].object.rows - 1))
+				objectrow = 1;
+		if (linelen == 0 && !objectrow) {
 			*ptr++ = '\n';
 			continue;
 		}
 
 		if (sel.type == SEL_RECTANGULAR) {
-			gp = &TLINE(y)[sel.nb.x];
+			firstx = sel.nb.x;
 			lastx = sel.ne.x;
 		} else {
-			gp = &TLINE(y)[sel.nb.y == y ? sel.nb.x : 0];
+			firstx = sel.nb.y == y ? sel.nb.x : 0;
 			lastx = (sel.ne.y == y) ? sel.ne.x : term.col-1;
 		}
-		last = &TLINE(y)[MIN(lastx, linelen-1)];
-		while (last >= gp && last->u == ' ')
-			--last;
 
-		for ( ; gp <= last; ++gp) {
-			if (gp->mode & ATTR_WDUMMY)
-				continue;
+		if (!objectrow) {
+			gp = &TLINE(y)[firstx];
+			last = &TLINE(y)[MIN(lastx, linelen-1)];
+			while (last >= gp && last->u == ' ')
+				--last;
 
-			ptr += utf8encode(gp->u, ptr);
+			for ( ; gp <= last; ++gp) {
+				if (gp->mode & ATTR_WDUMMY)
+					continue;
+
+				ptr += utf8encode(gp->u, ptr);
+			}
+
+			/*
+			 * Copy and pasting of line endings is inconsistent
+			 * in the inconsistent terminal and GUI world.
+			 * The best solution seems like to produce '\n' when
+			 * something is copied from st and convert '\n' to
+			 * '\r', when something to be pasted is received by
+			 * st.
+			 * FIXME: Fix the computer world.
+			 */
+			if ((y < sel.ne.y || lastx >= linelen) &&
+			    (!(last->mode & ATTR_WRAP) || sel.type == SEL_RECTANGULAR))
+				*ptr++ = '\n';
+			continue;
 		}
 
-		/*
-		 * Copy and pasting of line endings is inconsistent
-		 * in the inconsistent terminal and GUI world.
-		 * The best solution seems like to produce '\n' when
-		 * something is copied from st and convert '\n' to
-		 * '\r', when something to be pasted is received by
-		 * st.
-		 * FIXME: Fix the computer world.
-		 */
+		/* A row through text objects: objects left of where the selection
+		 * starts on this row come first, then the selected cells in order,
+		 * each object's text standing in for its cells. */
+		rowstart = textend = ptr;
+		for (x = 0; x < firstx; x++) {
+			object = seltextobject(objects, count, x, y);
+			if (object && !object->copied)
+				ptr = textend = seltextappend(ptr, rowstart, object);
+		}
+		scanend = MIN(lastx, linelen - 1);
+		for (i = 0; i < count; i++)
+			if (!objects[i].copied && BETWEEN(y, objects[i].object.row,
+			    objects[i].object.row + objects[i].object.rows - 1))
+				scanend = MAX(scanend, MIN(objects[i].object.column, term.col - 1));
+		for (x = firstx; x <= scanend; x++) {
+			object = seltextobject(objects, count, x, y);
+			if (object) {
+				if (!object->copied)
+					ptr = textend = seltextappend(ptr, rowstart, object);
+				continue;
+			}
+			gp = &TLINE(y)[x];
+			if (!(gp->mode & ATTR_WDUMMY) && x <= lastx)
+				ptr += utf8encode(gp->u, ptr);
+		}
+		while (ptr > textend && ptr[-1] == ' ')
+			--ptr;
+		/* A row holding only the rest of an already copied object adds
+		 * nothing, not even a line break. */
+		if (ptr == rowstart)
+			continue;
 		if ((y < sel.ne.y || lastx >= linelen) &&
-		    (!(last->mode & ATTR_WRAP) || sel.type == SEL_RECTANGULAR))
+		    (!(TLINE(y)[term.col - 1].mode & ATTR_WRAP) ||
+		    sel.type == SEL_RECTANGULAR))
 			*ptr++ = '\n';
 	}
 	*ptr = 0;
+	free(objects);
 	return str;
 }
 
