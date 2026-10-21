@@ -1,4 +1,5 @@
 #import <AppKit/AppKit.h>
+#import <Carbon/Carbon.h>
 #import <MetalKit/MetalKit.h>
 
 #ifdef MIN
@@ -1590,9 +1591,75 @@ mouseReport(int type, uint button, uint state, int x, int y)
 
 @end
 
+/* The keyboard layout's pending dead key (UCKeyTranslate's low 16 bits). */
+static UInt32 deadKeyState;
+
+static size_t
+nativeTranslate(const UCKeyboardLayout *layout, UInt16 keyCode,
+		UInt32 modifiers, UInt32 *state, char *out, size_t size)
+{
+	UniChar chars[8];
+	UniCharCount length = 0;
+	if (UCKeyTranslate(layout, keyCode, kUCKeyActionDown, modifiers,
+	    LMGetKbdType(), 0, state, LEN(chars), &length, chars) != noErr) {
+		*state = 0;
+		return 0;
+	}
+	*state &= 0xFFFF;
+	NSString *text = [NSString stringWithCharacters:chars length:length];
+	NSUInteger used = 0;
+	[text getBytes:out maxLength:size usedLength:&used
+	    encoding:NSUTF8StringEncoding options:0
+	    range:NSMakeRange(0, text.length) remainingRange:NULL];
+	return used;
+}
+
+/* Compose keyboard-layout dead keys here, not in the Cocoa text input
+ * system: with the Kitty keyboard protocol the key after a dead key is
+ * encoded directly and never reaches interpretKeyEvents:. Option (Meta),
+ * Control, and Command keep st's own handling. */
+static int
+nativeDeadKey(NSEvent *event, uint state)
+{
+	if (state & (Mod1Mask | ControlMask | Mod4Mask)) {
+		deadKeyState = 0;
+		return 0;
+	}
+	TISInputSourceRef source = TISCopyCurrentKeyboardLayoutInputSource();
+	if (!source) return 0;
+	CFDataRef data = TISGetInputSourceProperty(source,
+	    kTISPropertyUnicodeKeyLayoutData);
+	int handled = 0;
+	if (data) {
+		const UCKeyboardLayout *layout =
+		    (const UCKeyboardLayout *)CFDataGetBytePtr(data);
+		UInt32 modifiers = (((state & ShiftMask) ? shiftKey : 0) |
+		    ((state & LockMask) ? alphaLock : 0)) >> 8;
+		UInt32 pending = deadKeyState, after = deadKeyState, none = 0;
+		char composed[64], plain[64];
+		size_t composedLength = nativeTranslate(layout, event.keyCode,
+		    modifiers, &after, composed, sizeof composed);
+		if (pending || after) {
+			size_t plainLength = nativeTranslate(layout, event.keyCode,
+			    modifiers, &none, plain, sizeof plain), writeLength;
+			deadKeyState = after;
+			handled = macos_dead_key_press(pending != 0, after != 0,
+			    composed, composedLength, plain, plainLength, &writeLength);
+			if (writeLength) ttywrite(composed, writeLength, 1);
+		}
+	}
+	CFRelease(source);
+	return handled;
+}
+
 static void
 nativeHandleKey(NSEvent *event, int release)
 {
+	if (!release && !IS_SET(MODE_KBDLOCK) && !cmdline_active() &&
+	    !tisvimnav() && nativeDeadKey(event, nativeModifiers(event))) {
+		macos_request_redraw();
+		return;
+	}
 	NSEventModifierFlags flags = event.modifierFlags &
 	    NSEventModifierFlagDeviceIndependentFlagsMask;
 	if (!release && macos_is_em_dash_keystroke(event.keyCode,
