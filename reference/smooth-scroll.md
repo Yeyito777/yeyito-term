@@ -60,12 +60,12 @@ Positive shifts draw rows lower; negative shifts draw them higher.
 | File | Role |
 |------|------|
 | `render/smoothscroll.c/.h` | Pure engine (unit tested): ease curve, clamping, visible rows, snapping, device-pixel rounding, region heuristics (`ss_region_animates`), render-path choice, and the state machine `IDLE / ANIMATING / PRECISE`. |
-| `render/smoothscroll_term.c` | Terminal glue: scrollback following, region state (band, copies of departing lines), per-row API for renderers (`smoothscroll_row_shift/row_clip/plain/band`), precise input, DECSCLM. |
+| `render/smoothscroll_term.c` | Terminal glue: scrollback following, region state (band, copies of departing lines, snapshot + static-column classification), per-cell API for renderers (`smoothscroll_shift/clip/span/plain/band`), precise input, DECSCLM. |
 | `st.c` | `tviewline()/tscrolled()/thistlen()` accessors; `smoothscroll_frame()` at the top of `draw()`, `smoothscroll_drawextra()` after `drawregion()`; `smoothscroll_region()` at the start of `tscrollup()/tscrolldown()`; DECSCLM in `tsetmode()`; reset in `treset()`. |
 | `graphics.c` | `graphics_draw_rows()` culls placements against the visible row range (partial rows included). |
 | `search.c` | Uncached-row sentinel is `INT_MIN` (row `-1` is now drawable). |
-| `x.c`, `render/gpu.c` | GL: shift + clip in `gpubatchquad()` per row (`gpubeginrow()`), images by anchor row (vertex shift + scissor). Xft: per-row offset (`xrowdy()`) and Xft clip rectangle (`xrowclip()`). Run-loop frame pacing, mouse rows. |
-| `macos/renderer.m/.h`, `macos/backend.m` | Metal: `mac_renderer_set_row()` shifts and clips quads and image vertices (UV-correct) per row (`beginRow()`); trackpad phases, display-link pacing, mouse rows. |
+| `x.c`, `render/gpu.c` | `xdrawline()` splits band rows at the moving span. GL: shift + clip in `gpubatchquad()` per cell segment (`gpubegincell()`), images by anchor cell (vertex shift + scissor). Xft: per-segment offset (`xrowdy()`) and Xft clip rectangle (`xrowclip()`). Run-loop frame pacing, mouse rows. |
+| `macos/renderer.m/.h`, `macos/backend.m` | Metal: `mac_renderer_set_row()` shifts and clips quads and image vertices (UV-correct) per cell (`beginCell()`); `xdrawline()` segments; trackpad phases, display-link pacing, mouse rows. |
 
 ### Scrollback
 
@@ -128,6 +128,30 @@ selection/search/line highlights) sliding out over the edge, so the motion
 looks exactly like the scrollback glide. New rows appear from the other edge
 as the app draws them.
 
+**Side panels (static columns):** st has no left/right margins (DECLRMM), so
+TUIs with side panels scroll the whole width and repaint the panels in place,
+usually in the same synchronized update (the Exocortex TUI: `CSI t;b r`,
+`CSI n S`, `CSI r`, then the sidebar columns of the shifted rows). Each batch
+of scrolls snapshots the band first. When the batch is presented, and again
+on later frames of the glide (for panels repainted late), every column votes
+per cell: *stayed* (equals the snapshot at the same row), *moved* (equals the
+snapshot at its source row) or *rewritten* (neither). Cells where stayed and
+moved predict the same thing (blank areas, text repeated on every row) don't
+vote. A column moves when *moved* wins; the moving span runs from the first to
+the last such column. Non-voting neighbours join it up to the row edge, or, in
+a run between moving and static columns, up to the widest all-blank gap, so a
+pane's repeated prefix moves with the pane while a panel's border and labels
+stay with the panel. Everything outside the span (sidebars, re-wrapped
+right-hand panels) is drawn in place; departing-line copies are drawn only in
+the span. If the moving columns were mostly rewritten rather than scrolled, the
+band does not animate at all. Line drawers split band rows into segments at
+the span (`smoothscroll_span()`), and cells shift/clip by
+`smoothscroll_shift(x, y)` / `smoothscroll_clip(x, y, ...)`.
+
+DECLRMM (`CSI ? 69 h` + DECSLRM) is not implemented: it would change every
+scroll, insert/delete and wrap path in the core, and the detection above lets
+apps keep scrolling full-width bands.
+
 **Accumulation:** scrolls before the next presented frame add up without the
 clock running, including a whole synchronized update (mode 2026: frames are
 withheld, and the glide starts when the batch is presented). A scroll arriving
@@ -162,9 +186,9 @@ and keyboard scrolls glide.
 
 | Platform | Renderer | How a row is shifted and clipped |
 |----------|----------|----------------------------------|
-| macOS | Metal (always; the native backend has no non-Metal renderer and exits if Metal is missing) | `beginRow(y)` sets `mac_renderer_set_row(dy, clip, top, bottom)`; `quad()` and image vertices add `dy` and clip vertically with matching UV adjustment. Window UI (command line, toasts, SSH badge, IME text) never sets a row, so it never moves. Shifts are rounded to device pixels. |
-| Linux, GPU | OpenGL via GLX (`gpudraw = 1`, the default) | `gpubeginrow(y)` sets the row's pixel shift and clip; `gpubatchquad()` applies them (UV-correct). Images shift by their anchor row and use a band scissor. Full clear each moving frame (retained damage tracking is bypassed while moving and for one frame at rest). |
-| Linux, CPU fallback | Xft into the backing pixmap (`gpudraw = 0`, or GLX unavailable) | The moving band is cleared, then each row is drawn `xrowdy(y)` pixels lower under an Xft clip rectangle for its band. Kitty images need the GPU renderer, as before. |
+| macOS | Metal (always; the native backend has no non-Metal renderer and exits if Metal is missing) | `beginCell(x, y)` sets `mac_renderer_set_row(dy, clip, rect)`; `quad()` and image vertices add `dy` and clip to the rectangle with matching UV adjustment. Window UI (command line, toasts, SSH badge, IME text) never sets a cell, so it never moves. Shifts are rounded to device pixels. |
+| Linux, GPU | OpenGL via GLX (`gpudraw = 1`, the default) | `gpubegincell(x, y)` sets the segment's pixel shift and clip rectangle; `gpubatchquad()` applies them (UV-correct). Images shift by their anchor cell and use a band scissor. Full clear each moving frame (retained damage tracking is bypassed while moving and for one frame at rest). |
+| Linux, CPU fallback | Xft into the backing pixmap (`gpudraw = 0`, or GLX unavailable) | The moving band is cleared, then each segment is drawn `xrowdy(x, y)` pixels lower under an Xft clip rectangle. Kitty images need the GPU renderer, as before. |
 
 "GPU on Linux" means the existing fixed-function OpenGL renderer in
 `render/gpu.c`. On machines without a GPU, Mesa runs it in software
@@ -200,7 +224,11 @@ the grid is already final).
   (heuristics, band-only shift and clip, departing-line copies in both
   directions, sync-batch accumulation, mid-glide retarget and reversal,
   jump cases, edits mid-glide, knob + DECSCLM, inert when disabled, screen
-  switch reset).
+  switch reset); static columns (sidebar repainted in a sync batch stays put
+  and departing lines are drawn only in the pane, re-wrapped right panel stays
+  put, mostly rewritten band does not glide, late panel repaint refines the
+  span, a pane's repeated prefix moves with the pane, a panel's repeated label
+  stays with the panel, uniform bands glide full width).
 - `tests/test_graphics.c`: `graphics_draw_rows()` includes partial rows.
 - `tests/test_macos_image_occlusion.m` (macOS): offscreen Metal pixels — a
   region scroll shifts its band's cells, image and cursor, clips at the band
