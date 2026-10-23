@@ -163,6 +163,31 @@ TEST(chunked_rgba_placement)
 	ASSERT_EQ(255, last_draw.rgba[3]);
 }
 
+/* Smooth scrolling exposes partial rows just outside the viewport; images
+ * anchored there must be drawn instead of popping in at rest. */
+TEST(draw_rows_includes_partial_rows_outside_viewport)
+{
+	reset_state();
+	command("Ga=T,f=32,s=1,v=1,i=44,c=2,r=1,C=1;/wD//w==", line_b);
+	graphics_draw(0, GRAPHICS_STAGE_ABOVE_TEXT, 10, 20, 24,
+	    line_row, capture_draw, NULL);
+	ASSERT_EQ(0, drawn);
+	graphics_draw_rows(0, GRAPHICS_STAGE_ABOVE_TEXT, 10, 20, -1, 24,
+	    line_row, capture_draw, NULL);
+	ASSERT_EQ(1, drawn);
+	ASSERT_EQ(-1, last_draw.row);
+
+	reset_state();
+	command("Ga=T,f=32,s=1,v=1,i=45,c=2,r=1,C=1;/wD//w==", line_d);
+	graphics_draw(0, GRAPHICS_STAGE_ABOVE_TEXT, 10, 20, 6,
+	    line_row, capture_draw, NULL);
+	ASSERT_EQ(0, drawn);
+	graphics_draw_rows(0, GRAPHICS_STAGE_ABOVE_TEXT, 10, 20, 0, 7,
+	    line_row, capture_draw, NULL);
+	ASSERT_EQ(1, drawn);
+	ASSERT_EQ(6, last_draw.row);
+}
+
 TEST(application_selected_placement_flag)
 {
 	reset_state();
@@ -548,6 +573,7 @@ TEST_SUITE(graphics)
 	RUN_TEST(zlib_compressed_raw_rgba);
 	RUN_TEST(image_count_limit_evicts_and_allows_replacement);
 	RUN_TEST(malformed_interleaving_aborts_chunk_transfer);
+	RUN_TEST(draw_rows_includes_partial_rows_outside_viewport);
 	graphics_reset();
 }
 
