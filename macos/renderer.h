@@ -58,6 +58,12 @@ void mac_renderer_image(int stage, uint64_t serial, const uint8_t *rgba,
 		double width, double height);
 void mac_renderer_set_image_clip(double x, double y, double width,
 		double height);
+/* Smooth scrolling: quads emitted until the next call (cells, decorations,
+ * images) move down by `dy` points and, if `clip`, are clipped to the
+ * rectangle [clip_left, clip_right) x [clip_top, clip_bottom) points.
+ * mac_renderer_set_row(0, 0, 0, 0, 0, 0) resets. */
+void mac_renderer_set_row(double dy, int clip, double clip_left,
+		double clip_top, double clip_right, double clip_bottom);
 void mac_renderer_remove_image(uint64_t serial);
 void mac_renderer_end(void);
 

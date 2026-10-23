@@ -22,6 +22,7 @@
 #include "persist.h"
 #include "win.h"
 #include "vimnav.h"
+#include "render/smoothscroll.h"
 
 #ifdef ST_NATIVE_MACOS
 #include "macos/emoji.h"
@@ -1285,6 +1286,30 @@ tlineviewline(int row)
 	return TLINE(row);
 }
 
+/* Any line in the scrolled view coordinates, including rows just outside the
+ * viewport that smooth scrolling exposes; NULL past either end of the buffer. */
+Line
+tviewline(int y)
+{
+	if (IS_SET(MODE_ALTSCREEN))
+		return BETWEEN(y, 0, term.row - 1) ? term.line[y] : NULL;
+	if (y < term.scr - term.histn || y >= term.scr + term.row)
+		return NULL;
+	return TLINE(y);
+}
+
+int
+tscrolled(void)
+{
+	return term.scr;
+}
+
+int
+thistlen(void)
+{
+	return term.histn;
+}
+
 int
 tlineviewrow(Line target, int alt)
 {
@@ -1406,6 +1431,7 @@ treset(void)
 {
 	uint i;
 	graphics_reset();
+	smoothscroll_decsclm(0);
 
 	term.c = (TCursor){{
 		.mode = ATTR_NULL,
@@ -1491,6 +1517,7 @@ tscrolldown(int orig, int n, int copyhist)
 	Line temp;
 
 	LIMIT(n, 0, term.bot-orig+1);
+	smoothscroll_region(term.top, term.bot, orig, -n);
 
 	if (copyhist) {
 		int oldest;
@@ -1536,6 +1563,7 @@ tscrollup(int orig, int n, int copyhist)
 	Line temp;
 
 	LIMIT(n, 0, term.bot-orig+1);
+	smoothscroll_region(term.top, term.bot, orig, n);
 
 	if (copyhist) {
 		term.histi = (term.histi + 1) % HISTSIZE;
@@ -1984,10 +2012,12 @@ tsetmode(int priv, int set, const int *args, int narg)
 			case 7: /* DECAWM -- Auto wrap */
 				MODBIT(term.mode, set, MODE_WRAP);
 				break;
+			case 4:  /* DECSCLM -- Smooth scroll (region opt-in) */
+				smoothscroll_decsclm(set);
+				break;
 			case 0:  /* Error (IGNORED) */
 			case 2:  /* DECANM -- ANSI/VT52 (IGNORED) */
 			case 3:  /* DECCOLM -- Column  (IGNORED) */
-			case 4:  /* DECSCLM -- Scroll (IGNORED) */
 			case 8:  /* DECARM -- Auto repeat (IGNORED) */
 			case 18: /* DECPFF -- Printer feed (IGNORED) */
 			case 19: /* DECPEX -- Printer extent (IGNORED) */
@@ -3966,6 +3996,7 @@ draw(void)
 {
 	int cx = term.c.x, ocx = term.ocx, ocy = term.ocy;
 
+	smoothscroll_frame();
 	if (!xstartdraw())
 		return;
 
@@ -3982,6 +4013,7 @@ draw(void)
 		cx--;
 
 	drawregion(0, 0, term.col, term.row);
+	smoothscroll_drawextra();
 
 	if (tisvimnav()) {
 		/* Draw vim navigation cursor */

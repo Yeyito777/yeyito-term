@@ -72,6 +72,11 @@ typedef struct {
 	MacVertexList layers[MAC_LAYER_COUNT];
 	MacImageList imageLayers[3];
 	double imageClipX, imageClipY, imageClipWidth, imageClipHeight;
+	/* Smooth scrolling: quads of the grid cells being emitted are shifted
+	 * by rowDy pixels and, if rowClip, clipped to [clipLeft, clipRight) x
+	 * [clipTop, clipBottom). */
+	float rowDy, clipTop, clipBottom, clipLeft, clipRight;
+	int rowClip;
 	__strong id<CAMetalDrawable> drawable;
 	__strong MTLRenderPassDescriptor *pass;
 	__strong id<MTLCommandBuffer> command;
@@ -170,6 +175,24 @@ quad(enum MacRenderLayer layer, float x, float y, float width, float height,
 {
 	MacVertexList *list = &r.layers[layer];
 	vector_float4 c = vcolor(color);
+
+	y += r.rowDy;
+	if (r.rowClip) {
+		float y0 = MAX(y, r.clipTop), y1 = MIN(y + height, r.clipBottom);
+		float x0 = MAX(x, r.clipLeft), x1 = MIN(x + width, r.clipRight);
+		float dv = v1 - v0, du = u1 - u0;
+
+		if (y1 <= y0 || x1 <= x0)
+			return;
+		v1 = v0 + dv * (y1 - y) / height;
+		v0 = v0 + dv * (y0 - y) / height;
+		u1 = u0 + du * (x1 - x) / width;
+		u0 = u0 + du * (x0 - x) / width;
+		x = x0;
+		y = y0;
+		width = x1 - x0;
+		height = y1 - y0;
+	}
 	MacVertex a = {{x, y}, {u0, v0}, c, mode};
 	MacVertex b = {{x + width, y}, {u1, v0}, c, mode};
 	MacVertex d = {{x, y + height}, {u0, v1}, c, mode};
@@ -686,13 +709,31 @@ mac_renderer_image(int stage, uint64_t serial, const uint8_t *rgba,
 		    r.layers[MAC_LAYER_IMAGE_BACKGROUND + layer].count;
 	scale = (float)r.scale;
 	left = (float)x * scale;
-	top = (float)y * scale;
+	top = (float)y * scale + r.rowDy;
 	right = (float)(x + width) * scale;
-	bottom = (float)(y + height) * scale;
+	bottom = (float)(y + height) * scale + r.rowDy;
 	u0 = (float)(sourceX + 0.5) / imageWidth;
 	v0 = (float)(sourceY + 0.5) / imageHeight;
 	u1 = (float)(sourceX + sourceWidth - 0.5) / imageWidth;
 	v1 = (float)(sourceY + sourceHeight - 0.5) / imageHeight;
+	if (r.rowClip) {
+		float y0 = MAX(top, r.clipTop), y1 = MIN(bottom, r.clipBottom);
+		float x0 = MAX(left, r.clipLeft), x1 = MIN(right, r.clipRight);
+		float dv = v1 - v0, du = u1 - u0;
+
+		if (y1 <= y0 || x1 <= x0) {
+			r.imageLayers[stage].count--;	/* drop the reserved slot */
+			return;
+		}
+		v1 = v0 + dv * (y1 - top) / (bottom - top);
+		v0 = v0 + dv * (y0 - top) / (bottom - top);
+		u1 = u0 + du * (x1 - left) / (right - left);
+		u0 = u0 + du * (x0 - left) / (right - left);
+		top = y0;
+		bottom = y1;
+		left = x0;
+		right = x1;
+	}
 	a = (MacVertex){{left, top}, {u0, v0}, white, 3.0f};
 	b = (MacVertex){{right, top}, {u1, v0}, white, 3.0f};
 	c = (MacVertex){{left, bottom}, {u0, v1}, white, 3.0f};
@@ -705,6 +746,18 @@ void
 mac_renderer_remove_image(uint64_t serial)
 {
 	[r.images removeObjectForKey:@(serial)];
+}
+
+void
+mac_renderer_set_row(double dy, int clip, double clipLeft, double clipTop,
+		double clipRight, double clipBottom)
+{
+	r.rowDy = (float)(dy * r.scale);
+	r.rowClip = clip;
+	r.clipLeft = (float)(clipLeft * r.scale);
+	r.clipTop = (float)(clipTop * r.scale);
+	r.clipRight = (float)(clipRight * r.scale);
+	r.clipBottom = (float)(clipBottom * r.scale);
 }
 
 void

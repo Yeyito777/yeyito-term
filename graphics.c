@@ -1435,6 +1435,18 @@ graphics_draw(int alt, int stage, int cell_width, int cell_height,
 		int (*line_to_row)(Line, int), GraphicsDrawCallback draw,
 		void *context)
 {
+	graphics_draw_rows(alt, stage, cell_width, cell_height, 0,
+	    viewport_rows, line_to_row, draw, context);
+}
+
+/* Like graphics_draw(), for placements touching rows [first_row, end_row).
+ * Smooth scrolling passes the partial rows just outside the viewport. */
+void
+graphics_draw_rows(int alt, int stage, int cell_width, int cell_height,
+		int first_row, int end_row,
+		int (*line_to_row)(Line, int), GraphicsDrawCallback draw,
+		void *context)
+{
 	GraphicsPlacement *placement;
 	VisiblePlacement *visible;
 	GraphicsPlacementView view;
@@ -1452,8 +1464,8 @@ graphics_draw(int alt, int stage, int cell_width, int cell_height,
 		if (placement->alt != !!alt || placement_stage != stage)
 			continue;
 		row = line_to_row(placement->anchor, placement->alt);
-		if (row != INT_MIN && row < viewport_rows &&
-		    row + placement->rows > 0)
+		if (row != INT_MIN && row < end_row &&
+		    row + placement->rows > first_row)
 			count++;
 	}
 	if (!count)
@@ -1469,8 +1481,8 @@ graphics_draw(int alt, int stage, int cell_width, int cell_height,
 		if (placement->alt != !!alt || placement_stage != stage)
 			continue;
 		row = line_to_row(placement->anchor, placement->alt);
-		if (row != INT_MIN && row < viewport_rows &&
-		    row + placement->rows > 0)
+		if (row != INT_MIN && row < end_row &&
+		    row + placement->rows > first_row)
 			visible[i++] = (VisiblePlacement){placement, row};
 	}
 	qsort(visible, count, sizeof(*visible), placement_compare);

@@ -80,6 +80,10 @@ void graphics_draw(int alt, int stage, int cell_width, int cell_height,
 		int viewport_rows,
 		int (*line_to_row)(Line, int), GraphicsDrawCallback draw,
 		void *context);
+void graphics_draw_rows(int alt, int stage, int cell_width, int cell_height,
+		int first_row, int end_row,
+		int (*line_to_row)(Line, int), GraphicsDrawCallback draw,
+		void *context);
 void graphics_recycle_line(Line line);
 void graphics_reanchor_line(Line oldline, Line newline);
 void graphics_reanchor_line_address(uintptr_t oldline, Line newline);

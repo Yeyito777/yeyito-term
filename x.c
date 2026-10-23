@@ -37,6 +37,7 @@ char *argv0;
 #include "clipboard5522.h"
 #include "sync.h"
 #include "xstate.h"
+#include "render/smoothscroll.h"
 
 /* types used in config.h */
 typedef struct {
@@ -184,6 +185,7 @@ static void gpudamageensure(void);
 static void gpuresize(void);
 static void gpudestroy(void);
 static void gpudrawimages(int);
+static void gpuimagescissor(void);
 static void gpufreeimage(uint64_t, void *);
 static void gpureleaseimages(void);
 static double gpuxscale(void);
@@ -198,6 +200,7 @@ static void xloadfonts(const char *, double);
 static void xunloadfont(Font *);
 static void xunloadfonts(void);
 static void xsetenv(void);
+static void xdrawlineseg(Line, int, int, int);
 static void xseturgency(int);
 static int evcol(XEvent *);
 static int evrow(XEvent *);
@@ -235,6 +238,7 @@ static void clip5522_paste(Atom);
 static void clip5522_tick(const struct timespec *);
 
 static void run(void);
+static int xsmoothscrolltimeout(double *);
 static void usage(void);
 
 static void (*handler[LASTEvent])(XEvent *) = {
@@ -338,6 +342,43 @@ static double defaultfontsize = 0;
 /* GPU renderer internals live under render/.  See render/gpu.c for why this
  * is included rather than compiled separately. */
 #include "render/gpu.c"
+
+/* Xft (CPU) path while smooth scrolling: a segment of row y starting at
+ * column x is drawn xrowdy(x, y) pixels lower, clipped to its band
+ * (reference/smooth-scroll.md).  Both are 0/no-ops when the feature is off
+ * or at rest. */
+static int xclipped;
+
+static int
+xrowdy(int x, int y)
+{
+	return (int)ss_device_round(smoothscroll_shift(x, y) * win.ch, 1.0);
+}
+
+static void
+xrowclip(int x, int y)
+{
+	int top, end, left, right, x0, x1;
+	XRectangle clip;
+
+	if (!smoothscroll_clip(x, y, &top, &end, &left, &right))
+		return;
+	x0 = left == 0 ? 0 : borderpx + left * win.cw;
+	x1 = right >= tcol() ? win.w : borderpx + right * win.cw;
+	clip = (XRectangle){ x0, borderpx + top * win.ch, MAX(0, x1 - x0),
+	                     MAX(0, (end - top) * win.ch) };
+	XftDrawSetClipRectangles(xw.draw, 0, 0, &clip, 1);
+	xclipped = 1;
+}
+
+static void
+xrowunclip(void)
+{
+	if (!xclipped)
+		return;
+	XftDrawSetClip(xw.draw, None);
+	xclipped = 0;
+}
 
 static char *opt_class = NULL;
 static char **opt_cmd  = NULL;
@@ -897,6 +938,9 @@ evrow(XEvent *e)
 {
 	int y = e->xbutton.y - borderpx;
 
+	/* Rows sit where the smooth-scrolled grid currently draws them. */
+	y -= (int)ss_device_round(smoothscroll_view_shift() *
+	    (gpu.active ? gpucellh() : win.ch), 1.0);
 	if (gpu.active)
 		y = y / gpuyscale();
 	LIMIT(y, 0, win.th - 1);
@@ -2063,12 +2107,13 @@ xinit(int cols, int rows)
 	if (xsel.xtarget == None)
 		xsel.xtarget = XA_STRING;
 	graphics_set_image_free_callback(gpufreeimage, NULL);
+	smoothscroll_configure(smoothscroll, smoothscroll_ms, smoothscroll_regions);
 }
 
 int
 xmakeglyphfontspecs(XftGlyphFontSpec *specs, const Glyph *glyphs, int len, int x, int y)
 {
-	float winx = borderpx + x * win.cw, winy = borderpx + y * win.ch, xp, yp;
+	float winx = borderpx + x * win.cw, winy = borderpx + y * win.ch + xrowdy(x, y), xp, yp;
 	ushort mode, prevmode = USHRT_MAX;
 	Font *font = &dc.font;
 	int frcflags = FRC_NORMAL;
@@ -2201,7 +2246,7 @@ void
 xdrawglyphfontspecs(const XftGlyphFontSpec *specs, Glyph base, int len, int x, int y, int dmode)
 {
 	int charlen = len * ((base.mode & ATTR_WIDE) ? 2 : 1);
-	int winx = borderpx + x * win.cw, winy = borderpx + y * win.ch,
+	int winx = borderpx + x * win.cw, winy = borderpx + y * win.ch + xrowdy(x, y),
 	    width = charlen * win.cw;
 	Color *fg, *bg, *temp, revfg, revbg, truefg, truebg;
 	XRenderColor colfg, colbg;
@@ -2271,11 +2316,12 @@ xdrawglyphfontspecs(const XftGlyphFontSpec *specs, Glyph base, int len, int x, i
 	/* Highlight current line in vim nav mode (outside prompt space).
 	 * Only apply to glyphs with the default background - preserves custom
 	 * backgrounds set by programs (fastfetch, etc.) and cursor colors. */
-	if (y == vimnav_curline_y() && base.bg == defaultbg)
+	if (y == vimnav_curline_y() && base.bg == defaultbg &&
+	    !smoothscroll_plain())
 		bg = &dc.col[vimnav_curline_bg];
 
 	/* Debug mode: highlight prompt lines with yellow tinge */
-	if (debug_mode && base.bg == defaultbg) {
+	if (debug_mode && base.bg == defaultbg && !smoothscroll_plain()) {
 		int ps, pe;
 		vimnav_prompt_line_range(&ps, &pe);
 		if (ps >= 0 && y >= ps && y <= pe)
@@ -2369,8 +2415,10 @@ xdrawglyph(Glyph g, int x, int y)
 		return;
 	}
 
+	xrowclip(x, y);
 	numspecs = xmakeglyphfontspecs(&spec, &g, 1, x, y);
 	xdrawglyphfontspecs(&spec, g, numspecs, x, y, DRAW_BG | DRAW_FG);
+	xrowunclip();
 }
 
 void
@@ -2431,6 +2479,7 @@ xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 	}
 
 	/* draw the new one */
+	xrowclip(cx, cy);
 	if (IS_SET(MODE_FOCUSED)) {
 		switch (win.cursor) {
 		case 7: /* st extension */
@@ -2445,7 +2494,7 @@ xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 		case 4: /* Steady Underline */
 			XftDrawRect(xw.draw, &drawcol,
 					borderpx + cx * win.cw,
-					borderpx + (cy + 1) * win.ch - \
+					borderpx + (cy + 1) * win.ch + xrowdy(cx, cy) - \
 						cursorthickness,
 					win.cw, cursorthickness);
 			break;
@@ -2453,28 +2502,29 @@ xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 		case 6: /* Steady bar */
 			XftDrawRect(xw.draw, &drawcol,
 					borderpx + cx * win.cw,
-					borderpx + cy * win.ch,
+					borderpx + cy * win.ch + xrowdy(cx, cy),
 					cursorthickness, win.ch);
 			break;
 		}
 	} else {
 		XftDrawRect(xw.draw, &drawcol,
 				borderpx + cx * win.cw,
-				borderpx + cy * win.ch,
+				borderpx + cy * win.ch + xrowdy(cx, cy),
 				win.cw - 1, 1);
 		XftDrawRect(xw.draw, &drawcol,
 				borderpx + cx * win.cw,
-				borderpx + cy * win.ch,
+				borderpx + cy * win.ch + xrowdy(cx, cy),
 				1, win.ch - 1);
 		XftDrawRect(xw.draw, &drawcol,
 				borderpx + (cx + 1) * win.cw - 1,
-				borderpx + cy * win.ch,
+				borderpx + cy * win.ch + xrowdy(cx, cy),
 				1, win.ch - 1);
 		XftDrawRect(xw.draw, &drawcol,
 				borderpx + cx * win.cw,
-				borderpx + (cy + 1) * win.ch - 1,
+				borderpx + (cy + 1) * win.ch + xrowdy(cx, cy) - 1,
 				win.cw, 1);
 	}
+	xrowunclip();
 }
 
 void
@@ -2566,6 +2616,9 @@ xstartdraw(void)
 		image_occlusion_begin(&gpu.imageocclusion);
 		gpuresize();
 		gpudamageensure();
+		/* Shifted rows invalidate every retained row and border. */
+		if (smoothscroll_needs_full())
+			gpu.needclear = 1;
 		if (gpu.redrawn)
 			memset(gpu.redrawn, 0,
 			       gpu.redrawnrows * sizeof(*gpu.redrawn));
@@ -2617,11 +2670,39 @@ xstartdraw(void)
 		return 1;
 	}
 	xensurexftbuf(win.cw ? MAX(1, win.tw / win.cw) : 1);
+	{
+		int top, end;
+		/* Moving rows are redrawn offset under a clip: clear their band
+		 * first so whatever nothing covers shows background. */
+		if (smoothscroll_band(&top, &end))
+			xclear(0, borderpx + top * win.ch, win.w,
+			       borderpx + end * win.ch);
+	}
 	return IS_SET(MODE_VISIBLE) && IS_SET(MODE_ONSCREEN);
 }
 
+/* Smooth scrolling: when only some columns of a region band move (side
+ * panels repainted in place), draw the row as uniform segments. */
 void
 xdrawline(Line line, int x1, int y1, int x2)
+{
+	int left, right;
+
+	if (!smoothscroll_span(y1, &left, &right) ||
+	    (left <= x1 && right >= x2)) {
+		xdrawlineseg(line, x1, y1, x2);
+		return;
+	}
+	if (x1 < left)
+		xdrawlineseg(line, x1, y1, MIN(x2, left));
+	if (MAX(x1, left) < MIN(x2, right))
+		xdrawlineseg(line, MAX(x1, left), y1, MIN(x2, right));
+	if (right < x2)
+		xdrawlineseg(line, MAX(x1, right), y1, x2);
+}
+
+static void
+xdrawlineseg(Line line, int x1, int y1, int x2)
 {
 	int i, x, ox, numspecs, numspecs_cached;
 	Glyph base, new;
@@ -2632,6 +2713,7 @@ xdrawline(Line line, int x1, int y1, int x2)
 		return;
 	}
 
+	xrowclip(x1, y1);
 	numspecs_cached = xmakeglyphfontspecs(xw.specbuf, &line[x1], x2 - x1, x1, y1);
 
 	/* Draw line in 2 passes: background and foreground. This way wide glyphs
@@ -2644,9 +2726,11 @@ xdrawline(Line line, int x1, int y1, int x2)
 			new = line[x];
 			if (new.mode == ATTR_WDUMMY)
 				continue;
-			if (selected(x, y1))
+			/* A departing line copied by smooth scrolling is
+			 * not on the grid: no highlights for it. */
+			if (!smoothscroll_plain() && selected(x, y1))
 				new.mode |= ATTR_SELECTED;
-			if (search_matched(x, y1))
+			if (!smoothscroll_plain() && search_matched(x, y1))
 				new.mode |= ATTR_MATCH;
 			if (i > 0 && (ATTRCMP(base, new) ||
 			    isfilledblock(base.u) || isfilledblock(new.u))) {
@@ -2666,7 +2750,7 @@ xdrawline(Line line, int x1, int y1, int x2)
 	}
 
 	/* Debug mode: draw "prompt line" hint text after content */
-	if (debug_mode) {
+	if (debug_mode && !smoothscroll_plain()) {
 		int ps, pe;
 		vimnav_prompt_line_range(&ps, &pe);
 		if (ps >= 0 && y1 >= ps && y1 <= pe) {
@@ -2674,12 +2758,12 @@ xdrawline(Line line, int x1, int y1, int x2)
 			int label_len = 16;
 			int ll = tlinelen(y1);
 			int text_x = borderpx + (ll > 0 ? ll : 0) * win.cw;
-			int text_y = borderpx + y1 * win.ch + dc.font.ascent;
+			int text_y = borderpx + y1 * win.ch + xrowdy(x1, y1) + dc.font.ascent;
 			int label_width = label_len * win.cw;
 			/* Only draw if it fits on screen */
 			if (text_x + label_width <= borderpx + win.tw) {
 				XftDrawRect(xw.draw, &dc.col[debug_prompt_bg],
-						text_x, borderpx + y1 * win.ch,
+						text_x, borderpx + y1 * win.ch + xrowdy(x1, y1),
 						label_width, win.ch);
 				XftDrawStringUtf8(xw.draw, &dc.col[debug_prompt_fg],
 						dc.font.match, text_x, text_y,
@@ -2687,6 +2771,7 @@ xdrawline(Line line, int x1, int y1, int x2)
 			}
 		}
 	}
+	xrowunclip();
 }
 
 void
@@ -3467,12 +3552,37 @@ run(void)
 				timeout = persist_remain;
 		}
 
+		if (xsmoothscrolltimeout(&timeout))
+			redraw = 1;
+
 		if (!redraw)
 			continue;
 		draw();
 		XFlush(xw.dpy);
 		drawing = 0;
+		/* draw() is where a new scroll is noticed: arm its next frame. */
+		xsmoothscrolltimeout(&timeout);
 	}
+}
+
+/* Smooth-scroll animation frames are paced at ~120 Hz (GLX vsync may pace
+ * them further).  Lowers *timeout to the next frame; returns 1 if one is due
+ * now.  Nothing is scheduled at rest, so an idle terminal stays asleep. */
+static int
+xsmoothscrolltimeout(double *timeout)
+{
+	double wait = smoothscroll_timeout();
+	int due = 0;
+
+	if (wait < 0)
+		return 0;
+	if (wait <= 0) {
+		due = 1;
+		wait = 1000.0 / 120.0;
+	}
+	if (*timeout < 0 || wait < *timeout)
+		*timeout = wait;
+	return due;
 }
 
 void
