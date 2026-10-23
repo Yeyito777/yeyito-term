@@ -77,13 +77,21 @@ void smoothscroll_frame(void);
 void smoothscroll_rows(int *first, int *end);
 /* After drawregion(): draw the partial rows / departing lines exposed. */
 void smoothscroll_drawextra(void);
-/* Renderers, per grid row y being drawn: shift it by this many rows (0 at
- * rest) and, when row_clip() returns 1, clip it to grid rows [top, end)
- * (unshifted).  While plain() is 1 the line drawn is a departing copy, not a
- * grid row: skip selection/search/line highlights for it. */
-double smoothscroll_row_shift(int y);
-int smoothscroll_row_clip(int y, int *top, int *end);
+/* Renderers, per grid cell (x, y) being drawn: shift it by this many rows
+ * (0 at rest) and, when clip() returns 1, clip it to grid rows [top, end) and
+ * columns [left, right) (unshifted).  While plain() is 1 the line drawn is a
+ * departing copy, not a grid row: skip selection/search/line highlights.
+ * A line drawer handles a row in segments: span() returns 1 when only grid
+ * columns [left, right) of row y move (side panels repainted in place stay
+ * put); every column of one segment shares the shift/clip of its first. */
+double smoothscroll_shift(int x, int y);
+int smoothscroll_clip(int x, int y, int *top, int *end, int *left,
+		int *right);
+int smoothscroll_span(int y, int *left, int *right);
 int smoothscroll_plain(void);
+/* Recompute the band's moving columns (exposed for tests); 0 when the last
+ * batch mostly rewrote the band instead of scrolling it. */
+int smoothscroll_classify(void);
 /* Rows [top, end) that move this frame (CPU renderers clear them first). */
 int smoothscroll_band(int *top, int *end);
 /* Scrollback shift in rows, for mapping the mouse to the drawn grid. */

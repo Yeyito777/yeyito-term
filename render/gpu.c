@@ -81,9 +81,10 @@ typedef struct {
 	GpuImageTexture *images;
 	ImageOcclusion imageocclusion;
 	uint64_t frame;
-	/* Smooth scrolling: quads of the row being emitted are shifted by rowdy
-	 * pixels and, if rowclip, clipped to [cliptop, clipbot). */
-	double rowdy, cliptop, clipbot;
+	/* Smooth scrolling: quads of the cells being emitted are shifted by
+	 * rowdy pixels and, if rowclip, clipped to [clipleft, clipright) x
+	 * [cliptop, clipbot). */
+	double rowdy, cliptop, clipbot, clipleft, clipright;
 	int rowclip;
 } Gpu;
 
@@ -149,24 +150,27 @@ gpurowbottom(int y)
 	return gpucelly(y + 1);
 }
 
-/* Smooth scrolling (reference/smooth-scroll.md): row y's quads are emitted
- * shifted by its sub-row offset and clipped to its band, so partial rows
- * appear at the band edges and rows outside the band never move. */
+/* Smooth scrolling (reference/smooth-scroll.md): quads of cell (x, y) and
+ * the cells after it in the same segment are emitted shifted by its sub-row
+ * offset and clipped to its band, so partial rows appear at the band edges
+ * and rows/columns outside the moving band never move. */
 static void
-gpubeginrow(int y)
+gpubegincell(int x, int y)
 {
-	int top, end;
+	int top, end, left, right;
 
-	gpu.rowdy = ss_device_round(smoothscroll_row_shift(y) * gpucellh(), 1.0);
-	gpu.rowclip = smoothscroll_row_clip(y, &top, &end);
+	gpu.rowdy = ss_device_round(smoothscroll_shift(x, y) * gpucellh(), 1.0);
+	gpu.rowclip = smoothscroll_clip(x, y, &top, &end, &left, &right);
 	if (gpu.rowclip) {
 		gpu.cliptop = gpucelly(top);
 		gpu.clipbot = gpucelly(end);
+		gpu.clipleft = left == 0 ? 0 : gpucellx(left);
+		gpu.clipright = right >= tcol() ? win.w : gpucellx(right);
 	}
 }
 
 static void
-gpuendrow(void)
+gpuendcell(void)
 {
 	gpu.rowdy = 0;
 	gpu.rowclip = 0;
@@ -838,13 +842,18 @@ gpubatchquad(GpuBatch *b, double x, double y, double w, double h,
 	y += gpu.rowdy;
 	if (gpu.rowclip) {
 		double y0 = MAX(y, gpu.cliptop), y1 = MIN(y + h, gpu.clipbot);
-		double dv = v2 - v1;
+		double x0 = MAX(x, gpu.clipleft), x1 = MIN(x + w, gpu.clipright);
+		double dv = v2 - v1, du = u2 - u1;
 
-		if (y1 <= y0)
+		if (y1 <= y0 || x1 <= x0)
 			return;
 		v2 = v1 + dv * (y1 - y) / h;
 		v1 = v1 + dv * (y0 - y) / h;
+		u2 = u1 + du * (x1 - x) / w;
+		u1 = u1 + du * (x0 - x) / w;
+		x = x0;
 		y = y0;
+		w = x1 - x0;
 		h = y1 - y0;
 	}
 	v = gpubatchalloc(b, 6);
@@ -948,7 +957,7 @@ gpudrawline(Line line, int x1, int y, int x2)
 		gpu.redrawn[y] = 1;
 	if (hy == INT_MIN)
 		selactive = searchactive = 0;
-	gpubeginrow(y);
+	gpubegincell(x1, y);	/* x.c draws rows in uniform segments */
 
 	gpucolor(defaultfg, dfg);
 	gpucolor(defaultbg, dbg);
@@ -1021,7 +1030,7 @@ gpudrawline(Line line, int x1, int y, int x2)
 	}
 	if (haverun && (!gpu.clearedframe || !gpucoloreq(runbg, dbg)))
 		gpubatchrect(&gpu.bg, runx, basey, runw, rowh, runbg);
-	gpuendrow();
+	gpuendcell();
 }
 
 static void
@@ -1060,10 +1069,10 @@ gpudrawcell(Glyph g, int x, int y, int layer, int applyhighlights)
 		g.mode |= ATTR_MATCH;
 	gpuresolve(g, x, y, fg, bg);
 	cellw = gpucellright(x, g.mode & ATTR_WIDE) - cellx;
-	gpubeginrow(y);
+	gpubegincell(x, y);
 	gpubatchrect(bb, cellx, celly, cellw, cellh, bg);
 	if (g.mode & ATTR_INVISIBLE) {
-		gpuendrow();
+		gpuendcell();
 		return;
 	}
 	if (g.u != ' ') {
@@ -1091,7 +1100,7 @@ gpudrawcell(Glyph g, int x, int y, int layer, int applyhighlights)
 		gpubatchrect(db, cellx, baseline + 1, gpucellright(x, 0) - cellx, 1, fg);
 	if (g.mode & ATTR_STRUCK)
 		gpubatchrect(db, cellx, celly + cellh / 2, gpucellright(x, 0) - cellx, 1, fg);
-	gpuendrow();
+	gpuendcell();
 }
 
 static void
@@ -1138,7 +1147,7 @@ gpudrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 		cg.bg = defaultcs;
 		gpucolor(cg.bg, col);
 	}
-	gpubeginrow(cy);
+	gpubegincell(cx, cy);
 	if (IS_SET(MODE_FOCUSED)) {
 		switch (win.cursor) {
 		case 7:
@@ -1165,7 +1174,7 @@ gpudrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 		gpubatchrect(&gpu.odeco, cellx + cellw - 1, celly, 1, cellh, col);
 		gpubatchrect(&gpu.odeco, cellx, celly + cellh - 1, cellw, 1, col);
 	}
-	gpuendrow();
+	gpuendcell();
 }
 
 static GpuImageTexture *
@@ -1306,20 +1315,21 @@ gpudrawimage(const GraphicsPlacementView *placement, void *context)
 	    gpucelly(placement->row + placement->rows) - gpucelly(placement->row);
 	/* Smooth scrolling: the image moves with its anchor row and is clipped
 	 * to that row's band; rowdy is also picked up by gpufillcells(). */
-	gpubeginrow(placement->row);
+	gpubegincell(placement->column, placement->row);
 	y += gpu.rowdy;
 	if (x >= win.w - borderpx || x + w <= borderpx ||
 	    y >= win.h - borderpx || y + h <= borderpx) {
-		gpuendrow();
+		gpuendcell();
 		return;
 	}
 	clipped = gpu.rowclip;
 	if (clipped)
-		glScissor(0, win.h - (int)gpu.clipbot, win.w,
+		glScissor((int)gpu.clipleft, win.h - (int)gpu.clipbot,
+		    MAX(0, (int)(gpu.clipright - gpu.clipleft)),
 		    MAX(0, (int)(gpu.clipbot - gpu.cliptop)));
 	image = gpuimagetexture(placement);
 	if (!image) {
-		gpuendrow();
+		gpuendcell();
 		if (clipped)
 			gpuimagescissor();
 		return;
@@ -1384,7 +1394,7 @@ gpudrawimage(const GraphicsPlacementView *placement, void *context)
 	/* Keep the original per-cell baseline alive while selected, but do not draw
 	 * later cell changes over the atomic selection. Once selection ends, menus
 	 * and other changed cells immediately resume occluding their own regions. */
-	gpuendrow();	/* covering cells shift/clip by their own rows */
+	gpuendcell();	/* covering cells shift/clip by their own rows */
 	image_occlusion_draw(&gpu.imageocclusion, placement, tcol(), trow(),
 	    tlineviewline, selected_image ? NULL : gpuoccludecell, NULL);
 	gpudrawimageocclusion();

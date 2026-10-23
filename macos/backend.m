@@ -390,28 +390,31 @@ rowBaseline(int y)
 int xdrawrowtop(int row) { return (int)cellY(MAX(0, row)); }
 int xdrawrowbottom(int row) { return (int)rowBottom(MAX(0, row)); }
 
-/* Smooth scrolling (reference/smooth-scroll.md): quads of grid row y are
- * shifted by its sub-row offset, rounded to device pixels, and clipped to its
- * band, so partial rows appear at band edges and rows outside never move.
- * Window UI (command line, toasts, SSH badge, IME text) never sets a row. */
+/* Smooth scrolling (reference/smooth-scroll.md): quads of grid cell (x, y)
+ * are shifted by its sub-row offset, rounded to device pixels, and clipped
+ * to its band, so partial rows appear at band edges and rows/columns outside
+ * the moving band never move.  Window UI (command line, toasts, SSH badge,
+ * IME text) never sets a cell. */
 static double
-beginRow(int y)
+beginCell(int x, int y)
 {
-	int top, end;
-	double dy = ss_device_round(smoothscroll_row_shift(y) * cellHeight(),
+	int top, end, left, right;
+	double dy = ss_device_round(smoothscroll_shift(x, y) * cellHeight(),
 	    mac_renderer_scale());
 
-	if (smoothscroll_row_clip(y, &top, &end))
-		mac_renderer_set_row(dy, 1, cellY(top), cellY(end));
+	if (smoothscroll_clip(x, y, &top, &end, &left, &right))
+		mac_renderer_set_row(dy, 1, left == 0 ? 0 : cellX(left),
+		    cellY(top), right >= tcol() ? win.w : cellX(right),
+		    cellY(end));
 	else
-		mac_renderer_set_row(dy, 0, 0, 0);
+		mac_renderer_set_row(dy, 0, 0, 0, 0, 0);
 	return dy;
 }
 
 static void
-endRow(void)
+endCell(void)
 {
-	mac_renderer_set_row(0, 0, 0, 0);
+	mac_renderer_set_row(0, 0, 0, 0, 0, 0);
 }
 
 static void
@@ -486,7 +489,7 @@ drawCell(Glyph glyph, int x, int y, enum MacCellLayer layer, int applyHighlights
 	if (applyHighlights && !plain && search_active() && search_matched(x, y))
 		glyph.mode |= ATTR_MATCH;
 	resolveGlyph(glyph, x, plain ? INT_MIN : y, &fg, &bg);
-	beginRow(y);
+	beginCell(x, y);
 	double left = cellX(x), top = cellY(y);
 	double width = cellRight(x, glyph.mode & ATTR_WIDE) - left;
 	double height = rowBottom(y) - top;
@@ -507,7 +510,7 @@ drawCell(Glyph glyph, int x, int y, enum MacCellLayer layer, int applyHighlights
 		mac_renderer_rect(bgLayer, left, top, width, height, bg);
 	/* Concealed text paints nothing, so an image below text shows through. */
 	if (glyph.mode & ATTR_INVISIBLE) {
-		endRow();
+		endCell();
 		return;
 	}
 	if (glyph.u != ' ' && glyph.u != 0) {
@@ -531,7 +534,7 @@ drawCell(Glyph glyph, int x, int y, enum MacCellLayer layer, int applyHighlights
 	if (glyph.mode & ATTR_STRUCK)
 		mac_renderer_rect(decoLayer, left, top + height / 2,
 		    cellRight(x, 0) - left, 1, fg);
-	endRow();
+	endCell();
 }
 
 int
@@ -553,8 +556,30 @@ xstartdraw(void)
 	return 1;
 }
 
+static void xdrawlineseg(Line, int, int, int);
+
+/* Smooth scrolling: when only some columns of a region band move (side
+ * panels repainted in place), draw the row as uniform segments. */
 void
 xdrawline(Line line, int x1, int y, int x2)
+{
+	int left, right;
+
+	if (!smoothscroll_span(y, &left, &right) ||
+	    (left <= x1 && right >= x2)) {
+		xdrawlineseg(line, x1, y, x2);
+		return;
+	}
+	if (x1 < left)
+		xdrawlineseg(line, x1, y, MIN(x2, left));
+	if (MAX(x1, left) < MIN(x2, right))
+		xdrawlineseg(line, MAX(x1, left), y, MIN(x2, right));
+	if (right < x2)
+		xdrawlineseg(line, MAX(x1, right), y, x2);
+}
+
+static void
+xdrawlineseg(Line line, int x1, int y, int x2)
 {
 	for (int x = x1; x < x2; x++)
 		drawCell(line[x], x, y, MAC_CELL_BASE, 1);
@@ -568,14 +593,14 @@ xdrawline(Line line, int x1, int y, int x2)
 			double x = cellX(MAX(0, tlinelen(y)));
 			double width = mac_renderer_text_width(label, length, 1.0);
 			if (x + width <= win.w - borderpx) {
-				beginRow(y);
+				beginCell(x1, y);
 				mac_renderer_rect(MAC_LAYER_DECORATION, x, cellY(y),
 				    width, rowBottom(y) - cellY(y),
 				    indexedColor(debug_prompt_bg));
-				beginRow(y);
+				beginCell(x1, y);
 				mac_renderer_text(MAC_LAYER_DECORATION, label, length, x,
 				    rowBaseline(y), 1.0, indexedColor(debug_prompt_fg));
-				endRow();
+				endCell();
 			}
 		}
 	}
@@ -614,7 +639,7 @@ xdrawcursor(int cx, int cy, Glyph glyph, int ox, int oy, Glyph oldGlyph)
 		color = indexedColor(defaultcs);
 	}
 
-	beginRow(cy);
+	beginCell(cx, cy);
 	if (IS_SET(MODE_FOCUSED)) {
 		switch (win.cursor) {
 		case 7: glyph.u = 0x2603; /* fallthrough */
@@ -639,7 +664,7 @@ xdrawcursor(int cx, int cy, Glyph glyph, int ox, int oy, Glyph oldGlyph)
 		mac_renderer_rect(MAC_LAYER_OVERLAY_DECORATION, left,
 		    top + height - 1, width, 1, color);
 	}
-	endRow();
+	endCell();
 }
 
 static void drawMarkedText(void);
@@ -665,10 +690,10 @@ drawGraphicsPlacement(const GraphicsPlacementView *placement, void *context)
 	    cellY(placement->row + placement->rows) - cellY(placement->row);
 
 	/* Smooth scrolling: the image moves with its anchor row's band. */
-	double dy = beginRow(placement->row);
+	double dy = beginCell(placement->column, placement->row);
 	if (x >= borderpx + win.tw || x + width <= borderpx ||
 	    y + dy >= borderpx + win.th || y + height + dy <= borderpx) {
-		endRow();
+		endCell();
 		return;
 	}
 	/* An image below text that copies as text selects as one unit: its whole
@@ -693,17 +718,17 @@ drawGraphicsPlacement(const GraphicsPlacementView *placement, void *context)
 	    selectedregion(placement->column, placement->row,
 	    placement->columns, placement->rows));
 	/* Covering cells shift and clip by their own rows. */
-	endRow();
+	endCell();
 	image_occlusion_draw(&imageOcclusion, placement, tcol(), trow(),
 	    tlineviewline, selectedImage ? NULL : drawImageOcclusionCell, NULL);
 	if (selectedImage) {
 		MacColor color = indexedColor(selectionbg);
 		color.a = 0.45f;
-		beginRow(placement->row);
+		beginCell(placement->column, placement->row);
 		mac_renderer_rect(stage == GRAPHICS_STAGE_ABOVE_TEXT ?
 		    MAC_LAYER_IMAGE_DECORATION : MAC_LAYER_OVERLAY_DECORATION, x, y, width,
 		    height, color);
-		endRow();
+		endCell();
 	}
 }
 

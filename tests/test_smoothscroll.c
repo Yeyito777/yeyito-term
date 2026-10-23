@@ -15,7 +15,7 @@
 
 #define FAKE_HIST 100
 #define FAKE_ROWS 10
-#define FAKE_COLS 4
+#define FAKE_COLS 12
 #define FAKE_LINES (FAKE_HIST + FAKE_ROWS)
 
 static Glyph store[FAKE_LINES][FAKE_COLS], altstore[FAKE_ROWS][FAKE_COLS];
@@ -24,7 +24,7 @@ static int fhistn, fscr, frows, falt, fulldirts, ndrawn, drawn[64];
 static unsigned int fmode;
 static double fakenow;
 /* What each xdrawline() call drew: first rune, shift, departing copy? */
-static int drawnid[64], drawnplain[64];
+static int drawnid[64], drawnplain[64], drawnx1[64], drawnx2[64];
 static double drawnshift[64];
 static int nextid;
 
@@ -66,10 +66,11 @@ kscrolldown(const Arg *a)
 void
 xdrawline(Line line, int x1, int y, int x2)
 {
-	(void)x1; (void)x2;
 	if (ndrawn < (int)(sizeof(drawn) / sizeof(drawn[0]))) {
-		drawnid[ndrawn] = line[0].u;
-		drawnshift[ndrawn] = smoothscroll_row_shift(y);
+		drawnid[ndrawn] = line[x1].u;
+		drawnx1[ndrawn] = x1;
+		drawnx2[ndrawn] = x2;
+		drawnshift[ndrawn] = smoothscroll_shift(x1, y);
 		drawnplain[ndrawn] = smoothscroll_plain();
 		drawn[ndrawn++] = y;
 	}
@@ -79,7 +80,14 @@ xdrawline(Line line, int x1, int y, int x2)
 static double
 viewpx(void)
 {
-	return ss_device_round(smoothscroll_row_shift(0) * 20, 1);
+	return ss_device_round(smoothscroll_shift(0, 0) * 20, 1);
+}
+
+static void
+fillrow(int y, int id)
+{
+	for (int x = 0; x < FAKE_COLS; x++)
+		altstore[y][x] = (Glyph){ .u = id };
 }
 
 /* Apply a region scroll to the alternate screen as st does: the hook runs
@@ -94,12 +102,12 @@ region_scroll(int top, int bot, int orig, int n)
 		for (y = orig; y <= bot - n; y++)
 			memcpy(altstore[y], altstore[y + n], sizeof(altstore[y]));
 		for (y = bot - n + 1; y <= bot; y++)
-			altstore[y][0].u = nextid++;
+			fillrow(y, nextid++);
 	} else {
 		for (y = bot; y >= orig - n; y--)
 			memcpy(altstore[y], altstore[y + n], sizeof(altstore[y]));
 		for (y = orig; y < orig - n; y++)
-			altstore[y][0].u = nextid++;
+			fillrow(y, nextid++);
 	}
 }
 
@@ -116,7 +124,7 @@ alt_reset(int regions)
 	falt = 1;
 	fmode = 0;
 	for (y = 0; y < FAKE_ROWS; y++)
-		altstore[y][0].u = 100 + y;	/* row ids */
+		fillrow(y, 100 + y);	/* row ids in every column */
 	nextid = 200;
 	frame_at(1000);
 	fulldirts = ndrawn = 0;
@@ -496,17 +504,17 @@ TEST(region_heuristics)
 
 TEST(region_scroll_glides_band_only)
 {
-	int top, end;
+	int top, end, left, right;
 
 	alt_reset(1);
 	region_scroll(0, 7, 0, 1);	/* rows 8-9: status line, cmdline */
 	frame_at(1000);
-	ASSERT(NEAR(1.0, smoothscroll_row_shift(3)));	/* drawn where it was */
-	ASSERT(NEAR(0.0, smoothscroll_row_shift(8)));
-	ASSERT(smoothscroll_row_clip(3, &top, &end));
+	ASSERT(NEAR(1.0, smoothscroll_shift(0, 3)));	/* drawn where it was */
+	ASSERT(NEAR(0.0, smoothscroll_shift(0, 8)));
+	ASSERT(smoothscroll_clip(0, 3, &top, &end, &left, &right));
 	ASSERT_EQ(0, top);
 	ASSERT_EQ(8, end);
-	ASSERT(!smoothscroll_row_clip(9, &top, &end));
+	ASSERT(!smoothscroll_clip(0, 9, &top, &end, &left, &right));
 	ASSERT(smoothscroll_band(&top, &end));
 	ASSERT(smoothscroll_needs_full());
 	ASSERT(fulldirts > 0);
@@ -520,14 +528,14 @@ TEST(region_scroll_glides_band_only)
 	ASSERT(NEAR(0.0, drawnshift[0]));
 	ASSERT(!smoothscroll_plain());
 	frame_at(1050);
-	ASSERT(NEAR(0.125, smoothscroll_row_shift(3)));
+	ASSERT(NEAR(0.125, smoothscroll_shift(0, 3)));
 	ndrawn = 0;
 	smoothscroll_drawextra();
 	ASSERT_EQ(1, ndrawn);
 	ASSERT(NEAR(-0.875, drawnshift[0]));
 	frame_at(1100);
-	ASSERT(NEAR(0.0, smoothscroll_row_shift(3)));
-	ASSERT(!smoothscroll_row_clip(3, &top, &end));
+	ASSERT(NEAR(0.0, smoothscroll_shift(0, 3)));
+	ASSERT(!smoothscroll_clip(0, 3, &top, &end, &left, &right));
 	ASSERT(smoothscroll_needs_full());	/* one clean frame at rest */
 	ASSERT(!smoothscroll_pending());
 	frame_at(1116);
@@ -540,7 +548,7 @@ TEST(region_scroll_down_exposes_departing_bottom_line)
 	alt_reset(1);
 	region_scroll(0, 7, 0, -1);	/* RI at top / IL at top */
 	frame_at(1000);
-	ASSERT(NEAR(-1.0, smoothscroll_row_shift(0)));
+	ASSERT(NEAR(-1.0, smoothscroll_shift(0, 0)));
 	smoothscroll_drawextra();
 	ASSERT_EQ(1, ndrawn);
 	ASSERT_EQ(7, drawn[0]);
@@ -561,15 +569,15 @@ TEST(region_scrolls_in_one_sync_batch_accumulate)
 	frame_at(1020);	/* withheld: nothing advances */
 	fmode = 0;
 	frame_at(1040);	/* presented: the glide starts now */
-	ASSERT(smoothscroll_row_shift(3) > 2.9);
-	ASSERT(smoothscroll_row_shift(3) <= 3.0);
+	ASSERT(smoothscroll_shift(0, 3) > 2.9);
+	ASSERT(smoothscroll_shift(0, 3) <= 3.0);
 	smoothscroll_drawextra();
 	ASSERT_EQ(3, ndrawn);	/* all three departing lines */
 	ASSERT_EQ(102, drawnid[0]);
 	ASSERT_EQ(101, drawnid[1]);
 	ASSERT_EQ(100, drawnid[2]);
 	frame_at(1140);
-	ASSERT(NEAR(0.0, smoothscroll_row_shift(3)));
+	ASSERT(NEAR(0.0, smoothscroll_shift(0, 3)));
 }
 
 TEST(region_scroll_mid_glide_retargets)
@@ -580,7 +588,7 @@ TEST(region_scroll_mid_glide_retargets)
 	frame_at(1050);
 	region_scroll(0, 7, 0, 1);
 	frame_at(1050);
-	ASSERT(NEAR(1.125, smoothscroll_row_shift(3)));
+	ASSERT(NEAR(1.125, smoothscroll_shift(0, 3)));
 	smoothscroll_drawextra();
 	ASSERT_EQ(2, ndrawn);	/* both departed lines still sliding out */
 	ASSERT_EQ(101, drawnid[0]);
@@ -588,7 +596,7 @@ TEST(region_scroll_mid_glide_retargets)
 	/* Reversing direction drops copies that come back as grid rows. */
 	region_scroll(0, 7, 0, -1);
 	frame_at(1050);
-	ASSERT(NEAR(0.125, smoothscroll_row_shift(3)));
+	ASSERT(NEAR(0.125, smoothscroll_shift(0, 3)));
 	ndrawn = 0;
 	smoothscroll_drawextra();
 	ASSERT_EQ(1, ndrawn);
@@ -600,26 +608,26 @@ TEST(region_jumps_instead_of_animating)
 	alt_reset(1);
 	region_scroll(0, 7, 0, 8);	/* whole region: a redraw */
 	frame_at(1000);
-	ASSERT(NEAR(0.0, smoothscroll_row_shift(3)));
+	ASSERT(NEAR(0.0, smoothscroll_shift(0, 3)));
 	region_scroll(8, 9, 8, 1);	/* 2-row region */
 	frame_at(1000);
-	ASSERT(NEAR(0.0, smoothscroll_row_shift(8)));
+	ASSERT(NEAR(0.0, smoothscroll_shift(0, 8)));
 	region_scroll(0, 7, 3, 1);	/* DL mid-region: an edit */
 	frame_at(1000);
-	ASSERT(NEAR(0.0, smoothscroll_row_shift(5)));
+	ASSERT(NEAR(0.0, smoothscroll_shift(0, 5)));
 	ASSERT(!smoothscroll_pending());
 	/* A fast stream (more than a region per glide) jumps too. */
 	for (int i = 0; i < 9; i++)
 		region_scroll(0, 7, 0, 1);
 	frame_at(1000);
-	ASSERT(NEAR(0.0, smoothscroll_row_shift(3)));
+	ASSERT(NEAR(0.0, smoothscroll_shift(0, 3)));
 	/* A redraw-sized scroll snaps a glide in progress. */
 	region_scroll(0, 7, 0, 2);
 	frame_at(1000);
-	ASSERT(NEAR(2.0, smoothscroll_row_shift(3)));
+	ASSERT(NEAR(2.0, smoothscroll_shift(0, 3)));
 	region_scroll(0, 7, 0, 8);
 	frame_at(1000);
-	ASSERT(NEAR(0.0, smoothscroll_row_shift(3)));
+	ASSERT(NEAR(0.0, smoothscroll_shift(0, 3)));
 }
 
 TEST(region_edit_keeps_glide_and_new_band_restarts)
@@ -629,11 +637,11 @@ TEST(region_edit_keeps_glide_and_new_band_restarts)
 	frame_at(1000);
 	region_scroll(0, 7, 4, 1);	/* app deletes a line mid-glide */
 	frame_at(1010);
-	ASSERT(smoothscroll_row_shift(3) > 1.0);
+	ASSERT(smoothscroll_shift(0, 3) > 1.0);
 	region_scroll(0, 5, 0, 1);	/* another window scrolls */
 	frame_at(1010);
-	ASSERT(NEAR(1.0, smoothscroll_row_shift(3)));
-	ASSERT(NEAR(0.0, smoothscroll_row_shift(7)));
+	ASSERT(NEAR(1.0, smoothscroll_shift(0, 3)));
+	ASSERT(NEAR(0.0, smoothscroll_shift(0, 7)));
 }
 
 TEST(regions_knob_and_decsclm)
@@ -641,34 +649,34 @@ TEST(regions_knob_and_decsclm)
 	alt_reset(0);
 	region_scroll(0, 7, 0, 1);
 	frame_at(1000);
-	ASSERT(NEAR(0.0, smoothscroll_row_shift(3)));
+	ASSERT(NEAR(0.0, smoothscroll_shift(0, 3)));
 	smoothscroll_decsclm(1);	/* app opts in */
 	region_scroll(0, 7, 0, 1);
 	frame_at(1000);
-	ASSERT(NEAR(1.0, smoothscroll_row_shift(3)));
+	ASSERT(NEAR(1.0, smoothscroll_shift(0, 3)));
 	frame_at(1200);
 	smoothscroll_decsclm(0);
 	region_scroll(0, 7, 0, 1);
 	frame_at(1200);
-	ASSERT(NEAR(0.0, smoothscroll_row_shift(3)));
+	ASSERT(NEAR(0.0, smoothscroll_shift(0, 3)));
 	/* With the knob on, CSI ? 4 l does not turn the default off. */
 	alt_reset(1);
 	smoothscroll_decsclm(0);
 	region_scroll(0, 7, 0, 1);
 	frame_at(1000);
-	ASSERT(NEAR(1.0, smoothscroll_row_shift(3)));
+	ASSERT(NEAR(1.0, smoothscroll_shift(0, 3)));
 }
 
 TEST(regions_inert_when_disabled)
 {
-	int top, end;
+	int top, end, left, right;
 
 	fake_reset(0);
 	falt = 1;
 	region_scroll(0, 7, 0, 1);
 	frame_at(1000);
-	ASSERT(NEAR(0.0, smoothscroll_row_shift(3)));
-	ASSERT(!smoothscroll_row_clip(3, &top, &end));
+	ASSERT(NEAR(0.0, smoothscroll_shift(0, 3)));
+	ASSERT(!smoothscroll_clip(0, 3, &top, &end, &left, &right));
 	ASSERT(!smoothscroll_band(&top, &end));
 	ASSERT(!smoothscroll_plain());
 	ASSERT(!smoothscroll_pending());
@@ -684,8 +692,188 @@ TEST(region_resets_on_screen_switch)
 	frame_at(1000);
 	falt = 0;
 	frame_at(1010);
-	ASSERT(NEAR(0.0, smoothscroll_row_shift(3)));
+	ASSERT(NEAR(0.0, smoothscroll_shift(0, 3)));
 	ASSERT(!smoothscroll_pending());
+}
+
+/* ---- Static columns: side panels repainted in place ---- */
+
+static Glyph sidebar[FAKE_ROWS][4];
+
+/* Columns 0-3 are a sidebar with distinct rows; 4-11 the scrolled pane. */
+static void
+sidebar_reset(void)
+{
+	alt_reset(1);
+	for (int y = 0; y < FAKE_ROWS; y++)
+		for (int x = 0; x < 4; x++)
+			sidebar[y][x] = altstore[y][x] = (Glyph){ .u = 500 + y };
+}
+
+static void
+sidebar_repaint(void)
+{
+	for (int y = 0; y < FAKE_ROWS; y++)
+		memcpy(altstore[y], sidebar[y], sizeof(sidebar[y]));
+}
+
+TEST(sidebar_repainted_in_sync_batch_stays_put)
+{
+	int top, end, left, right;
+
+	sidebar_reset();
+	fmode = MODE_SYNC;	/* the Exocortex TUI: SU, then repaint panel */
+	region_scroll(0, 7, 0, 2);
+	sidebar_repaint();
+	fmode = 0;
+	frame_at(1000);
+	ASSERT(smoothscroll_span(3, &left, &right));
+	ASSERT_EQ(4, left);
+	ASSERT_EQ(12, right);
+	ASSERT(!smoothscroll_span(9, &left, &right));	/* outside the band */
+	ASSERT(NEAR(0.0, smoothscroll_shift(1, 3)));	/* sidebar */
+	ASSERT(NEAR(2.0, smoothscroll_shift(6, 3)));	/* pane */
+	ASSERT(!smoothscroll_clip(1, 3, &top, &end, &left, &right));
+	ASSERT(smoothscroll_clip(6, 3, &top, &end, &left, &right));
+	ASSERT_EQ(4, left);
+	ASSERT_EQ(12, right);
+	/* Departing lines slide out of the pane only, not over the sidebar. */
+	smoothscroll_drawextra();
+	ASSERT_EQ(2, ndrawn);
+	ASSERT_EQ(4, drawnx1[0]);
+	ASSERT_EQ(12, drawnx2[0]);
+	ASSERT_EQ(101, drawnid[0]);
+	ASSERT_EQ(100, drawnid[1]);
+}
+
+TEST(rewrapped_right_panel_stays_put)
+{
+	int left, right;
+
+	alt_reset(1);
+	region_scroll(0, 7, 0, 1);
+	for (int y = 0; y <= 7; y++)	/* columns 8-11 re-wrapped in place */
+		for (int x = 8; x < FAKE_COLS; x++)
+			altstore[y][x] = (Glyph){ .u = 900 + 10 * y + x };
+	frame_at(1000);
+	ASSERT(smoothscroll_span(3, &left, &right));
+	ASSERT_EQ(0, left);
+	ASSERT_EQ(8, right);
+	ASSERT(NEAR(1.0, smoothscroll_shift(2, 3)));
+	ASSERT(NEAR(0.0, smoothscroll_shift(9, 3)));
+}
+
+TEST(mostly_rewritten_band_does_not_glide)
+{
+	alt_reset(1);
+	region_scroll(0, 7, 0, 1);
+	for (int y = 0; y <= 7; y++)
+		for (int x = 0; x < FAKE_COLS; x++)
+			altstore[y][x] = (Glyph){ .u = 700 + 10 * y + x };
+	frame_at(1000);
+	ASSERT(NEAR(0.0, smoothscroll_shift(5, 3)));
+	ASSERT(!smoothscroll_pending());
+	smoothscroll_drawextra();
+	ASSERT_EQ(0, ndrawn);
+}
+
+TEST(late_panel_repaint_refines_moving_columns)
+{
+	int left, right;
+
+	sidebar_reset();
+	region_scroll(0, 7, 0, 1);	/* presented before the panel repaint */
+	frame_at(1000);
+	ASSERT(!smoothscroll_span(3, &left, &right));	/* all columns moved */
+	sidebar_repaint();
+	frame_at(1010);
+	ASSERT(smoothscroll_span(3, &left, &right));
+	ASSERT_EQ(4, left);
+	ASSERT(NEAR(0.0, smoothscroll_shift(1, 3)));
+	ASSERT(smoothscroll_shift(6, 3) > 0.5);
+}
+
+/* Text repeated on every row of the pane (a prefix, padding) tells nothing
+ * apart; it must move with the pane, not split off and stay behind. */
+TEST(repeated_pane_text_moves_with_pane)
+{
+	int left, right;
+
+	sidebar_reset();
+	for (int y = 0; y < FAKE_ROWS; y++) {
+		/* the sidebar's last column is padding: the gap between panes */
+		sidebar[y][3] = altstore[y][3] = (Glyph){ .u = ' ' };
+		for (int x = 4; x < 8; x++)
+			altstore[y][x] = (Glyph){ .u = 'm' };	/* "msg " on every row */
+	}
+	fmode = MODE_SYNC;
+	region_scroll(0, 7, 0, 1);
+	for (int y = 6; y <= 7; y++)	/* the app draws its new row the same way */
+		for (int x = 4; x < 8; x++)
+			altstore[y][x] = (Glyph){ .u = 'm' };
+	sidebar_repaint();
+	fmode = 0;
+	frame_at(1000);
+	ASSERT(smoothscroll_span(3, &left, &right));
+	ASSERT_EQ(4, left);	/* split at the padding before the sidebar */
+	ASSERT_EQ(12, right);
+	ASSERT(NEAR(1.0, smoothscroll_shift(4, 3)));
+	ASSERT(NEAR(0.0, smoothscroll_shift(2, 3)));
+}
+
+/* A re-wrapped panel's border and label repeat on every row: they tell
+ * nothing apart but must stay with the panel, not slide with the pane. */
+static void
+taskpanel(int y, int k)
+{
+	altstore[y][8] = (Glyph){ .u = ' ' };	/* padding */
+	altstore[y][9] = (Glyph){ .u = 'T' };	/* "│ task" on every row */
+	altstore[y][10] = (Glyph){ .u = 900 + 10 * y + k };
+	altstore[y][11] = (Glyph){ .u = 950 + 10 * y + k };
+}
+
+TEST(rewrapped_panel_keeps_its_repeated_label)
+{
+	int left, right;
+
+	alt_reset(1);
+	for (int y = 0; y < FAKE_ROWS; y++)
+		taskpanel(y, 0);
+	fmode = MODE_SYNC;
+	region_scroll(0, 7, 0, 1);
+	for (int y = 0; y <= 7; y++)
+		taskpanel(y, 1);
+	fmode = 0;
+	frame_at(1000);
+	ASSERT(smoothscroll_span(3, &left, &right));
+	ASSERT_EQ(0, left);
+	ASSERT_EQ(8, right);
+	ASSERT(NEAR(0.0, smoothscroll_shift(9, 3)));
+	ASSERT(NEAR(1.0, smoothscroll_shift(7, 3)));
+}
+
+TEST(uniform_band_glides_full_width)
+{
+	int left, right;
+
+	alt_reset(1);
+	for (int y = 0; y <= 7; y++)
+		fillrow(y, 7);	/* e.g. blank lines: nothing to tell apart */
+	region_scroll(0, 7, 0, 1);
+	frame_at(1000);
+	ASSERT(!smoothscroll_span(3, &left, &right));
+	ASSERT(NEAR(1.0, smoothscroll_shift(11, 3)));
+}
+
+TEST_SUITE(smoothscroll_static_columns)
+{
+	RUN_TEST(sidebar_repainted_in_sync_batch_stays_put);
+	RUN_TEST(rewrapped_right_panel_stays_put);
+	RUN_TEST(mostly_rewritten_band_does_not_glide);
+	RUN_TEST(late_panel_repaint_refines_moving_columns);
+	RUN_TEST(repeated_pane_text_moves_with_pane);
+	RUN_TEST(rewrapped_panel_keeps_its_repeated_label);
+	RUN_TEST(uniform_band_glides_full_width);
 }
 
 TEST_SUITE(smoothscroll_regions)
@@ -738,5 +926,6 @@ main(void)
 	RUN_SUITE(smoothscroll_engine);
 	RUN_SUITE(smoothscroll_terminal);
 	RUN_SUITE(smoothscroll_regions);
+	RUN_SUITE(smoothscroll_static_columns);
 	return test_summary();
 }

@@ -6,7 +6,10 @@
  * - Scrollback: follows term.scr; every row shifts, clipped to the grid.
  * - Regions: an application scrolled a DECSTBM region (SU/SD, IND/RI at a
  *   margin, IL/DL at the top margin); only rows of that band shift, clipped
- *   to it.  The lines that left the band are kept as copies and slide out. */
+ *   to it.  The lines that left the band are kept as copies and slide out.
+ *   st has no left/right margins, so apps with side panels scroll the whole
+ *   width and repaint the panels in place; comparing the band before and
+ *   after each batch finds the columns that really moved (see classify()). */
 
 #include <limits.h>
 #include <stdint.h>
@@ -44,6 +47,13 @@ static struct {
 	 * just above the band top, below[0] just below its bottom. */
 	Glyph **above, **below;
 	int nabove, nbelow, cap;
+	/* The band before the current batch of scrolls, the batch's net
+	 * distance, and the columns [left, right) that move. */
+	Glyph *snap;
+	int batchn, left, right;
+	/* Per column: VOTED (some cell told stayed/moved apart), BLANK (blank
+	 * on every band row before and after the batch). */
+	unsigned char *colinfo;
 } reg;
 
 /* A copied line being drawn outside the grid: its shift relative to the
@@ -83,6 +93,8 @@ regreset(void)
 	ghostsfree(reg.below, &reg.nbelow, 0);
 	free(reg.above);
 	free(reg.below);
+	free(reg.snap);
+	free(reg.colinfo);
 	memset(&reg, 0, sizeof(reg));
 }
 
@@ -242,13 +254,30 @@ smoothscroll_region(int top, int bot, int orig, int n)
 		reg.cols = tcol();
 		reg.alt = alt;
 		reg.cap = height;
+		reg.left = 0;
+		reg.right = reg.cols;
 		reg.above = calloc(height, sizeof(*reg.above));
 		reg.below = calloc(height, sizeof(*reg.below));
-		if (!reg.above || !reg.below) {
+		reg.snap = malloc((size_t)height * reg.cols * sizeof(Glyph));
+		reg.colinfo = malloc(reg.cols);
+		if (!reg.above || !reg.below || !reg.snap || !reg.colinfo) {
 			regreset();
 			return;
 		}
 	}
+	/* A new batch: remember the band as it was before it. */
+	if (!reg.fresh) {
+		for (int y = 0; y < height; y++) {
+			Line line = tviewline(top + y);
+			Glyph *dst = reg.snap + (size_t)y * reg.cols;
+			if (line)
+				memcpy(dst, line, reg.cols * sizeof(Glyph));
+			else
+				memset(dst, 0, reg.cols * sizeof(Glyph));
+		}
+		reg.batchn = 0;
+	}
+	reg.batchn += n;
 	/* Lines re-entering from the other side are redrawn by the app as
 	 * grid rows, so their copies go; the departing rows are copied. */
 	if (n > 0) {	/* rows top..top+n-1 leave over the top */
@@ -272,6 +301,147 @@ smoothscroll_region(int top, int bot, int orig, int n)
 		return;
 	}
 	reg.fresh = 1;
+}
+
+enum { COL_VOTED = 1, COL_BLANK = 2 };
+
+static int
+glyphblank(const Glyph *g)
+{
+	return g->u == ' ' || g->u == 0;
+}
+
+/* The widest run of all-blank columns in [from, to); 0 if there is none. */
+static int
+widestgap(int from, int to, int *g0, int *g1)
+{
+	int x, start = -1, best = 0;
+
+	for (x = from; x <= to; x++) {
+		if (x < to && (reg.colinfo[x] & COL_BLANK)) {
+			if (start < 0)
+				start = x;
+			continue;
+		}
+		if (start >= 0 && x - start > best) {
+			best = x - start;
+			*g0 = start;
+			*g1 = x;
+		}
+		start = -1;
+	}
+	return best > 0;
+}
+
+static int
+glypheq(const Glyph *a, const Glyph *b)
+{
+	return a->u == b->u && a->mode == b->mode && a->fg == b->fg &&
+	    a->bg == b->bg;
+}
+
+/* Which columns of the band really moved in the last batch?  For each cell,
+ * compare the current grid with the band before the batch at the same row
+ * (it stayed: a side panel repainted in place) and at the row it came from
+ * (it moved).  Cells where both predictions agree (blank areas, borders) say
+ * nothing.  A column moves when "moved" wins its vote; the moving span runs
+ * from the first to the last such column.  Neighbouring columns that told
+ * nothing apart (text repeated on every row, padding) look the same either
+ * way, but belong somewhere: a run of them up to the row edge moves; a run
+ * between moving and static columns is split at its widest all-blank gap
+ * (the padding between panes), so a pane's repeated prefix moves with it and
+ * a panel's border and labels stay with the panel.  Everything else stays.
+ * Columns repainted with new content (a panel that re-wraps) match neither
+ * and stay put too.  Returns 0 when the band was mostly rewritten rather
+ * than scrolled: then it should not animate at all. */
+int
+smoothscroll_classify(void)
+{
+	int height = reg.bot - reg.top + 1, cols = reg.cols, n = reg.batchn;
+	int x, y, left = -1, right = -1;
+	long moved = 0, other = 0, informative = 0;
+
+	if (!reg.snap || n == 0)
+		return 1;
+	for (x = 0; x < cols; x++) {
+		long s = 0, m = 0, o = 0;
+		int blank = 1;
+		for (y = 0; y < height; y++) {
+			int from = y + n;
+			Line line = tviewline(reg.top + y);
+			const Glyph *same, *src;
+
+			if (blank && (!glyphblank(reg.snap + (size_t)y * cols + x) ||
+			    (line && !glyphblank(&line[x]))))
+				blank = 0;
+			if (!line || from < 0 || from >= height)
+				continue;	/* new row: no prediction */
+			same = reg.snap + (size_t)y * cols + x;
+			src = reg.snap + (size_t)from * cols + x;
+			if (glypheq(same, src))
+				continue;
+			if (glypheq(&line[x], same))
+				s++;
+			else if (glypheq(&line[x], src))
+				m++;
+			else
+				o++;
+		}
+		informative += s + m + o;
+		reg.colinfo[x] = (s + m + o > 0 ? COL_VOTED : 0) |
+		    (blank ? COL_BLANK : 0);
+		if (m > s && m > o) {
+			if (left < 0)
+				left = x;
+			right = x + 1;
+		}
+	}
+	if (!informative) {	/* uniform content: nothing to tell apart */
+		reg.left = 0;
+		reg.right = cols;
+		return 1;
+	}
+	if (left < 0) {
+		reg.left = reg.right = 0;
+		return 0;
+	}
+	{
+		int x0 = left, x1 = right, g0, g1;
+
+		while (x0 > 0 && !(reg.colinfo[x0 - 1] & COL_VOTED))
+			x0--;
+		if (x0 == 0)
+			left = 0;
+		else if (widestgap(x0, left, &g0, &g1))
+			left = g1;
+		while (x1 < cols && !(reg.colinfo[x1] & COL_VOTED))
+			x1++;
+		if (x1 == cols)
+			right = cols;
+		else if (widestgap(right, x1, &g0, &g1))
+			right = g0;
+	}
+	for (x = left; x < right; x++) {
+		for (y = 0; y < height; y++) {
+			int from = y + n;
+			Line line = tviewline(reg.top + y);
+			const Glyph *same, *src;
+
+			if (!line || from < 0 || from >= height)
+				continue;
+			same = reg.snap + (size_t)y * cols + x;
+			src = reg.snap + (size_t)from * cols + x;
+			if (glypheq(same, src) || glypheq(&line[x], same))
+				continue;
+			if (glypheq(&line[x], src))
+				moved++;
+			else
+				other++;
+		}
+	}
+	reg.left = left;
+	reg.right = right;
+	return moved > other;
 }
 
 static void
@@ -315,13 +485,19 @@ smoothscroll_frame(void)
 		settle(now);
 	moving = ss_tick(&sst.ss, now);
 	if (reg.active) {
+		/* The batch is presented now: a band the app mostly rewrote
+		 * does not glide.  Later frames only refine the moving columns
+		 * (an app may repaint its panels after the scroll is shown). */
+		int scrolled = smoothscroll_classify();
 		if (reg.fresh) {
 			reg.ss.start = now;
 			reg.fresh = 0;
+			if (!scrolled)
+				regreset();
 		}
-		if (ss_tick(&reg.ss, now))
+		if (reg.active && ss_tick(&reg.ss, now))
 			moving = 1;
-		else
+		else if (reg.active)
 			regreset();
 	}
 	/* The first frame back at rest also redraws everything so no row keeps
@@ -349,9 +525,11 @@ smoothscroll_rows(int *first, int *end)
 static void
 drawghost(Glyph *line, int asrow, double shift)
 {
+	if (reg.right <= reg.left)
+		return;
 	ghost.on = 1;
 	ghost.shift = shift;
-	xdrawline(line, 0, asrow, reg.cols);
+	xdrawline(line, reg.left, asrow, reg.right);
 	ghost.on = 0;
 }
 
@@ -384,8 +562,15 @@ smoothscroll_drawextra(void)
 		drawghost(reg.below[k - 1], reg.bot, o + k);
 }
 
+static int
+regmoves(int x, int y)
+{
+	return reg.active && y >= reg.top && y <= reg.bot &&
+	    x >= reg.left && x < reg.right;
+}
+
 double
-smoothscroll_row_shift(int y)
+smoothscroll_shift(int x, int y)
 {
 	if (!sst.enabled)
 		return 0.0;
@@ -393,27 +578,42 @@ smoothscroll_row_shift(int y)
 		return ghost.shift;
 	if (sst.ss.offset != 0.0)
 		return sst.ss.offset;
-	if (reg.active && y >= reg.top && y <= reg.bot)
+	if (regmoves(x, y))
 		return reg.ss.offset;
 	return 0.0;
 }
 
 int
-smoothscroll_row_clip(int y, int *top, int *end)
+smoothscroll_clip(int x, int y, int *top, int *end, int *left, int *right)
 {
 	if (!sst.enabled)
 		return 0;
 	if (sst.ss.offset != 0.0) {
 		*top = 0;
 		*end = trow();
+		*left = 0;
+		*right = tcol();
 		return 1;
 	}
-	if (reg.active && (ghost.on || (y >= reg.top && y <= reg.bot))) {
+	if (ghost.on || regmoves(x, y)) {
 		*top = reg.top;
 		*end = reg.bot + 1;
+		*left = reg.left;
+		*right = reg.right;
 		return 1;
 	}
 	return 0;
+}
+
+int
+smoothscroll_span(int y, int *left, int *right)
+{
+	if (!sst.enabled || ghost.on || !reg.active || y < reg.top ||
+	    y > reg.bot || (reg.left == 0 && reg.right == reg.cols))
+		return 0;
+	*left = reg.left;
+	*right = reg.right;
+	return 1;
 }
 
 int

@@ -200,6 +200,7 @@ static void xloadfonts(const char *, double);
 static void xunloadfont(Font *);
 static void xunloadfonts(void);
 static void xsetenv(void);
+static void xdrawlineseg(Line, int, int, int);
 static void xseturgency(int);
 static int evcol(XEvent *);
 static int evrow(XEvent *);
@@ -342,26 +343,29 @@ static double defaultfontsize = 0;
  * is included rather than compiled separately. */
 #include "render/gpu.c"
 
-/* Xft (CPU) path while smooth scrolling: row y is drawn xrowdy(y) pixels
- * lower, clipped to its band (reference/smooth-scroll.md).  Both are 0/no-ops
- * when the feature is off or at rest. */
+/* Xft (CPU) path while smooth scrolling: a segment of row y starting at
+ * column x is drawn xrowdy(x, y) pixels lower, clipped to its band
+ * (reference/smooth-scroll.md).  Both are 0/no-ops when the feature is off
+ * or at rest. */
 static int xclipped;
 
 static int
-xrowdy(int y)
+xrowdy(int x, int y)
 {
-	return (int)ss_device_round(smoothscroll_row_shift(y) * win.ch, 1.0);
+	return (int)ss_device_round(smoothscroll_shift(x, y) * win.ch, 1.0);
 }
 
 static void
-xrowclip(int y)
+xrowclip(int x, int y)
 {
-	int top, end;
+	int top, end, left, right, x0, x1;
 	XRectangle clip;
 
-	if (!smoothscroll_row_clip(y, &top, &end))
+	if (!smoothscroll_clip(x, y, &top, &end, &left, &right))
 		return;
-	clip = (XRectangle){ 0, borderpx + top * win.ch, win.w,
+	x0 = left == 0 ? 0 : borderpx + left * win.cw;
+	x1 = right >= tcol() ? win.w : borderpx + right * win.cw;
+	clip = (XRectangle){ x0, borderpx + top * win.ch, MAX(0, x1 - x0),
 	                     MAX(0, (end - top) * win.ch) };
 	XftDrawSetClipRectangles(xw.draw, 0, 0, &clip, 1);
 	xclipped = 1;
@@ -2109,7 +2113,7 @@ xinit(int cols, int rows)
 int
 xmakeglyphfontspecs(XftGlyphFontSpec *specs, const Glyph *glyphs, int len, int x, int y)
 {
-	float winx = borderpx + x * win.cw, winy = borderpx + y * win.ch + xrowdy(y), xp, yp;
+	float winx = borderpx + x * win.cw, winy = borderpx + y * win.ch + xrowdy(x, y), xp, yp;
 	ushort mode, prevmode = USHRT_MAX;
 	Font *font = &dc.font;
 	int frcflags = FRC_NORMAL;
@@ -2242,7 +2246,7 @@ void
 xdrawglyphfontspecs(const XftGlyphFontSpec *specs, Glyph base, int len, int x, int y, int dmode)
 {
 	int charlen = len * ((base.mode & ATTR_WIDE) ? 2 : 1);
-	int winx = borderpx + x * win.cw, winy = borderpx + y * win.ch + xrowdy(y),
+	int winx = borderpx + x * win.cw, winy = borderpx + y * win.ch + xrowdy(x, y),
 	    width = charlen * win.cw;
 	Color *fg, *bg, *temp, revfg, revbg, truefg, truebg;
 	XRenderColor colfg, colbg;
@@ -2411,7 +2415,7 @@ xdrawglyph(Glyph g, int x, int y)
 		return;
 	}
 
-	xrowclip(y);
+	xrowclip(x, y);
 	numspecs = xmakeglyphfontspecs(&spec, &g, 1, x, y);
 	xdrawglyphfontspecs(&spec, g, numspecs, x, y, DRAW_BG | DRAW_FG);
 	xrowunclip();
@@ -2475,7 +2479,7 @@ xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 	}
 
 	/* draw the new one */
-	xrowclip(cy);
+	xrowclip(cx, cy);
 	if (IS_SET(MODE_FOCUSED)) {
 		switch (win.cursor) {
 		case 7: /* st extension */
@@ -2490,7 +2494,7 @@ xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 		case 4: /* Steady Underline */
 			XftDrawRect(xw.draw, &drawcol,
 					borderpx + cx * win.cw,
-					borderpx + (cy + 1) * win.ch + xrowdy(cy) - \
+					borderpx + (cy + 1) * win.ch + xrowdy(cx, cy) - \
 						cursorthickness,
 					win.cw, cursorthickness);
 			break;
@@ -2498,26 +2502,26 @@ xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 		case 6: /* Steady bar */
 			XftDrawRect(xw.draw, &drawcol,
 					borderpx + cx * win.cw,
-					borderpx + cy * win.ch + xrowdy(cy),
+					borderpx + cy * win.ch + xrowdy(cx, cy),
 					cursorthickness, win.ch);
 			break;
 		}
 	} else {
 		XftDrawRect(xw.draw, &drawcol,
 				borderpx + cx * win.cw,
-				borderpx + cy * win.ch + xrowdy(cy),
+				borderpx + cy * win.ch + xrowdy(cx, cy),
 				win.cw - 1, 1);
 		XftDrawRect(xw.draw, &drawcol,
 				borderpx + cx * win.cw,
-				borderpx + cy * win.ch + xrowdy(cy),
+				borderpx + cy * win.ch + xrowdy(cx, cy),
 				1, win.ch - 1);
 		XftDrawRect(xw.draw, &drawcol,
 				borderpx + (cx + 1) * win.cw - 1,
-				borderpx + cy * win.ch + xrowdy(cy),
+				borderpx + cy * win.ch + xrowdy(cx, cy),
 				1, win.ch - 1);
 		XftDrawRect(xw.draw, &drawcol,
 				borderpx + cx * win.cw,
-				borderpx + (cy + 1) * win.ch + xrowdy(cy) - 1,
+				borderpx + (cy + 1) * win.ch + xrowdy(cx, cy) - 1,
 				win.cw, 1);
 	}
 	xrowunclip();
@@ -2677,8 +2681,28 @@ xstartdraw(void)
 	return IS_SET(MODE_VISIBLE) && IS_SET(MODE_ONSCREEN);
 }
 
+/* Smooth scrolling: when only some columns of a region band move (side
+ * panels repainted in place), draw the row as uniform segments. */
 void
 xdrawline(Line line, int x1, int y1, int x2)
+{
+	int left, right;
+
+	if (!smoothscroll_span(y1, &left, &right) ||
+	    (left <= x1 && right >= x2)) {
+		xdrawlineseg(line, x1, y1, x2);
+		return;
+	}
+	if (x1 < left)
+		xdrawlineseg(line, x1, y1, MIN(x2, left));
+	if (MAX(x1, left) < MIN(x2, right))
+		xdrawlineseg(line, MAX(x1, left), y1, MIN(x2, right));
+	if (right < x2)
+		xdrawlineseg(line, MAX(x1, right), y1, x2);
+}
+
+static void
+xdrawlineseg(Line line, int x1, int y1, int x2)
 {
 	int i, x, ox, numspecs, numspecs_cached;
 	Glyph base, new;
@@ -2689,7 +2713,7 @@ xdrawline(Line line, int x1, int y1, int x2)
 		return;
 	}
 
-	xrowclip(y1);
+	xrowclip(x1, y1);
 	numspecs_cached = xmakeglyphfontspecs(xw.specbuf, &line[x1], x2 - x1, x1, y1);
 
 	/* Draw line in 2 passes: background and foreground. This way wide glyphs
@@ -2734,12 +2758,12 @@ xdrawline(Line line, int x1, int y1, int x2)
 			int label_len = 16;
 			int ll = tlinelen(y1);
 			int text_x = borderpx + (ll > 0 ? ll : 0) * win.cw;
-			int text_y = borderpx + y1 * win.ch + xrowdy(y1) + dc.font.ascent;
+			int text_y = borderpx + y1 * win.ch + xrowdy(x1, y1) + dc.font.ascent;
 			int label_width = label_len * win.cw;
 			/* Only draw if it fits on screen */
 			if (text_x + label_width <= borderpx + win.tw) {
 				XftDrawRect(xw.draw, &dc.col[debug_prompt_bg],
-						text_x, borderpx + y1 * win.ch + xrowdy(y1),
+						text_x, borderpx + y1 * win.ch + xrowdy(x1, y1),
 						label_width, win.ch);
 				XftDrawStringUtf8(xw.draw, &dc.col[debug_prompt_fg],
 						dc.font.match, text_x, text_y,
