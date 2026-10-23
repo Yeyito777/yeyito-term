@@ -166,6 +166,13 @@ check_directory "$tmp/home" --inherit-cwd
 export FAKE_FOCUSED="com.apple.finder $$"
 check_directory "$tmp/home" --inherit-cwd
 
+# The launcher reads the focused shell's cwd with macOS's /usr/sbin/lsof.
+# Hosts without it (Linux CI) cannot exercise inheritance; skip, don't fail.
+if [ ! -x /usr/sbin/lsof ]; then
+	printf 'AeroSpace launcher cwd inheritance tests skipped: no /usr/sbin/lsof\n'
+	exit 0
+fi
+
 # Real parent/PTY-child stand-in: only the child changes directory, so reading
 # the terminal parent's cwd would fail this test. Include spaces and punctuation.
 directory="$tmp/project with spaces ' and \$"
