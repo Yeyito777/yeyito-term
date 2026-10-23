@@ -403,8 +403,9 @@ beginCell(int x, int y)
 	    mac_renderer_scale());
 
 	if (smoothscroll_clip(x, y, &top, &end, &left, &right))
-		mac_renderer_set_row(dy, 1, left == 0 ? 0 : cellX(left),
-		    cellY(top), right >= tcol() ? win.w : cellX(right),
+		/* Full-width bands are not clipped horizontally at all. */
+		mac_renderer_set_row(dy, 1, left == 0 ? -1e6 : cellX(left),
+		    cellY(top), right >= tcol() ? 1e6 : cellX(right),
 		    cellY(end));
 	else
 		mac_renderer_set_row(dy, 0, 0, 0, 0, 0);
