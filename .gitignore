@@ -17,3 +17,11 @@ tests/test_notif
 tests/test_persist
 tests/test_search
 tests/test_cmdline_layout
+tests/test_image_occlusion
+tests/test_macos_image_occlusion
+tests/test_macos_mouse_cursor
+tests/test_macos_symbol_input
+tests/macos_symbol_sender
+tests/test_clipboard5522
+tests/test_mode_reset
+tests/test_sync

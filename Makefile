@@ -251,6 +251,15 @@ tests/test_macos_mouse_cursor.o: tests/test_macos_mouse_cursor.m tests/test.h ma
 test_macos_mouse_cursor: tests/test_macos_mouse_cursor.o $(MAC_IMAGE_TEST_OBJ)
 	$(CC) -o tests/test_macos_mouse_cursor tests/test_macos_mouse_cursor.o $(MAC_IMAGE_TEST_OBJ) $(STLDFLAGS)
 
+tests/test_macos_symbol_input.o: tests/test_macos_symbol_input.m tests/test.h scripts/macos-type-symbol.m macos/backend.o macos/renderer.o
+	$(CC) $(STOBJCFLAGS) -c tests/test_macos_symbol_input.m -o $@
+
+tests/macos_symbol_sender: tests/macos_symbol_sender.m scripts/macos-type-symbol.m
+	$(CC) $(STOBJCFLAGS) tests/macos_symbol_sender.m -o $@ -framework Cocoa
+
+test_macos_symbol_input: tests/test_macos_symbol_input.o $(MAC_IMAGE_TEST_OBJ) tests/macos_symbol_sender
+	$(CC) -o tests/test_macos_symbol_input tests/test_macos_symbol_input.o $(MAC_IMAGE_TEST_OBJ) $(STLDFLAGS)
+
 tests/test_macos_pty.o: tests/test_macos_pty.m tests/test.h macos/pty.h
 	$(CC) $(STOBJCFLAGS) -c tests/test_macos_pty.m -o tests/test_macos_pty.o
 
@@ -311,6 +320,7 @@ endif
 test: test_image_occlusion test_vimnav test_sshind test_scrollback test_cwd test_notif test_persist test_search test_cmdline_layout test_mode_reset test_sync test_clipboard5522 test_graphics test_aerospace_launcher
 ifeq ($(UNAME_S),Darwin)
 test: test_macos_image_occlusion test_macos_mouse_cursor test_macos_pty test_macos_reveal test_macos_text_input test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522
+test: test_macos_symbol_input
 endif
 	@echo "Running tests..."
 	@./tests/test_vimnav
@@ -332,6 +342,7 @@ ifeq ($(UNAME_S),Darwin)
 	@./tests/test_macos_pty
 	@./tests/test_macos_reveal
 	@./tests/test_macos_text_input
+	@./tests/test_macos_symbol_input
 	@./tests/test_macos_locale
 	@./tests/test_macos_glyph_layout
 	@./tests/test_macos_emoji
@@ -339,6 +350,8 @@ ifeq ($(UNAME_S),Darwin)
 endif
 
 clean-tests:
+	rm -f tests/test_macos_symbol_input tests/test_macos_symbol_input.o tests/macos_symbol_sender
 	rm -f tests/*.o tests/test_macos_image_occlusion tests/test_macos_mouse_cursor tests/test_image_occlusion tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search tests/test_cmdline_layout tests/test_mode_reset tests/test_sync tests/test_clipboard5522 tests/test_graphics tests/test_macos_pty tests/test_macos_reveal tests/test_macos_text_input tests/test_macos_locale tests/test_macos_glyph_layout tests/test_macos_emoji tests/test_macos_pasteboard5522
 
 .PHONY: all app install-app uninstall-app install-hint clean dist install uninstall test test_image_occlusion test_macos_image_occlusion test_macos_mouse_cursor test_gpu_regressions test_aerospace_launcher test_mode_reset test_sync test_graphics test_macos_pty test_macos_reveal test_macos_text_input test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522 clean-tests
+.PHONY: test_macos_symbol_input
