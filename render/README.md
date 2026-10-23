@@ -8,6 +8,11 @@ unit.  The GPU renderer depends on `x.c` private state such as window geometry,
 Xft colors/fonts, and config globals.  Including it keeps those details private
 while making the rendering code easier to find and review.
 
+`smoothscroll.c` is the platform-neutral smooth-scroll engine and
+`smoothscroll_term.c` its terminal glue (both compiled on Linux and macOS).
+The GL renderer applies the offset with a modelview translate plus scissor;
+see `../reference/smooth-scroll.md`.
+
 Kitty graphics images use individual RGBA OpenGL textures rather than the glyph
 atlases. Placements are emitted in three compositing stages: below cell
 backgrounds, between backgrounds and text, and above text.
