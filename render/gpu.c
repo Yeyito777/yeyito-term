@@ -81,6 +81,7 @@ typedef struct {
 	GpuImageTexture *images;
 	ImageOcclusion imageocclusion;
 	uint64_t frame;
+	double ssoff; /* smooth-scroll grid translation this frame, pixels */
 } Gpu;
 
 static Gpu gpu;
@@ -1251,7 +1252,7 @@ gpudrawimage(const GraphicsPlacementView *placement, void *context)
 	h = placement->natural_size ? placement->source_height * gpuyscale() :
 	    gpucelly(placement->row + placement->rows) - gpucelly(placement->row);
 	if (x >= win.w - borderpx || x + w <= borderpx ||
-	    y >= win.h - borderpx || y + h <= borderpx)
+	    y + gpu.ssoff >= win.h - borderpx || y + h + gpu.ssoff <= borderpx)
 		return;
 	image = gpuimagetexture(placement);
 	if (!image)
@@ -1326,6 +1327,7 @@ gpudrawimages(int stage)
 {
 	int width = MAX(0, win.w - 2 * borderpx);
 	int height = MAX(0, win.h - 2 * borderpx);
+	int first, end;
 
 	glEnable(GL_SCISSOR_TEST);
 	/* Cell vertices are scaled to the actual drawable content rectangle, not
@@ -1333,8 +1335,43 @@ gpudrawimages(int stage)
 	 * size can remove nearly a full final row when the tiled window has leftover
 	 * pixels, exposing the terminal background under bottom-edge images. */
 	glScissor(borderpx, borderpx, width, height);
-	graphics_draw(tisaltscreen(), stage, win.cw, win.ch, trow(),
+	smoothscroll_rows(&first, &end);
+	graphics_draw_rows(tisaltscreen(), stage, win.cw, win.ch, first, end,
 	    tlineviewrow, gpudrawimage, NULL);
+	if (gpu.ssoff)
+		gpusmoothscissor();
+	else
+		glDisable(GL_SCISSOR_TEST);
+}
+
+/* Smooth scrolling: the whole grid (cells, cursor, images) is translated by
+ * the sub-row offset on the GPU and clipped to the grid area, so the rows
+ * exposed at the top or bottom are only partially visible. */
+static void
+gpusmoothscissor(void)
+{
+	glEnable(GL_SCISSOR_TEST);
+	glScissor(0, borderpx, win.w, MAX(0, win.h - 2 * borderpx));
+}
+
+static void
+gpusmoothbegin(void)
+{
+	if (!gpu.ssoff)
+		return;
+	gpusmoothscissor();
+	glMatrixMode(GL_MODELVIEW);
+	glPushMatrix();
+	glTranslatef(0.0f, (GLfloat)gpu.ssoff, 0.0f);
+}
+
+static void
+gpusmoothend(void)
+{
+	if (!gpu.ssoff)
+		return;
+	glMatrixMode(GL_MODELVIEW);
+	glPopMatrix();
 	glDisable(GL_SCISSOR_TEST);
 }
 

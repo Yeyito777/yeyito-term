@@ -37,6 +37,7 @@ char *argv0;
 #include "clipboard5522.h"
 #include "sync.h"
 #include "xstate.h"
+#include "render/smoothscroll.h"
 
 /* types used in config.h */
 typedef struct {
@@ -184,6 +185,9 @@ static void gpudamageensure(void);
 static void gpuresize(void);
 static void gpudestroy(void);
 static void gpudrawimages(int);
+static void gpusmoothscissor(void);
+static void gpusmoothbegin(void);
+static void gpusmoothend(void);
 static void gpufreeimage(uint64_t, void *);
 static void gpureleaseimages(void);
 static double gpuxscale(void);
@@ -235,6 +239,7 @@ static void clip5522_paste(Atom);
 static void clip5522_tick(const struct timespec *);
 
 static void run(void);
+static int xsmoothscrolltimeout(double *);
 static void usage(void);
 
 static void (*handler[LASTEvent])(XEvent *) = {
@@ -338,6 +343,10 @@ static double defaultfontsize = 0;
 /* GPU renderer internals live under render/.  See render/gpu.c for why this
  * is included rather than compiled separately. */
 #include "render/gpu.c"
+
+/* Xft (CPU) path: rows are drawn this many pixels lower while smooth
+ * scrolling; always 0 when the feature is off or at rest. */
+static int xssoff;
 
 static char *opt_class = NULL;
 static char **opt_cmd  = NULL;
@@ -897,6 +906,8 @@ evrow(XEvent *e)
 {
 	int y = e->xbutton.y - borderpx;
 
+	/* Rows sit where the smooth-scrolled grid currently draws them. */
+	y -= gpu.active ? gpu.ssoff : xssoff;
 	if (gpu.active)
 		y = y / gpuyscale();
 	LIMIT(y, 0, win.th - 1);
@@ -2063,12 +2074,13 @@ xinit(int cols, int rows)
 	if (xsel.xtarget == None)
 		xsel.xtarget = XA_STRING;
 	graphics_set_image_free_callback(gpufreeimage, NULL);
+	smoothscroll_configure(smoothscroll, smoothscroll_ms);
 }
 
 int
 xmakeglyphfontspecs(XftGlyphFontSpec *specs, const Glyph *glyphs, int len, int x, int y)
 {
-	float winx = borderpx + x * win.cw, winy = borderpx + y * win.ch, xp, yp;
+	float winx = borderpx + x * win.cw, winy = borderpx + y * win.ch + xssoff, xp, yp;
 	ushort mode, prevmode = USHRT_MAX;
 	Font *font = &dc.font;
 	int frcflags = FRC_NORMAL;
@@ -2201,7 +2213,7 @@ void
 xdrawglyphfontspecs(const XftGlyphFontSpec *specs, Glyph base, int len, int x, int y, int dmode)
 {
 	int charlen = len * ((base.mode & ATTR_WIDE) ? 2 : 1);
-	int winx = borderpx + x * win.cw, winy = borderpx + y * win.ch,
+	int winx = borderpx + x * win.cw, winy = borderpx + y * win.ch + xssoff,
 	    width = charlen * win.cw;
 	Color *fg, *bg, *temp, revfg, revbg, truefg, truebg;
 	XRenderColor colfg, colbg;
@@ -2445,7 +2457,7 @@ xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 		case 4: /* Steady Underline */
 			XftDrawRect(xw.draw, &drawcol,
 					borderpx + cx * win.cw,
-					borderpx + (cy + 1) * win.ch - \
+					borderpx + (cy + 1) * win.ch + xssoff - \
 						cursorthickness,
 					win.cw, cursorthickness);
 			break;
@@ -2453,26 +2465,26 @@ xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 		case 6: /* Steady bar */
 			XftDrawRect(xw.draw, &drawcol,
 					borderpx + cx * win.cw,
-					borderpx + cy * win.ch,
+					borderpx + cy * win.ch + xssoff,
 					cursorthickness, win.ch);
 			break;
 		}
 	} else {
 		XftDrawRect(xw.draw, &drawcol,
 				borderpx + cx * win.cw,
-				borderpx + cy * win.ch,
+				borderpx + cy * win.ch + xssoff,
 				win.cw - 1, 1);
 		XftDrawRect(xw.draw, &drawcol,
 				borderpx + cx * win.cw,
-				borderpx + cy * win.ch,
+				borderpx + cy * win.ch + xssoff,
 				1, win.ch - 1);
 		XftDrawRect(xw.draw, &drawcol,
 				borderpx + (cx + 1) * win.cw - 1,
-				borderpx + cy * win.ch,
+				borderpx + cy * win.ch + xssoff,
 				1, win.ch - 1);
 		XftDrawRect(xw.draw, &drawcol,
 				borderpx + cx * win.cw,
-				borderpx + (cy + 1) * win.ch - 1,
+				borderpx + (cy + 1) * win.ch + xssoff - 1,
 				win.cw, 1);
 	}
 }
@@ -2566,6 +2578,10 @@ xstartdraw(void)
 		image_occlusion_begin(&gpu.imageocclusion);
 		gpuresize();
 		gpudamageensure();
+		/* A translated grid invalidates every retained row and border. */
+		gpu.ssoff = smoothscroll_offset_px(gpucellh(), 1.0);
+		if (smoothscroll_needs_full())
+			gpu.needclear = 1;
 		if (gpu.redrawn)
 			memset(gpu.redrawn, 0,
 			       gpu.redrawnrows * sizeof(*gpu.redrawn));
@@ -2617,6 +2633,15 @@ xstartdraw(void)
 		return 1;
 	}
 	xensurexftbuf(win.cw ? MAX(1, win.tw / win.cw) : 1);
+	xssoff = (int)smoothscroll_offset_px(win.ch, 1.0);
+	if (xssoff) {
+		/* Rows are drawn offset and clipped to the grid area; clear it
+		 * first so rows past either end of the buffer show background. */
+		XRectangle clip = { 0, borderpx, win.w,
+		                    MAX(0, win.h - 2 * borderpx) };
+		XftDrawSetClipRectangles(xw.draw, 0, 0, &clip, 1);
+		xclear(0, borderpx, win.w, win.h - borderpx);
+	}
 	return IS_SET(MODE_VISIBLE) && IS_SET(MODE_ONSCREEN);
 }
 
@@ -2674,12 +2699,12 @@ xdrawline(Line line, int x1, int y1, int x2)
 			int label_len = 16;
 			int ll = tlinelen(y1);
 			int text_x = borderpx + (ll > 0 ? ll : 0) * win.cw;
-			int text_y = borderpx + y1 * win.ch + dc.font.ascent;
+			int text_y = borderpx + y1 * win.ch + xssoff + dc.font.ascent;
 			int label_width = label_len * win.cw;
 			/* Only draw if it fits on screen */
 			if (text_x + label_width <= borderpx + win.tw) {
 				XftDrawRect(xw.draw, &dc.col[debug_prompt_bg],
-						text_x, borderpx + y1 * win.ch,
+						text_x, borderpx + y1 * win.ch + xssoff,
 						label_width, win.ch);
 				XftDrawStringUtf8(xw.draw, &dc.col[debug_prompt_fg],
 						dc.font.match, text_x, text_y,
@@ -2693,6 +2718,7 @@ void
 xfinishdraw(void)
 {
 	if (gpu.active) {
+		gpusmoothbegin();
 		gpudrawimages(GRAPHICS_STAGE_BELOW_BACKGROUND);
 		gpudrawbatch(&gpu.bg, 0);
 		gpudrawimages(GRAPHICS_STAGE_BELOW_TEXT);
@@ -2704,6 +2730,7 @@ xfinishdraw(void)
 		gpudrawbatch(&gpu.otext, 1);
 		gpudrawbatch(&gpu.octext, 2);
 		gpudrawbatch(&gpu.odeco, 0);
+		gpusmoothend();
 		gpupruneimages();
 		image_occlusion_end(&gpu.imageocclusion);
 		graphics_compact_images();
@@ -2717,6 +2744,8 @@ xfinishdraw(void)
 			glFlush();
 		return;
 	}
+	if (xssoff)
+		XftDrawSetClip(xw.draw, None);
 	XCopyArea(xw.dpy, xw.buf, xw.win, dc.gc, 0, 0, win.w,
 			win.h, 0, 0);
 	XSetForeground(xw.dpy, dc.gc,
@@ -3467,12 +3496,37 @@ run(void)
 				timeout = persist_remain;
 		}
 
+		if (xsmoothscrolltimeout(&timeout))
+			redraw = 1;
+
 		if (!redraw)
 			continue;
 		draw();
 		XFlush(xw.dpy);
 		drawing = 0;
+		/* draw() is where a new scroll is noticed: arm its next frame. */
+		xsmoothscrolltimeout(&timeout);
 	}
+}
+
+/* Smooth-scroll animation frames are paced at ~120 Hz (GLX vsync may pace
+ * them further).  Lowers *timeout to the next frame; returns 1 if one is due
+ * now.  Nothing is scheduled at rest, so an idle terminal stays asleep. */
+static int
+xsmoothscrolltimeout(double *timeout)
+{
+	double wait = smoothscroll_timeout();
+	int due = 0;
+
+	if (wait < 0)
+		return 0;
+	if (wait <= 0) {
+		due = 1;
+		wait = 1000.0 / 120.0;
+	}
+	if (*timeout < 0 || wait < *timeout)
+		*timeout = wait;
+	return due;
 }
 
 void
