@@ -33,6 +33,7 @@ char *argv0;
 #include "../win.h"
 #include "../graphics.h"
 #include "../render/image_occlusion.h"
+#include "../render/smoothscroll.h"
 #include "../persist.h"
 #include "../vimnav.h"
 #include "../cmdline.h"
@@ -48,6 +49,8 @@ char *argv0;
 #include "../sync.h"
 
 static ImageOcclusion imageOcclusion;
+/* Smooth-scroll translation of the grid this frame, in points (0 at rest). */
+static double gridOffset;
 
 enum MacCellLayer {
 	MAC_CELL_BASE,
@@ -183,6 +186,7 @@ static struct {
 } notifications;
 
 static void nativeResize(double, double);
+static void updateSmoothScrollClock(void);
 static void nativeHandleKey(NSEvent *, int);
 static void nativeFocus(int);
 static void startControlSocket(void);
@@ -514,6 +518,11 @@ xstartdraw(void)
 	MacColor clear = indexedColor(IS_SET(MODE_REVERSE) ? defaultfg : defaultbg);
 	if (!mac_renderer_begin(clear))
 		return 0;
+	/* Metal translates the grid by the sub-row offset and clips it to the
+	 * area between the borders, exposing the partial top/bottom rows. */
+	gridOffset = smoothscroll_offset_px(cellHeight(), mac_renderer_scale());
+	mac_renderer_set_grid_offset(gridOffset, borderpx,
+	    MAX(0, win.h - 2 * borderpx));
 	image_occlusion_begin(&imageOcclusion);
 	/* CAMetalLayer rotates drawables; rebuild a complete correct frame. */
 	tfulldirt();
@@ -627,7 +636,8 @@ drawGraphicsPlacement(const GraphicsPlacementView *placement, void *context)
 	    cellY(placement->row + placement->rows) - cellY(placement->row);
 
 	if (x >= borderpx + win.tw || x + width <= borderpx ||
-	    y >= borderpx + win.th || y + height <= borderpx)
+	    y + gridOffset >= borderpx + win.th ||
+	    y + height + gridOffset <= borderpx)
 		return;
 	/* An image below text that copies as text selects as one unit: its whole
 	 * cell rectangle takes the selection background, under the image, after
@@ -672,14 +682,18 @@ void
 xfinishdraw(void)
 {
 	if (graphics_placement_count()) {
+		int first, end;
 		tlineviewprepare();
 		mac_renderer_set_image_clip(borderpx, borderpx, win.tw, win.th);
+		smoothscroll_rows(&first, &end);
 		for (int stage = 0; stage < 3; stage++)
-			graphics_draw(tisaltscreen(), stage, win.cw, win.ch, trow(),
-			    tlineviewrow, drawGraphicsPlacement,
+			graphics_draw_rows(tisaltscreen(), stage, win.cw, win.ch,
+			    first, end, tlineviewrow, drawGraphicsPlacement,
 			    (void *)(intptr_t)stage);
 	}
 	image_occlusion_end(&imageOcclusion);
+	/* Everything below is window UI: it does not scroll with the grid. */
+	mac_renderer_mark_ui_overlay();
 	sshind_draw();
 	notif_draw();
 	cmdline_draw();
@@ -1261,7 +1275,7 @@ static int
 eventRow(NSEvent *event)
 {
 	NSPoint point = [nativeView convertPoint:event.locationInWindow fromView:nil];
-	int row = (int)((point.y - borderpx) / cellHeight());
+	int row = (int)floor((point.y - borderpx - gridOffset) / cellHeight());
 	LIMIT(row, 0, MAX(0, trow() - 1));
 	return row;
 }
@@ -1341,6 +1355,43 @@ mouseReport(int type, uint button, uint state, int x, int y)
 	ttywrite(buffer, length, 0);
 }
 
+/* Trackpads (and other precise devices) scroll the scrollback by pixels and
+ * keep the system's momentum; the view snaps to a row once the gesture and
+ * its momentum end.  Returns NO to keep the line-based path: smooth
+ * scrolling off, the alternate screen, or Shift (Page Up/Down shortcuts). */
+static BOOL
+nativePreciseScroll(NSEvent *event, uint state)
+{
+	NSEventPhase phase = event.phase, momentum = event.momentumPhase;
+	int held;
+
+	if (!event.hasPreciseScrollingDeltas || (state & ShiftMask))
+		return NO;
+	held = (phase & (NSEventPhaseBegan | NSEventPhaseChanged |
+	    NSEventPhaseStationary | NSEventPhaseMayBegin)) != 0;
+	if (!smoothscroll_pixels(event.scrollingDeltaY, cellHeight(), held))
+		return NO;
+	if ((phase & (NSEventPhaseEnded | NSEventPhaseCancelled)) ||
+	    (momentum & (NSEventPhaseEnded | NSEventPhaseCancelled)))
+		smoothscroll_release();
+	updateSmoothScrollClock();
+	return YES;
+}
+
+/* Animation frames come from MTKView's display link only while a glide or a
+ * pending snap needs them; at rest the view returns to on-demand drawing, so
+ * an idle terminal does no work. */
+static void
+updateSmoothScrollClock(void)
+{
+	BOOL run = smoothscroll_pending();
+
+	if (!nativeView || nativeView.paused == !run)
+		return;
+	nativeView.enableSetNeedsDisplay = !run;
+	nativeView.paused = !run;
+}
+
 @implementation STMetalView
 
 - (BOOL)isFlipped { return YES; }
@@ -1375,6 +1426,7 @@ mouseReport(int type, uint button, uint state, int x, int y)
 	drawingFrame = 1;
 	draw();
 	drawingFrame = 0;
+	updateSmoothScrollClock();
 }
 
 - (void)mtkView:(MTKView *)view drawableSizeWillChange:(CGSize)size
@@ -1562,9 +1614,14 @@ mouseReport(int type, uint button, uint state, int x, int y)
 - (void)scrollWheel:(NSEvent *)event
 {
 	double delta = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.deltaY;
+	uint state = nativeModifiers(event);
+	if (!(IS_SET(MODE_MOUSE) && !(state & forcemousemod)) &&
+	    nativePreciseScroll(event, state)) {
+		macos_request_redraw();
+		return;
+	}
 	if (fabs(delta) < 0.01) return;
 	uint button = delta > 0 ? Button4 : Button5;
-	uint state = nativeModifiers(event);
 	int steps = MAX(1, (int)ceil(fabs(delta) / (event.hasPreciseScrollingDeltas ? 8.0 : 1.0)));
 	steps = MIN(steps, 8);
 	for (int i = 0; i < steps; i++) {
@@ -2103,6 +2160,9 @@ initializeNativeWindow(int columns, int rows)
 	if (!mac_renderer_init((__bridge void *)nativeView, usedfont, usedfontsize))
 		die("st: could not initialize Metal renderer\n");
 	graphics_set_image_free_callback(freeGraphicsImage, NULL);
+	smoothscroll_configure(smoothscroll, smoothscroll_ms);
+	/* Smooth-scroll glides run at the display's refresh (ProMotion: 120). */
+	nativeView.preferredFramesPerSecond = 120;
 	updateCellMetrics();
 	NSSize content = NSMakeSize(2 * borderpx + columns * win.cw,
 	    2 * borderpx + rows * win.ch);

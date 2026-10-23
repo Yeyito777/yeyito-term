@@ -12,6 +12,9 @@ static GraphicsPlacementView imagePlacement;
 static GraphicsPlacementView upperPlacement;
 static const unsigned char redPixel[] = {255, 0, 0, 255};
 static const unsigned char greenPixel[] = {0, 255, 0, 255};
+/* Smooth scrolling: grid translation, its clip band and a window-UI rect. */
+static double sceneOffset, sceneClip = 128;
+static int sceneUI;
 
 static void
 resetScene(void)
@@ -36,6 +39,7 @@ renderScene(int cursor)
 		listreset(&r.layers[i]);
 	for (int i = 0; i < 3; i++)
 		r.imageLayers[i].count = 0;
+	mac_renderer_set_grid_offset(sceneOffset, 0, sceneClip);
 	image_occlusion_begin(&imageOcclusion);
 	for (int y = 0; y < trow(); y++)
 		xdrawline(tlineviewline(y), 0, y, tcol());
@@ -49,6 +53,11 @@ renderScene(int cursor)
 	if (cursor) {
 		Glyph g = {.u = ' ', .fg = defaultfg, .bg = TRUECOLOR(0, 255, 0)};
 		drawCell(g, 1, 1, MAC_CELL_OVERLAY, 0);
+	}
+	if (sceneUI) {
+		mac_renderer_mark_ui_overlay();
+		mac_renderer_rect(MAC_LAYER_OVERLAY_BACKGROUND, 0, 0, 4, 4,
+		    (MacColor){0, 0, 1, 1});
 	}
 	MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor new];
 	pass.colorAttachments[0].texture = target;
@@ -182,6 +191,31 @@ TEST(metal_stacked_images_keep_masks_and_tints_below_higher_image)
 	ASSERT(cellIsColor(2, 1, 255, 0, 0)); /* closing restores original image */
 }
 
+TEST(metal_smooth_scroll_moves_grid_but_not_window_ui)
+{
+	unsigned char *ui;
+
+	resetScene();
+	sceneOffset = 16;	/* one whole row lower, for crisp samples */
+	sceneClip = 128;
+	sceneUI = 1;
+	renderScene(1);
+	ui = &pixels[(1 * 128 + 1) * 4];
+	ASSERT(cellIsColor(2, 1, 0, 0, 0));	/* blank row 0 moved here */
+	ASSERT(cellIsColor(2, 3, 255, 0, 0));	/* image moved with its rows */
+	ASSERT(cellIsColor(1, 2, 0, 255, 0));	/* cursor moved with its cell */
+	ASSERT(ui[0] == 255 && ui[1] == 0 && ui[2] == 0); /* UI stayed put */
+	sceneClip = cellY(3);
+	renderScene(1);
+	ASSERT(cellIsColor(2, 3, 0, 0, 0));	/* clipped below the grid band */
+	sceneOffset = 0;
+	sceneClip = 128;
+	sceneUI = 0;
+	renderScene(1);
+	ASSERT(cellIsColor(1, 1, 0, 255, 0));
+	ASSERT(cellIsColor(2, 2, 255, 0, 0));
+}
+
 int
 main(void)
 {
@@ -218,6 +252,7 @@ main(void)
 		RUN_TEST(metal_cursor_above_occlusion_and_selection_keeps_baseline);
 		RUN_TEST(metal_image_first_shown_selected_reveals_undecorated_row);
 		RUN_TEST(metal_stacked_images_keep_masks_and_tints_below_higher_image);
+		RUN_TEST(metal_smooth_scroll_moves_grid_but_not_window_ui);
 		image_occlusion_clear(&imageOcclusion);
 		mac_renderer_destroy();
 		return test_summary();
