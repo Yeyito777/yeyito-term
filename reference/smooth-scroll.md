@@ -1,77 +1,154 @@
 # Smooth scrolling
 
-Pixel-smooth scrolling of the scrollback view. Trackpads scroll by pixels
-with the system's momentum; mouse wheels and keyboard scrolls (Shift+PageUp,
-nav-mode `Ctrl+u`/`Ctrl+d`, `gg`/`G`, search jumps, snap-to-prompt) glide to
-their target in about 100 ms. At rest the view always sits on whole rows.
+Pixel-smooth scrolling of
+
+- **the scrollback view**: trackpads scroll by pixels with the system's
+  momentum; mouse wheels and keyboard scrolls (Shift+PageUp, nav-mode
+  `Ctrl+u`/`Ctrl+d`, `gg`/`G`, search jumps, snap-to-prompt) glide to their
+  target in about 100 ms;
+- **application scroll regions**: when a full-screen app (neovim, less, the
+  Exocortex/Record TUIs) scrolls a DECSTBM region, the region's content glides
+  by those rows while status lines, tab lines and command lines stay put.
+
+At rest the view always sits on whole rows.
 
 ## Config (`config.h` / `config.def.h`)
 
 ```c
-static int smoothscroll = 1;          /* 0 = off */
-static double smoothscroll_ms = 100;  /* glide duration for wheel/keys */
+static int smoothscroll = 1;          /* 0 = everything off */
+static double smoothscroll_ms = 100;  /* glide duration */
+static int smoothscroll_regions = 1;  /* glide app scroll regions */
 ```
 
-Both platforms read the same knobs. `smoothscroll_ms = 0` keeps trackpad
-pixel scrolling but makes wheel/keyboard scrolls jump as before.
+`smoothscroll_ms = 0` keeps trackpad pixel scrolling but makes every other
+scroll jump. `smoothscroll_regions = 0` stops animating application regions
+unless the app itself asks for it with DECSCLM (below).
+
+### DECSCLM (`CSI ? 4 h` / `CSI ? 4 l`)
+
+The historical "smooth scroll" mode is an application opt-in: `CSI ? 4 h`
+turns region animation on even when `smoothscroll_regions = 0`. `CSI ? 4 l`
+only withdraws that request; it never disables the configured default,
+because routine terminal reset strings send it. A terminal reset (RIS) clears
+it. With `smoothscroll = 0`, DECSCLM does nothing.
 
 ## Turning it off / reverting
 
 - **Off, keep the code:** set `smoothscroll = 0` in `config.h` and rebuild.
-  Every hook then returns immediately: no offsets, no extra rows, no clip,
-  no timers. Scrolling and drawing behave as on `main`, and trackpads use the
-  old line-based path.
+  Every hook then returns immediately: no offsets, no extra rows, no clips, no
+  timers. Scrolling and drawing behave as on `main`, and trackpads use the old
+  line-based path. `smoothscroll_regions = 0` turns off only the region part.
 - **Revert completely:** the feature lives on the `smooth-scroll` branch and
   was never merged. `git checkout main` and rebuild (on macOS also
   `make install-app`, or restore the backed-up `st.app`).
 
 ## Design
 
-The terminal's logical scroll position (`term.scr`, whole rows) still changes
-immediately, exactly as without the feature. Smooth scrolling is purely a
-presentation layer: a fractional row **offset** by which the renderer
-translates the grid, plus the partial rows that translation exposes. Because
-selection, search highlights, vimnav cursor/line highlight, Kitty images and
-the cursor are all keyed by grid rows, they move with the grid and can never
-drift out of alignment.
+The terminal grid and its logical scroll position (`term.scr`, whole rows)
+still change immediately, exactly as without the feature. Smooth scrolling is
+purely a presentation layer: for each grid row the renderer asks how far to
+shift it (a fraction of rows, decaying to 0) and what band to clip it to.
+Selection, search highlights, vimnav cursor/line highlight, Kitty images and
+the cursor are all keyed by grid rows, so they move with their rows and can
+never drift out of alignment. What is drawn is always the current grid:
+rows the app rewrites mid-glide show their new content at the current offset.
 
-Positive offsets draw the grid lower (exposing older history above row 0);
-negative offsets draw it higher (exposing rows below the last one).
+Positive shifts draw rows lower; negative shifts draw them higher.
 
 ### Pieces
 
 | File | Role |
 |------|------|
-| `render/smoothscroll.c/.h` | Pure engine (no terminal/platform deps, unit tested): ease curve, clamping, visible rows, snapping, device-pixel rounding, mouse row mapping, render-path choice, and the state machine `IDLE / ANIMATING / PRECISE`. |
-| `render/smoothscroll_term.c` | Terminal glue: follows `term.scr` changes from `draw()`, drives the engine, draws the exposed partial rows, exposes the pixel offset to renderers, handles precise input. |
-| `st.c` | `tviewline()/tscrolled()/thistlen()` accessors; `smoothscroll_frame()` at the top of `draw()` and `smoothscroll_drawextra()` after `drawregion()`. |
+| `render/smoothscroll.c/.h` | Pure engine (unit tested): ease curve, clamping, visible rows, snapping, device-pixel rounding, region heuristics (`ss_region_animates`), render-path choice, and the state machine `IDLE / ANIMATING / PRECISE`. |
+| `render/smoothscroll_term.c` | Terminal glue: scrollback following, region state (band, copies of departing lines), per-row API for renderers (`smoothscroll_row_shift/row_clip/plain/band`), precise input, DECSCLM. |
+| `st.c` | `tviewline()/tscrolled()/thistlen()` accessors; `smoothscroll_frame()` at the top of `draw()`, `smoothscroll_drawextra()` after `drawregion()`; `smoothscroll_region()` at the start of `tscrollup()/tscrolldown()`; DECSCLM in `tsetmode()`; reset in `treset()`. |
 | `graphics.c` | `graphics_draw_rows()` culls placements against the visible row range (partial rows included). |
 | `search.c` | Uncached-row sentinel is `INT_MIN` (row `-1` is now drawable). |
-| `x.c`, `render/gpu.c` | X11 GL and Xft renderers, run-loop frame pacing, mouse row mapping. |
-| `macos/renderer.m/.h`, `macos/backend.m` | Metal translation + scissor, UI-overlay split, trackpad phases, display-link pacing. |
+| `x.c`, `render/gpu.c` | GL: shift + clip in `gpubatchquad()` per row (`gpubeginrow()`), images by anchor row (vertex shift + scissor). Xft: per-row offset (`xrowdy()`) and Xft clip rectangle (`xrowclip()`). Run-loop frame pacing, mouse rows. |
+| `macos/renderer.m/.h`, `macos/backend.m` | Metal: `mac_renderer_set_row()` shifts and clips quads and image vertices (UV-correct) per row (`beginRow()`); trackpad phases, display-link pacing, mouse rows. |
 
-### Following scrolls
+### Scrollback
 
 `smoothscroll_frame()` runs at the start of every `draw()`. If `term.scr`
 changed since the last frame, it finds where the line that was on row 0 now
-sits (`r`) and adds `-r` rows to the offset, so the old content is first drawn
+sits (`r`) and adds `-r` rows to the shift, so the old content is first drawn
 exactly where it was, then glides to rest (cubic ease-out over
 `smoothscroll_ms`). This catches every scroll source without hooking each one.
+Every row gets the same shift, clipped to the grid; rows just outside the
+viewport are drawn from the scrollback.
 
 - Output arriving while scrolled up bumps `term.scr` but keeps the row-0 line
   in place (`r = 0`): never animated. Output at the bottom does not change
   `term.scr`: never animated.
 - Jumps further than a screen glide in from one screen away.
-- The offset is clamped so nothing past the oldest history line or below the
+- The shift is clamped so nothing past the oldest history line or below the
   live screen is ever revealed.
-- Alternate screen, alt-screen switches and resizes reset the offset to 0.
+- Alternate screen, alt-screen switches and resizes reset it to 0.
+
+### Application scroll regions
+
+`tscrollup()`/`tscrolldown()` call `smoothscroll_region(top, bot, orig, n)`
+before moving rows. Every scroll path goes through them: SU/SD (`CSI n S/T`),
+IND/LF at the bottom margin, RI at the top margin, and IL/DL (`CSI n L/M`).
+
+**What neovim emits** (v0.12, `TERM=st-256color`): it never uses SU/SD. To
+scroll a window it sets the region to the window's text rows, homes the cursor
+to the region top and deletes/inserts lines there, then restores the full
+region and draws the newly exposed lines:
+
+```
+C-e     ESC[1;22r ESC[H ESC[M    ESC[1;24r ESC[22;1H <new line> ...
+C-y     ESC[1;22r ESC[H ESC[L    ESC[1;24r ESC[H <new line> ...
+C-d     ESC[1;22r ESC[H ESC[11M  ESC[1;24r ESC[12;1H <11 new lines> ...
+C-f     ESC[1;22r ESC[H ESC[20M  ...
+wheel   ESC[1;22r ESC[H ESC[3M   ...
+G, gg   no scroll: rows are repainted in place
+```
+
+so IL/DL at the top margin count as region scrolls, and neovim glides with
+no configuration.
+
+**When a region scroll animates** (`ss_region_animates`):
+
+- `orig` is the region's top margin. SU/SD/IND/RI always are; IL/DL only when
+  the cursor is on the top margin. IL/DL further down is an edit (insert or
+  delete a line inside the region), so it jumps.
+- The region has at least 3 rows (1-2 row regions are tickers/status lines).
+- The scroll moves fewer rows than the region has (more is a redraw).
+- Alternate screen, or the primary screen with a partial region. Full-screen
+  scrolls on the primary screen are ordinary shell output and never animate.
+- The scrollback is at the bottom and not gliding.
+- Scrolls accumulating past a whole region within one glide (fast output)
+  snap instead of lagging behind.
+
+**Motion:** the band's rows shift by `+n` rows (drawn where they were) and
+glide to 0, clipped to the band; rows outside it never move. The lines that
+left the band are copied before the scroll and drawn as "plain" lines (no
+selection/search/line highlights) sliding out over the edge, so the motion
+looks exactly like the scrollback glide. New rows appear from the other edge
+as the app draws them.
+
+**Accumulation:** scrolls before the next presented frame add up without the
+clock running, including a whole synchronized update (mode 2026: frames are
+withheld, and the glide starts when the batch is presented). A scroll arriving
+mid-glide retargets from the current position, as for scrollback; copies
+coming back from the other edge are dropped because the app redraws them as
+grid rows. A scroll of a different band snaps the current glide and starts
+the new one; a redraw-sized scroll of the gliding band snaps it.
+
+**Kitty images:** placements are anchored to lines, and region scrolls move
+lines, so an image moves with its anchor row's shift and is clipped to the
+band. Images on lines that left the band are gone (as without the feature).
+
+**Trackpad in the alternate screen:** with mouse reporting the wheel still
+goes to the app unchanged; the glide comes from the app's resulting scrolls.
 
 ### Precise (trackpad) input — macOS
 
 `scrollWheel:` with `hasPreciseScrollingDeltas` (and no Shift, no mouse
 reporting) calls `smoothscroll_pixels(scrollingDeltaY, cellHeight, held)`. The
-offset follows the fingers 1:1; whenever it passes half a row, the logical view
-scrolls a row and the offset is compensated, so it stays within ±0.5 rows.
+shift follows the fingers 1:1; whenever it passes half a row, the logical view
+scrolls a row and the shift is compensated, so it stays within ±0.5 rows.
 Gesture phases decide `held`; momentum events keep the gesture alive. 60 ms
 after the last event with fingers up, the view snaps to the nearest row and
 glides there. Touching the trackpad mid-glide catches it. In the alternate
@@ -83,24 +160,18 @@ and keyboard scrolls glide.
 
 ### Rendering
 
-| Platform | Renderer | How the offset is applied |
-|----------|----------|---------------------------|
-| macOS | Metal (always; the native backend has no non-Metal renderer and exits if Metal is missing) | Vertex-shader translation (`view.zw` uniform) of grid layers, images and the cursor; scissor to the band between the borders; overlay vertices after `mac_renderer_mark_ui_overlay()` (command line, toasts, SSH badge, IME text) are drawn untranslated with a full scissor. Offset rounded to device pixels. |
-| Linux, GPU | OpenGL via GLX (`gpudraw = 1`, the default) | `glTranslatef` on the modelview matrix around all grid batches and image quads, `glScissor` to the grid band, full clear each moving frame (retained damage tracking is bypassed while moving and for one frame at rest). |
-| Linux, CPU fallback | Xft into the backing pixmap (`gpudraw = 0`, or GLX unavailable) | Rows drawn `xssoff` pixels lower into the pixmap under an Xft clip rectangle after clearing the grid area; then the usual `XCopyArea`. Kitty images need the GPU renderer, as before. |
+| Platform | Renderer | How a row is shifted and clipped |
+|----------|----------|----------------------------------|
+| macOS | Metal (always; the native backend has no non-Metal renderer and exits if Metal is missing) | `beginRow(y)` sets `mac_renderer_set_row(dy, clip, top, bottom)`; `quad()` and image vertices add `dy` and clip vertically with matching UV adjustment. Window UI (command line, toasts, SSH badge, IME text) never sets a row, so it never moves. Shifts are rounded to device pixels. |
+| Linux, GPU | OpenGL via GLX (`gpudraw = 1`, the default) | `gpubeginrow(y)` sets the row's pixel shift and clip; `gpubatchquad()` applies them (UV-correct). Images shift by their anchor row and use a band scissor. Full clear each moving frame (retained damage tracking is bypassed while moving and for one frame at rest). |
+| Linux, CPU fallback | Xft into the backing pixmap (`gpudraw = 0`, or GLX unavailable) | The moving band is cleared, then each row is drawn `xrowdy(y)` pixels lower under an Xft clip rectangle for its band. Kitty images need the GPU renderer, as before. |
 
-"GPU on Linux" here means the existing fixed-function OpenGL renderer in
+"GPU on Linux" means the existing fixed-function OpenGL renderer in
 `render/gpu.c`. On machines without a GPU, Mesa runs it in software
 (llvmpipe), which is still the GL path. The Xft path is the true CPU fallback.
-A new GPU path was not needed: the GL renderer already rebuilds whole frames
-and a modelview translate costs nothing.
-
-Exposed rows outside `[0, rows)` are drawn with the normal `xdrawline()` at
-their own (negative or `>= rows`) row numbers, so selection/search/line
-highlight logic applies to them unchanged.
 
 The X11 command line, SSH badge and toasts are separate child windows and
-never move. On macOS they are drawn after the UI-overlay mark.
+never move.
 
 ### Frame pacing and idle cost
 
@@ -110,22 +181,27 @@ never move. On macOS they are drawn after the UI-overlay mark.
 - macOS: `MTKView` runs its display link (`preferredFramesPerSecond = 120`)
   only while a glide or snap is pending, then returns to on-demand drawing.
 - At rest nothing is scheduled: zero idle CPU/GPU. Typing never waits on the
-  animation; at the bottom of the buffer the hook is a couple of integer
-  compares per frame.
+  animation. The region hook costs a few compares per scroll; ordinary shell
+  output on the primary screen is rejected on the first checks.
 
 ### Mouse
 
-Mouse rows subtract the current pixel offset (`evrow()` on X11, `eventRow()`
-on macOS), so clicks/selection during a glide land on the row under the
-pointer. At rest the offset is 0.
+Mouse rows subtract the scrollback shift (`evrow()` on X11, `eventRow()` on
+macOS), so clicks/selection during a scrollback glide land on the row under
+the pointer. Region glides don't remap the mouse (events go to the app, and
+the grid is already final).
 
 ## Tests
 
 - `tests/test_smoothscroll.c` (in `make test`): engine math and state
-  machine, plus the terminal glue against a fake scrollback with a stepped
-  clock: disabled = inert, glide + exposed rows both directions, output never
-  animates, alternate-screen bypass, big jumps, precise follow/hold/settle,
-  buffer-end clamps, resize reset, render-path (CPU fallback) choice.
+  machine; the scrollback glue against a fake scrollback with a stepped clock
+  (disabled = inert, glides, output never animates, alternate-screen bypass,
+  big jumps, precise follow/hold/settle, buffer-end clamps, resize); regions
+  (heuristics, band-only shift and clip, departing-line copies in both
+  directions, sync-batch accumulation, mid-glide retarget and reversal,
+  jump cases, edits mid-glide, knob + DECSCLM, inert when disabled, screen
+  switch reset).
 - `tests/test_graphics.c`: `graphics_draw_rows()` includes partial rows.
-- `tests/test_macos_image_occlusion.m` (macOS): offscreen Metal pixels — grid,
-  image and cursor move together, the UI overlay stays put, the band clips.
+- `tests/test_macos_image_occlusion.m` (macOS): offscreen Metal pixels — a
+  region scroll shifts its band's cells, image and cursor, clips at the band
+  edge, leaves the status row and window UI in place.
