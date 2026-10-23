@@ -22,6 +22,7 @@
 #include "persist.h"
 #include "win.h"
 #include "vimnav.h"
+#include "render/smoothscroll.h"
 
 #ifdef ST_NATIVE_MACOS
 #include "macos/emoji.h"
@@ -1283,6 +1284,30 @@ tlineviewline(int row)
 	if (row < 0 || row >= term.row)
 		return NULL;
 	return TLINE(row);
+}
+
+/* Any line in the scrolled view coordinates, including rows just outside the
+ * viewport that smooth scrolling exposes; NULL past either end of the buffer. */
+Line
+tviewline(int y)
+{
+	if (IS_SET(MODE_ALTSCREEN))
+		return BETWEEN(y, 0, term.row - 1) ? term.line[y] : NULL;
+	if (y < term.scr - term.histn || y >= term.scr + term.row)
+		return NULL;
+	return TLINE(y);
+}
+
+int
+tscrolled(void)
+{
+	return term.scr;
+}
+
+int
+thistlen(void)
+{
+	return term.histn;
 }
 
 int
@@ -3966,6 +3991,7 @@ draw(void)
 {
 	int cx = term.c.x, ocx = term.ocx, ocy = term.ocy;
 
+	smoothscroll_frame();
 	if (!xstartdraw())
 		return;
 
@@ -3982,6 +4008,7 @@ draw(void)
 		cx--;
 
 	drawregion(0, 0, term.col, term.row);
+	smoothscroll_drawextra();
 
 	if (tisvimnav()) {
 		/* Draw vim navigation cursor */

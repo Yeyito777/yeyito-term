@@ -50,6 +50,12 @@ static int gpudraw = 1;
 /* Request synchronized GLX swaps when the server exposes swap-control. */
 static int gpuvsync = 1;
 
+/* Pixel-smooth scrollback scrolling (reference/smooth-scroll.md).  Trackpads
+ * scroll by pixels; wheel and keyboard scrolls glide for smoothscroll_ms.
+ * 0 disables it: scrolling and drawing then behave exactly as without it. */
+static int smoothscroll = 1;
+static double smoothscroll_ms = 100;
+
 /*
  * word delimiter string
  *
