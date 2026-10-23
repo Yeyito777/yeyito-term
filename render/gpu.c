@@ -81,7 +81,10 @@ typedef struct {
 	GpuImageTexture *images;
 	ImageOcclusion imageocclusion;
 	uint64_t frame;
-	double ssoff; /* smooth-scroll grid translation this frame, pixels */
+	/* Smooth scrolling: quads of the row being emitted are shifted by rowdy
+	 * pixels and, if rowclip, clipped to [cliptop, clipbot). */
+	double rowdy, cliptop, clipbot;
+	int rowclip;
 } Gpu;
 
 static Gpu gpu;
@@ -144,6 +147,29 @@ static int
 gpurowbottom(int y)
 {
 	return gpucelly(y + 1);
+}
+
+/* Smooth scrolling (reference/smooth-scroll.md): row y's quads are emitted
+ * shifted by its sub-row offset and clipped to its band, so partial rows
+ * appear at the band edges and rows outside the band never move. */
+static void
+gpubeginrow(int y)
+{
+	int top, end;
+
+	gpu.rowdy = ss_device_round(smoothscroll_row_shift(y) * gpucellh(), 1.0);
+	gpu.rowclip = smoothscroll_row_clip(y, &top, &end);
+	if (gpu.rowclip) {
+		gpu.cliptop = gpucelly(top);
+		gpu.clipbot = gpucelly(end);
+	}
+}
+
+static void
+gpuendrow(void)
+{
+	gpu.rowdy = 0;
+	gpu.rowclip = 0;
 }
 
 static int
@@ -807,7 +833,21 @@ static void
 gpubatchquad(GpuBatch *b, double x, double y, double w, double h,
              double u1, double v1, double u2, double v2, float c[3])
 {
-	GpuVertex *v = gpubatchalloc(b, 6);
+	GpuVertex *v;
+
+	y += gpu.rowdy;
+	if (gpu.rowclip) {
+		double y0 = MAX(y, gpu.cliptop), y1 = MIN(y + h, gpu.clipbot);
+		double dv = v2 - v1;
+
+		if (y1 <= y0)
+			return;
+		v2 = v1 + dv * (y1 - y) / h;
+		v1 = v1 + dv * (y0 - y) / h;
+		y = y0;
+		h = y1 - y0;
+	}
+	v = gpubatchalloc(b, 6);
 	GpuVertex a = { x,     y,     u1, v1, c[0], c[1], c[2], 1.0f };
 	GpuVertex b0 = { x + w, y,     u2, v1, c[0], c[1], c[2], 1.0f };
 	GpuVertex c0 = { x + w, y + h, u2, v2, c[0], c[1], c[2], 1.0f };
@@ -896,6 +936,8 @@ gpudrawline(Line line, int x1, int y, int x2)
 	int basey = gpucelly(y), rowh = gpurowbottom(y) - basey;
 	int baseline = gpubaseline(y), runx = 0, runw = 0;
 	int vimline = vimnav.mode ? vimnav_curline_y() : -1;
+	/* A departing line copied by smooth scrolling is not on the grid. */
+	int hy = smoothscroll_plain() ? INT_MIN : y;
 	Glyph g;
 	float fg[3], bg[3], dfg[3], dbg[3], runbg[3], white[3] = {1.0f, 1.0f, 1.0f};
 	GpuGlyph *gg;
@@ -904,6 +946,9 @@ gpudrawline(Line line, int x1, int y, int x2)
 		gpu.damage[gpu.damageidx][y] = 1;
 	if (gpu.redrawn && BETWEEN(y, 0, gpu.redrawnrows - 1))
 		gpu.redrawn[y] = 1;
+	if (hy == INT_MIN)
+		selactive = searchactive = 0;
+	gpubeginrow(y);
 
 	gpucolor(defaultfg, dfg);
 	gpucolor(defaultbg, dbg);
@@ -917,14 +962,14 @@ gpudrawline(Line line, int x1, int y, int x2)
 			g.mode |= ATTR_MATCH;
 		if (g.bg == defaultbg &&
 		    !(g.mode & (ATTR_SELECTED|ATTR_MATCH|ATTR_BOLD_FAINT|ATTR_REVERSE|ATTR_BLINK|ATTR_INVISIBLE)) &&
-		    !IS_SET(MODE_REVERSE) && !debug_mode && y != vimline) {
+		    !IS_SET(MODE_REVERSE) && !debug_mode && hy != vimline) {
 			if (g.fg == defaultfg)
 				memcpy(fg, dfg, sizeof fg);
 			else
 				gpucolor(g.fg, fg);
 			memcpy(bg, dbg, sizeof bg);
 		} else {
-			gpuresolve(g, x, y, fg, bg);
+			gpuresolve(g, x, hy, fg, bg);
 		}
 		int cellx = gpucellx(x);
 		int cellw = gpucellright(x, g.mode & ATTR_WIDE) - cellx;
@@ -976,6 +1021,7 @@ gpudrawline(Line line, int x1, int y, int x2)
 	}
 	if (haverun && (!gpu.clearedframe || !gpucoloreq(runbg, dbg)))
 		gpubatchrect(&gpu.bg, runx, basey, runw, rowh, runbg);
+	gpuendrow();
 }
 
 static void
@@ -1014,9 +1060,12 @@ gpudrawcell(Glyph g, int x, int y, int layer, int applyhighlights)
 		g.mode |= ATTR_MATCH;
 	gpuresolve(g, x, y, fg, bg);
 	cellw = gpucellright(x, g.mode & ATTR_WIDE) - cellx;
+	gpubeginrow(y);
 	gpubatchrect(bb, cellx, celly, cellw, cellh, bg);
-	if (g.mode & ATTR_INVISIBLE)
+	if (g.mode & ATTR_INVISIBLE) {
+		gpuendrow();
 		return;
+	}
 	if (g.u != ' ') {
 		if (!gpubatchfilledblock(db, g.u, cellx, celly, cellw, cellh, fg)) {
 			gg = gpuglyph(g.u, g.mode);
@@ -1042,6 +1091,7 @@ gpudrawcell(Glyph g, int x, int y, int layer, int applyhighlights)
 		gpubatchrect(db, cellx, baseline + 1, gpucellright(x, 0) - cellx, 1, fg);
 	if (g.mode & ATTR_STRUCK)
 		gpubatchrect(db, cellx, celly + cellh / 2, gpucellright(x, 0) - cellx, 1, fg);
+	gpuendrow();
 }
 
 static void
@@ -1088,6 +1138,7 @@ gpudrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 		cg.bg = defaultcs;
 		gpucolor(cg.bg, col);
 	}
+	gpubeginrow(cy);
 	if (IS_SET(MODE_FOCUSED)) {
 		switch (win.cursor) {
 		case 7:
@@ -1114,6 +1165,7 @@ gpudrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 		gpubatchrect(&gpu.odeco, cellx + cellw - 1, celly, 1, cellh, col);
 		gpubatchrect(&gpu.odeco, cellx, celly + cellh - 1, cellw, 1, col);
 	}
+	gpuendrow();
 }
 
 static GpuImageTexture *
@@ -1209,8 +1261,9 @@ gpufillcells(int column, int row, int columns, int rows, unsigned int color)
 {
 	GpuVertex vertices[6];
 	float rgb[3];
-	double x0 = gpucellx(column), y0 = gpucelly(row);
-	double x1 = gpucellx(column + columns), y1 = gpucelly(row + rows);
+	double x0 = gpucellx(column), y0 = gpucelly(row) + gpu.rowdy;
+	double x1 = gpucellx(column + columns);
+	double y1 = gpucelly(row + rows) + gpu.rowdy;
 
 	gpucolor(color, rgb);
 #define FVERTEX(px, py) \
@@ -1240,7 +1293,7 @@ gpudrawimage(const GraphicsPlacementView *placement, void *context)
 	GpuVertex vertices[6];
 	double x, y, w, h, u0, v0, u1, v1;
 	float selection[3];
-	int selected_image;
+	int selected_image, clipped;
 	const void *voff, *toff, *coff;
 	(void)context;
 
@@ -1251,12 +1304,26 @@ gpudrawimage(const GraphicsPlacementView *placement, void *context)
 	    gpucellx(placement->column);
 	h = placement->natural_size ? placement->source_height * gpuyscale() :
 	    gpucelly(placement->row + placement->rows) - gpucelly(placement->row);
+	/* Smooth scrolling: the image moves with its anchor row and is clipped
+	 * to that row's band; rowdy is also picked up by gpufillcells(). */
+	gpubeginrow(placement->row);
+	y += gpu.rowdy;
 	if (x >= win.w - borderpx || x + w <= borderpx ||
-	    y + gpu.ssoff >= win.h - borderpx || y + h + gpu.ssoff <= borderpx)
+	    y >= win.h - borderpx || y + h <= borderpx) {
+		gpuendrow();
 		return;
+	}
+	clipped = gpu.rowclip;
+	if (clipped)
+		glScissor(0, win.h - (int)gpu.clipbot, win.w,
+		    MAX(0, (int)(gpu.clipbot - gpu.cliptop)));
 	image = gpuimagetexture(placement);
-	if (!image)
+	if (!image) {
+		gpuendrow();
+		if (clipped)
+			gpuimagescissor();
 		return;
+	}
 	u0 = (placement->source_x + 0.5) / placement->image_width;
 	v0 = (placement->source_y + 0.5) / placement->image_height;
 	u1 = (placement->source_x + placement->source_width - 0.5) /
@@ -1317,61 +1384,35 @@ gpudrawimage(const GraphicsPlacementView *placement, void *context)
 	/* Keep the original per-cell baseline alive while selected, but do not draw
 	 * later cell changes over the atomic selection. Once selection ends, menus
 	 * and other changed cells immediately resume occluding their own regions. */
+	gpuendrow();	/* covering cells shift/clip by their own rows */
 	image_occlusion_draw(&gpu.imageocclusion, placement, tcol(), trow(),
 	    tlineviewline, selected_image ? NULL : gpuoccludecell, NULL);
 	gpudrawimageocclusion();
+	if (clipped)
+		gpuimagescissor();
+}
+
+/* Cell vertices are scaled to the actual drawable content rectangle, not
+ * the nominal integer cell grid (win.tw/win.th). Scissoring to that nominal
+ * size can remove nearly a full final row when the tiled window has leftover
+ * pixels, exposing the terminal background under bottom-edge images. */
+static void
+gpuimagescissor(void)
+{
+	glScissor(borderpx, borderpx, MAX(0, win.w - 2 * borderpx),
+	    MAX(0, win.h - 2 * borderpx));
 }
 
 static void
 gpudrawimages(int stage)
 {
-	int width = MAX(0, win.w - 2 * borderpx);
-	int height = MAX(0, win.h - 2 * borderpx);
 	int first, end;
 
 	glEnable(GL_SCISSOR_TEST);
-	/* Cell vertices are scaled to the actual drawable content rectangle, not
-	 * the nominal integer cell grid (win.tw/win.th). Scissoring to that nominal
-	 * size can remove nearly a full final row when the tiled window has leftover
-	 * pixels, exposing the terminal background under bottom-edge images. */
-	glScissor(borderpx, borderpx, width, height);
+	gpuimagescissor();
 	smoothscroll_rows(&first, &end);
 	graphics_draw_rows(tisaltscreen(), stage, win.cw, win.ch, first, end,
 	    tlineviewrow, gpudrawimage, NULL);
-	if (gpu.ssoff)
-		gpusmoothscissor();
-	else
-		glDisable(GL_SCISSOR_TEST);
-}
-
-/* Smooth scrolling: the whole grid (cells, cursor, images) is translated by
- * the sub-row offset on the GPU and clipped to the grid area, so the rows
- * exposed at the top or bottom are only partially visible. */
-static void
-gpusmoothscissor(void)
-{
-	glEnable(GL_SCISSOR_TEST);
-	glScissor(0, borderpx, win.w, MAX(0, win.h - 2 * borderpx));
-}
-
-static void
-gpusmoothbegin(void)
-{
-	if (!gpu.ssoff)
-		return;
-	gpusmoothscissor();
-	glMatrixMode(GL_MODELVIEW);
-	glPushMatrix();
-	glTranslatef(0.0f, (GLfloat)gpu.ssoff, 0.0f);
-}
-
-static void
-gpusmoothend(void)
-{
-	if (!gpu.ssoff)
-		return;
-	glMatrixMode(GL_MODELVIEW);
-	glPopMatrix();
 	glDisable(GL_SCISSOR_TEST);
 }
 

@@ -1,5 +1,6 @@
 /* See LICENSE for license details. */
-/* Pixel-smooth scrolling of the scrollback view.
+/* Pixel-smooth scrolling of the scrollback view and of application scroll
+ * regions (see smoothscroll_term.c).
  *
  * The terminal's logical scroll position (term.scr, whole rows) always changes
  * immediately, exactly as without this feature.  Smooth scrolling is purely a
@@ -26,8 +27,8 @@ enum {
 
 enum {
 	SS_RENDER_OFF, /* feature disabled: renderers are untouched */
-	SS_RENDER_GPU, /* GL/Metal translate the grid and scissor it */
-	SS_RENDER_CPU, /* Xft draws rows at an offset into a clipped pixmap */
+	SS_RENDER_GPU, /* GL/Metal shift and clip row vertices */
+	SS_RENDER_CPU, /* Xft draws rows offset under a clip into the pixmap */
 };
 
 typedef struct {
@@ -46,6 +47,7 @@ void ss_visible_rows(double offset, int rows, int *first, int *last);
 int ss_snap_rows(double offset);
 double ss_device_round(double pixels, double scale);
 int ss_row_at(double y, double top, double cellh, double offsetpx);
+int ss_region_animates(int alt, int rows, int top, int bot, int orig, int n);
 int ss_render_path(int enabled, int gpu_active);
 
 void ss_reset(SmoothScroll *ss);
@@ -60,19 +62,34 @@ double ss_wait(const SmoothScroll *ss, double now);
 
 /* ---- Terminal glue (render/smoothscroll_term.c). ---- */
 
-void smoothscroll_configure(int enabled, double duration_ms);
+/* regions: animate application region scrolls (smoothscroll_regions). */
+void smoothscroll_configure(int enabled, double duration_ms, int regions);
 int smoothscroll_enabled(void);
-/* Start of draw(): follow logical scroll changes, advance the animation and
- * mark the grid dirty while it moves.  Cheap no-op when nothing scrolled. */
+/* DECSCLM (CSI ? 4 h/l): application opt-in to region animation. */
+void smoothscroll_decsclm(int set);
+/* tscrollup()/tscrolldown(), before rows [orig, bot] of the scroll region
+ * [top, bot] move by n rows (positive: content moves up). */
+void smoothscroll_region(int top, int bot, int orig, int n);
+/* Start of draw(): follow logical scroll changes, advance the animations and
+ * mark the grid dirty while anything moves.  Cheap when nothing scrolled. */
 void smoothscroll_frame(void);
 /* Grid rows [first, end) visible this frame; [0, rows) at rest. */
 void smoothscroll_rows(int *first, int *end);
-/* After drawregion(): draw the partial rows the offset exposes. */
+/* After drawregion(): draw the partial rows / departing lines exposed. */
 void smoothscroll_drawextra(void);
-/* Current offset in device pixels for a row of `cellh` pixels; 0 at rest. */
-double smoothscroll_offset_px(double cellh, double scale);
-/* The grid is translated this frame (or was last frame): clip and redraw it
- * completely instead of trusting retained damage. */
+/* Renderers, per grid row y being drawn: shift it by this many rows (0 at
+ * rest) and, when row_clip() returns 1, clip it to grid rows [top, end)
+ * (unshifted).  While plain() is 1 the line drawn is a departing copy, not a
+ * grid row: skip selection/search/line highlights for it. */
+double smoothscroll_row_shift(int y);
+int smoothscroll_row_clip(int y, int *top, int *end);
+int smoothscroll_plain(void);
+/* Rows [top, end) that move this frame (CPU renderers clear them first). */
+int smoothscroll_band(int *top, int *end);
+/* Scrollback shift in rows, for mapping the mouse to the drawn grid. */
+double smoothscroll_view_shift(void);
+/* Something moved this frame or the last: redraw the grid completely
+ * instead of trusting retained damage. */
 int smoothscroll_needs_full(void);
 /* Frames are still needed (animation or pending settle). */
 int smoothscroll_pending(void);

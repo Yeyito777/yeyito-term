@@ -58,13 +58,11 @@ void mac_renderer_image(int stage, uint64_t serial, const uint8_t *rgba,
 		double width, double height);
 void mac_renderer_set_image_clip(double x, double y, double width,
 		double height);
-/* Smooth scrolling: translate the grid by `offset` points (0 at rest) and
- * clip it to the band [clip_y, clip_y + clip_height). */
-void mac_renderer_set_grid_offset(double offset, double clip_y,
-		double clip_height);
-/* Overlay vertices emitted after this call are UI, not grid: they are not
- * translated.  Reset by mac_renderer_set_grid_offset(). */
-void mac_renderer_mark_ui_overlay(void);
+/* Smooth scrolling: quads emitted until the next call (cells, decorations,
+ * images) move down by `dy` points and, if `clip`, are clipped vertically to
+ * [clip_top, clip_bottom) points.  mac_renderer_set_row(0, 0, 0, 0) resets. */
+void mac_renderer_set_row(double dy, int clip, double clip_top,
+		double clip_bottom);
 void mac_renderer_remove_image(uint64_t serial);
 void mac_renderer_end(void);
 

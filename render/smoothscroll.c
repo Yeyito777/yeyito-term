@@ -76,6 +76,26 @@ ss_row_at(double y, double top, double cellh, double offsetpx)
 	return (int)floor((y - top - offsetpx) / cellh);
 }
 
+/* Should a scroll of `n` rows (positive: content moves up) of rows
+ * [orig, bot] animate?  Only whole-region scrolls glide: SU/SD, IND/LF at
+ * the bottom margin, RI at the top margin, and IL/DL with the cursor on the
+ * top margin (how neovim scrolls a window).  IL/DL further down the region is
+ * an edit (insert/delete line), not a scroll.  Regions of 1-2 rows (status
+ * lines, tickers) and scrolls of the whole region or more (a redraw) jump.
+ * The primary screen only animates when the app set a partial region:
+ * full-screen primary scrolls are ordinary shell output. */
+int
+ss_region_animates(int alt, int rows, int top, int bot, int orig, int n)
+{
+	int height = bot - top + 1, distance = n < 0 ? -n : n;
+
+	if (n == 0 || orig != top || height < 3 || distance >= height)
+		return 0;
+	if (!alt && top == 0 && bot == rows - 1)
+		return 0;
+	return 1;
+}
+
 int
 ss_render_path(int enabled, int gpu_active)
 {

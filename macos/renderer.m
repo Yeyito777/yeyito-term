@@ -72,13 +72,10 @@ typedef struct {
 	MacVertexList layers[MAC_LAYER_COUNT];
 	MacImageList imageLayers[3];
 	double imageClipX, imageClipY, imageClipWidth, imageClipHeight;
-	/* Smooth scrolling: the vertex shader translates the grid (cells,
-	 * images, cursor) by gridOffset points, scissored to the grid band;
-	 * overlay vertices added after mac_renderer_mark_ui_overlay() (command
-	 * line, toasts, SSH badge, IME text) stay put. */
-	double gridOffset, gridClipY, gridClipHeight;
-	size_t uiStart[3];
-	int uiMarked;
+	/* Smooth scrolling: quads of the grid row being emitted are shifted by
+	 * rowDy pixels and, if rowClip, clipped to [clipTop, clipBottom). */
+	float rowDy, clipTop, clipBottom;
+	int rowClip;
 	__strong id<CAMetalDrawable> drawable;
 	__strong MTLRenderPassDescriptor *pass;
 	__strong id<MTLCommandBuffer> command;
@@ -91,8 +88,8 @@ static NSString *const shaderSource = @
 "using namespace metal;\n"
 "struct V { float2 position; float2 uv; float4 color; float mode; };\n"
 "struct O { float4 position [[position]]; float2 uv; float4 color; float mode; };\n"
-"vertex O st_vertex(const device V *v [[buffer(0)]], constant float4 &view [[buffer(1)]], uint id [[vertex_id]]) {\n"
-"  O o; float2 p = (v[id].position + view.zw) / view.xy;\n"
+"vertex O st_vertex(const device V *v [[buffer(0)]], constant float2 &viewport [[buffer(1)]], uint id [[vertex_id]]) {\n"
+"  O o; float2 p = v[id].position / viewport;\n"
 "  o.position = float4(p.x * 2.0 - 1.0, 1.0 - p.y * 2.0, 0.0, 1.0);\n"
 "  o.uv = v[id].uv; o.color = v[id].color; o.mode = v[id].mode; return o;\n"
 "}\n"
@@ -177,6 +174,19 @@ quad(enum MacRenderLayer layer, float x, float y, float width, float height,
 {
 	MacVertexList *list = &r.layers[layer];
 	vector_float4 c = vcolor(color);
+
+	y += r.rowDy;
+	if (r.rowClip) {
+		float y0 = MAX(y, r.clipTop), y1 = MIN(y + height, r.clipBottom);
+		float dv = v1 - v0;
+
+		if (y1 <= y0)
+			return;
+		v1 = v0 + dv * (y1 - y) / height;
+		v0 = v0 + dv * (y0 - y) / height;
+		y = y0;
+		height = y1 - y0;
+	}
 	MacVertex a = {{x, y}, {u0, v0}, c, mode};
 	MacVertex b = {{x + width, y}, {u1, v0}, c, mode};
 	MacVertex d = {{x, y + height}, {u0, v1}, c, mode};
@@ -693,13 +703,26 @@ mac_renderer_image(int stage, uint64_t serial, const uint8_t *rgba,
 		    r.layers[MAC_LAYER_IMAGE_BACKGROUND + layer].count;
 	scale = (float)r.scale;
 	left = (float)x * scale;
-	top = (float)y * scale;
+	top = (float)y * scale + r.rowDy;
 	right = (float)(x + width) * scale;
-	bottom = (float)(y + height) * scale;
+	bottom = (float)(y + height) * scale + r.rowDy;
 	u0 = (float)(sourceX + 0.5) / imageWidth;
 	v0 = (float)(sourceY + 0.5) / imageHeight;
 	u1 = (float)(sourceX + sourceWidth - 0.5) / imageWidth;
 	v1 = (float)(sourceY + sourceHeight - 0.5) / imageHeight;
+	if (r.rowClip) {
+		float y0 = MAX(top, r.clipTop), y1 = MIN(bottom, r.clipBottom);
+		float dv = v1 - v0;
+
+		if (y1 <= y0) {
+			r.imageLayers[stage].count--;	/* drop the reserved slot */
+			return;
+		}
+		v1 = v0 + dv * (y1 - top) / (bottom - top);
+		v0 = v0 + dv * (y0 - top) / (bottom - top);
+		top = y0;
+		bottom = y1;
+	}
 	a = (MacVertex){{left, top}, {u0, v0}, white, 3.0f};
 	b = (MacVertex){{right, top}, {u1, v0}, white, 3.0f};
 	c = (MacVertex){{left, bottom}, {u0, v1}, white, 3.0f};
@@ -715,20 +738,12 @@ mac_renderer_remove_image(uint64_t serial)
 }
 
 void
-mac_renderer_set_grid_offset(double offset, double clipY, double clipHeight)
+mac_renderer_set_row(double dy, int clip, double clipTop, double clipBottom)
 {
-	r.gridOffset = offset;
-	r.gridClipY = clipY;
-	r.gridClipHeight = clipHeight;
-	r.uiMarked = 0;
-}
-
-void
-mac_renderer_mark_ui_overlay(void)
-{
-	for (int i = 0; i < 3; i++)
-		r.uiStart[i] = r.layers[MAC_LAYER_OVERLAY_BACKGROUND + i].count;
-	r.uiMarked = 1;
+	r.rowDy = (float)(dy * r.scale);
+	r.rowClip = clip;
+	r.clipTop = (float)(clipTop * r.scale);
+	r.clipBottom = (float)(clipBottom * r.scale);
 }
 
 void
@@ -755,8 +770,6 @@ encodeLayer(id<MTLRenderCommandEncoder> encoder, MacVertexList *list,
 	    vertexCount:list->count];
 }
 
-static MTLScissorRect frameScissor(void);
-
 static void
 encodeImages(id<MTLRenderCommandEncoder> encoder, int stage)
 {
@@ -770,12 +783,6 @@ encodeImages(id<MTLRenderCommandEncoder> encoder, int stage)
 	    ceil((r.imageClipX + r.imageClipWidth) * scale));
 	NSUInteger bottom = (NSUInteger)MIN((double)drawableHeight,
 	    ceil((r.imageClipY + r.imageClipHeight) * scale));
-	if (r.gridOffset != 0.0) {
-		/* Stay inside the smooth-scroll grid band as well. */
-		MTLScissorRect band = frameScissor();
-		y = MAX(y, band.y);
-		bottom = MIN(bottom, band.y + band.height);
-	}
 	if (!list->count || right <= x || bottom <= y)
 		return;
 	[encoder setScissorRect:(MTLScissorRect){x, y, right - x, bottom - y}];
@@ -807,84 +814,26 @@ encodeImages(id<MTLRenderCommandEncoder> encoder, int stage)
 			}
 		}
 	}
-	[encoder setScissorRect:frameScissor()];
-}
-
-/* The whole drawable, or the grid band while the grid is translated. */
-static MTLScissorRect
-frameScissor(void)
-{
-	NSUInteger width = (NSUInteger)r.view.drawableSize.width;
-	NSUInteger height = (NSUInteger)r.view.drawableSize.height;
-	NSUInteger top, bottom;
-
-	if (r.gridOffset == 0.0)
-		return (MTLScissorRect){0, 0, width, height};
-	top = (NSUInteger)MIN((double)height, MAX(0.0, floor(r.gridClipY * r.scale)));
-	bottom = (NSUInteger)MIN((double)height, MAX(0.0,
-	    ceil((r.gridClipY + r.gridClipHeight) * r.scale)));
-	if (bottom <= top) {	/* degenerate window: keep a valid 1px rect */
-		bottom = MAX((NSUInteger)1, MIN(height, top + 1));
-		top = bottom - 1;
-	}
-	return (MTLScissorRect){0, top, width, bottom - top};
-}
-
-static void
-setTranslation(id<MTLRenderCommandEncoder> encoder, double offset)
-{
-	vector_float4 view = {(float)r.view.drawableSize.width,
-	    (float)r.view.drawableSize.height, 0.0f,
-	    (float)(offset * r.scale)};
-	[encoder setVertexBytes:&view length:sizeof(view) atIndex:1];
-}
-
-static void
-encodeSlice(id<MTLRenderCommandEncoder> encoder, MacVertexList *list,
-		size_t start, size_t end)
-{
-	MacVertexList slice;
-
-	if (end <= start)
-		return;
-	slice = (MacVertexList){.items = list->items + start, .count = end - start};
-	encodeLayer(encoder, &slice, r.atlas);
+	[encoder setScissorRect:(MTLScissorRect){0, 0, drawableWidth, drawableHeight}];
 }
 
 static void
 encodeFrame(id<MTLRenderCommandEncoder> encoder)
 {
-	int split = r.gridOffset != 0.0 && r.uiMarked;
-
 	[encoder setRenderPipelineState:r.pipeline];
-	setTranslation(encoder, r.gridOffset);
+	vector_float2 viewport = {(float)r.view.drawableSize.width,
+	    (float)r.view.drawableSize.height};
+	[encoder setVertexBytes:&viewport length:sizeof(viewport) atIndex:1];
 	[encoder setFragmentSamplerState:r.sampler atIndex:0];
-	if (r.gridOffset != 0.0)
-		[encoder setScissorRect:frameScissor()];
 	encodeImages(encoder, 0);
 	encodeLayer(encoder, &r.layers[MAC_LAYER_BACKGROUND], r.atlas);
 	encodeImages(encoder, 1);
 	encodeLayer(encoder, &r.layers[MAC_LAYER_TEXT], r.atlas);
 	encodeLayer(encoder, &r.layers[MAC_LAYER_DECORATION], r.atlas);
 	encodeImages(encoder, 2);
-	if (!split) {
-		encodeLayer(encoder, &r.layers[MAC_LAYER_OVERLAY_BACKGROUND], r.atlas);
-		encodeLayer(encoder, &r.layers[MAC_LAYER_OVERLAY_TEXT], r.atlas);
-		encodeLayer(encoder, &r.layers[MAC_LAYER_OVERLAY_DECORATION], r.atlas);
-		return;
-	}
-	/* Grid overlays (the cursor) move with the grid; UI overlays don't. */
-	for (int i = 0; i < 3; i++)
-		encodeSlice(encoder, &r.layers[MAC_LAYER_OVERLAY_BACKGROUND + i],
-		    0, r.uiStart[i]);
-	setTranslation(encoder, 0.0);
-	[encoder setScissorRect:(MTLScissorRect){0, 0,
-	    (NSUInteger)r.view.drawableSize.width,
-	    (NSUInteger)r.view.drawableSize.height}];
-	for (int i = 0; i < 3; i++) {
-		MacVertexList *list = &r.layers[MAC_LAYER_OVERLAY_BACKGROUND + i];
-		encodeSlice(encoder, list, r.uiStart[i], list->count);
-	}
+	encodeLayer(encoder, &r.layers[MAC_LAYER_OVERLAY_BACKGROUND], r.atlas);
+	encodeLayer(encoder, &r.layers[MAC_LAYER_OVERLAY_TEXT], r.atlas);
+	encodeLayer(encoder, &r.layers[MAC_LAYER_OVERLAY_DECORATION], r.atlas);
 }
 
 void
