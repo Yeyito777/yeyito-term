@@ -1431,6 +1431,7 @@ treset(void)
 {
 	uint i;
 	graphics_reset();
+	smoothscroll_decsclm(0);
 
 	term.c = (TCursor){{
 		.mode = ATTR_NULL,
@@ -1516,6 +1517,7 @@ tscrolldown(int orig, int n, int copyhist)
 	Line temp;
 
 	LIMIT(n, 0, term.bot-orig+1);
+	smoothscroll_region(term.top, term.bot, orig, -n);
 
 	if (copyhist) {
 		int oldest;
@@ -1561,6 +1563,7 @@ tscrollup(int orig, int n, int copyhist)
 	Line temp;
 
 	LIMIT(n, 0, term.bot-orig+1);
+	smoothscroll_region(term.top, term.bot, orig, n);
 
 	if (copyhist) {
 		term.histi = (term.histi + 1) % HISTSIZE;
@@ -2009,10 +2012,12 @@ tsetmode(int priv, int set, const int *args, int narg)
 			case 7: /* DECAWM -- Auto wrap */
 				MODBIT(term.mode, set, MODE_WRAP);
 				break;
+			case 4:  /* DECSCLM -- Smooth scroll (region opt-in) */
+				smoothscroll_decsclm(set);
+				break;
 			case 0:  /* Error (IGNORED) */
 			case 2:  /* DECANM -- ANSI/VT52 (IGNORED) */
 			case 3:  /* DECCOLM -- Column  (IGNORED) */
-			case 4:  /* DECSCLM -- Scroll (IGNORED) */
 			case 8:  /* DECARM -- Auto repeat (IGNORED) */
 			case 18: /* DECPFF -- Printer feed (IGNORED) */
 			case 19: /* DECPEX -- Printer extent (IGNORED) */
