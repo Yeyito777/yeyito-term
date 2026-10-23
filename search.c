@@ -1,3 +1,4 @@
+#include <limits.h>
 #include <regex.h>
 #include <stdio.h>
 #include <string.h>
@@ -185,7 +186,7 @@ search_matched(int x, int y)
 void
 search_invalidate_cache(void)
 {
-	sr.cache_y = -1;
+	sr.cache_y = INT_MIN;
 }
 
 int
@@ -209,7 +210,7 @@ search_clear(void)
 	}
 	sr.active = 0;
 	sr.pattern[0] = '\0';
-	sr.cache_y = -1;
+	sr.cache_y = INT_MIN;
 	sr.cache_count = 0;
 	tfulldirt();
 }
@@ -218,7 +219,7 @@ void
 search_noh(void)
 {
 	sr.active = 0;
-	sr.cache_y = -1;
+	sr.cache_y = INT_MIN;
 	sr.cache_count = 0;
 	tfulldirt();
 }
@@ -476,7 +477,7 @@ search_execute(const char *pattern, int direction)
 	sr.pattern[sizeof(sr.pattern) - 1] = '\0';
 	sr.direction = direction;
 	sr.active = 1;
-	sr.cache_y = -1;
+	sr.cache_y = INT_MIN;
 
 	if (debug_mode)
 		fprintf(stderr, "search: execute '%s' dir=%d\n", pattern, direction);
