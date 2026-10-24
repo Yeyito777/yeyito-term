@@ -852,6 +852,57 @@ TEST(rewrapped_panel_keeps_its_repeated_label)
 	ASSERT(NEAR(1.0, smoothscroll_shift(7, 3)));
 }
 
+/* A row the app rewrote rather than scrolled (the Exocortex history cursor:
+ * a highlight that stays on its screen row) matches its old self in blank
+ * columns.  It must not pin those columns of every other row in place: the
+ * text of longer lines there would tear off and stay behind. */
+static void
+cursorline(int y)
+{
+	for (int x = 4; x < FAKE_COLS; x++)
+		altstore[y][x].mode = ATTR_REVERSE;
+}
+
+TEST(rewritten_highlight_row_does_not_pin_columns)
+{
+	int left, right;
+
+	sidebar_reset();
+	for (int y = 0; y < FAKE_ROWS; y++)
+		for (int x = 9; x < FAKE_COLS; x++)	/* short lines */
+			altstore[y][x] = (Glyph){ .u = ' ' };
+	cursorline(3);
+	fmode = MODE_SYNC;
+	region_scroll(0, 7, 0, 1);
+	for (int y = 0; y <= 7; y++)
+		for (int x = 4; x < FAKE_COLS; x++)
+			altstore[y][x].mode = 0;
+	for (int x = 9; x < FAKE_COLS; x++)	/* the app's new bottom row */
+		altstore[7][x] = (Glyph){ .u = ' ' };
+	cursorline(3);
+	sidebar_repaint();
+	fmode = 0;
+	frame_at(1000);
+	ASSERT(smoothscroll_span(3, &left, &right));
+	ASSERT_EQ(4, left);
+	ASSERT_EQ(12, right);
+	ASSERT(NEAR(1.0, smoothscroll_shift(10, 5)));
+	ASSERT(NEAR(0.0, smoothscroll_shift(1, 5)));
+}
+
+/* Every row rewritten (e.g. a highlight on each): nothing scrolled. */
+TEST(all_rows_rewritten_does_not_glide)
+{
+	alt_reset(1);
+	region_scroll(0, 7, 0, 1);
+	for (int y = 0; y <= 7; y++)
+		for (int x = 0; x < FAKE_COLS; x++)
+			altstore[y][x].mode = ATTR_REVERSE;
+	frame_at(1000);
+	ASSERT(NEAR(0.0, smoothscroll_shift(5, 3)));
+	ASSERT(!smoothscroll_pending());
+}
+
 TEST(uniform_band_glides_full_width)
 {
 	int left, right;
@@ -873,6 +924,8 @@ TEST_SUITE(smoothscroll_static_columns)
 	RUN_TEST(late_panel_repaint_refines_moving_columns);
 	RUN_TEST(repeated_pane_text_moves_with_pane);
 	RUN_TEST(rewrapped_panel_keeps_its_repeated_label);
+	RUN_TEST(rewritten_highlight_row_does_not_pin_columns);
+	RUN_TEST(all_rows_rewritten_does_not_glide);
 	RUN_TEST(uniform_band_glides_full_width);
 }
 
