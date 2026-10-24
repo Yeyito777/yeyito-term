@@ -54,6 +54,9 @@ static struct {
 	/* Per column: VOTED (some cell told stayed/moved apart), BLANK (blank
 	 * on every band row before and after the batch). */
 	unsigned char *colinfo;
+	/* Per band row: nonzero when the row scrolled rather than being
+	 * rewritten, so its cells may vote on which columns move. */
+	unsigned char *rowvotes;
 } reg;
 
 /* A copied line being drawn outside the grid: its shift relative to the
@@ -95,6 +98,7 @@ regreset(void)
 	free(reg.below);
 	free(reg.snap);
 	free(reg.colinfo);
+	free(reg.rowvotes);
 	memset(&reg, 0, sizeof(reg));
 }
 
@@ -260,7 +264,9 @@ smoothscroll_region(int top, int bot, int orig, int n)
 		reg.below = calloc(height, sizeof(*reg.below));
 		reg.snap = malloc((size_t)height * reg.cols * sizeof(Glyph));
 		reg.colinfo = malloc(reg.cols);
-		if (!reg.above || !reg.below || !reg.snap || !reg.colinfo) {
+		reg.rowvotes = malloc(height);
+		if (!reg.above || !reg.below || !reg.snap || !reg.colinfo ||
+		    !reg.rowvotes) {
 			regreset();
 			return;
 		}
@@ -359,10 +365,36 @@ smoothscroll_classify(void)
 {
 	int height = reg.bot - reg.top + 1, cols = reg.cols, n = reg.batchn;
 	int x, y, left = -1, right = -1;
-	long moved = 0, other = 0, informative = 0;
+	long moved = 0, other = 0, informative = 0, rewritten = 0;
 
 	if (!reg.snap || n == 0)
 		return 1;
+	/* Rows the app rewrote instead of scrolling (a cursor-line highlight,
+	 * text reflowed beside a floating panel) would vote "stayed" in every
+	 * column where they happen to match their old contents, pinning those
+	 * columns of every row in place.  Only rows that scrolled vote. */
+	for (y = 0; y < height; y++) {
+		int from = y + n;
+		Line line = tviewline(reg.top + y);
+		long m = 0, o = 0;
+
+		reg.rowvotes[y] = 0;
+		if (!line || from < 0 || from >= height)
+			continue;
+		for (x = 0; x < cols; x++) {
+			const Glyph *same = reg.snap + (size_t)y * cols + x;
+			const Glyph *src = reg.snap + (size_t)from * cols + x;
+
+			if (glypheq(same, src) || glypheq(&line[x], same))
+				continue;
+			if (glypheq(&line[x], src))
+				m++;
+			else
+				o++;
+		}
+		reg.rowvotes[y] = m >= o;
+		rewritten += m < o;
+	}
 	for (x = 0; x < cols; x++) {
 		long s = 0, m = 0, o = 0;
 		int blank = 1;
@@ -376,6 +408,8 @@ smoothscroll_classify(void)
 				blank = 0;
 			if (!line || from < 0 || from >= height)
 				continue;	/* new row: no prediction */
+			if (!reg.rowvotes[y])
+				continue;	/* rewritten row */
 			same = reg.snap + (size_t)y * cols + x;
 			src = reg.snap + (size_t)from * cols + x;
 			if (glypheq(same, src))
@@ -395,6 +429,10 @@ smoothscroll_classify(void)
 				left = x;
 			right = x + 1;
 		}
+	}
+	if (!informative && rewritten) {	/* every row was rewritten */
+		reg.left = reg.right = 0;
+		return 0;
 	}
 	if (!informative) {	/* uniform content: nothing to tell apart */
 		reg.left = 0;

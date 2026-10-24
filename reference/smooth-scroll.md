@@ -137,7 +137,11 @@ on later frames of the glide (for panels repainted late), every column votes
 per cell: *stayed* (equals the snapshot at the same row), *moved* (equals the
 snapshot at its source row) or *rewritten* (neither). Cells where stayed and
 moved predict the same thing (blank areas, text repeated on every row) don't
-vote. A column moves when *moved* wins; the moving span runs from the first to
+vote. Only rows that scrolled vote: a row with more *rewritten* cells than
+*moved* ones (a cursor-line highlight that stays on its screen row, text
+re-wrapped beside a floating panel) would otherwise pin every column where it
+matches its old self, and longer lines of other rows would tear there. A
+column moves when *moved* wins; the moving span runs from the first to
 the last such column. Non-voting neighbours join it up to the row edge, or, in
 a run between moving and static columns, up to the widest all-blank gap, so a
 pane's repeated prefix moves with the pane while a panel's border and labels
@@ -228,7 +232,8 @@ the grid is already final).
   and departing lines are drawn only in the pane, re-wrapped right panel stays
   put, mostly rewritten band does not glide, late panel repaint refines the
   span, a pane's repeated prefix moves with the pane, a panel's repeated label
-  stays with the panel, uniform bands glide full width).
+  stays with the panel, a rewritten highlight row does not pin columns, a band
+  of rewritten rows does not glide, uniform bands glide full width).
 - `tests/test_graphics.c`: `graphics_draw_rows()` includes partial rows.
 - `tests/test_macos_image_occlusion.m` (macOS): offscreen Metal pixels — a
   region scroll shifts its band's cells, image and cursor, clips at the band
