@@ -62,11 +62,20 @@ double ss_wait(const SmoothScroll *ss, double now);
 
 /* ---- Terminal glue (render/smoothscroll_term.c). ---- */
 
-/* regions: animate application region scrolls (smoothscroll_regions). */
+/* regions (smoothscroll_regions): 0 never glide application region scrolls
+ * automatically, 1 on the primary screen (default), 2 also full-screen
+ * (alternate screen) apps that did not opt in.  DECSCLM always opts in. */
 void smoothscroll_configure(int enabled, double duration_ms, int regions);
 int smoothscroll_enabled(void);
 /* DECSCLM (CSI ? 4 h/l): application opt-in to region animation. */
 void smoothscroll_decsclm(int set);
+/* App-driven smooth scrolling (docs/app-smooth-scroll.md).  Mode 2032
+ * (CSI ? 2032 h/l) on or off; state for DECRQM: 1 set, 0 reset, -1 smooth
+ * scrolling disabled (reported as permanently reset); OSC 2032 arguments
+ * (args[0] is "2032"). */
+void smoothscroll_app_mode(int set);
+int smoothscroll_app_state(void);
+void smoothscroll_app_osc(int narg, char **args);
 /* tscrollup()/tscrolldown(), before rows [orig, bot] of the scroll region
  * [top, bot] move by n rows (positive: content moves up). */
 void smoothscroll_region(int top, int bot, int orig, int n);
@@ -88,6 +97,9 @@ double smoothscroll_shift(int x, int y);
 int smoothscroll_clip(int x, int y, int *top, int *end, int *left,
 		int *right);
 int smoothscroll_span(int y, int *left, int *right);
+/* End (exclusive, at most x2) of the run of row y's columns from x that
+ * share one shift and clip: line drawers draw a row as such segments. */
+int smoothscroll_segment(int y, int x, int x2);
 int smoothscroll_plain(void);
 /* Recompute the band's moving columns (exposed for tests); 0 when the last
  * batch mostly rewrote the band instead of scrolling it. */

@@ -15,6 +15,7 @@ Make sure to modify the required zsh config in README.md if you make a change th
 | **st-notify**, st-notify usage, st-notify options, send notification | `reference/st-notify.md` |
 | **cwd**, `_ST_CWD`, OSC 779, working directory, spawntermhere | `reference/cwd-property.md` |
 | **smooth scroll**, pixel scrolling, trackpad momentum, scroll animation, scroll regions, DECSCLM | `reference/smooth-scroll.md` |
+| **app-driven smooth scrolling**, mode 2032, OSC 2032, TUI scroll animation protocol | `docs/app-smooth-scroll.md` |
 
 ## CODE ORGANIZATION
 - st.c/st.h - Core terminal functionality

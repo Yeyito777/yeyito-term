@@ -6,9 +6,13 @@ Pixel-smooth scrolling of
   momentum; mouse wheels and keyboard scrolls (Shift+PageUp, nav-mode
   `Ctrl+u`/`Ctrl+d`, `gg`/`G`, search jumps, snap-to-prompt) glide to their
   target in about 100 ms;
-- **application scroll regions**: when a full-screen app (neovim, less, the
-  Exocortex/Record TUIs) scrolls a DECSTBM region, the region's content glides
-  by those rows while status lines, tab lines and command lines stay put.
+- **application scroll regions** on the primary screen: when an app scrolls a
+  partial DECSTBM region, the region's content glides by those rows while the
+  rest stays put;
+- **full-screen apps** (alternate screen) that animate themselves with the
+  app-driven protocol (mode 2032, `docs/app-smooth-scroll.md`), as the
+  Exocortex TUI does. Other full-screen apps (neovim, less) scroll instantly
+  unless they opt in with DECSCLM or `smoothscroll_regions = 2`.
 
 At rest the view always sits on whole rows.
 
@@ -17,12 +21,25 @@ At rest the view always sits on whole rows.
 ```c
 static int smoothscroll = 1;          /* 0 = everything off */
 static double smoothscroll_ms = 100;  /* glide duration */
-static int smoothscroll_regions = 1;  /* glide app scroll regions */
+static int smoothscroll_regions = 1;  /* 0 off, 1 primary screen, 2 also full-screen apps */
 ```
 
 `smoothscroll_ms = 0` keeps trackpad pixel scrolling but makes every other
 scroll jump. `smoothscroll_regions = 0` stops animating application regions
-unless the app itself asks for it with DECSCLM (below).
+unless the app itself asks for it with DECSCLM (below). With the default `1`
+st guesses only for primary-screen regions: guessing which cells of a
+full-screen app's scroll moved tore side panels and re-wrapped text, so
+full-screen apps glide when they drive it themselves (mode 2032) or ask with
+DECSCLM. `2` restores guessing for every full-screen app.
+
+### App-driven (mode 2032)
+
+`CSI ? 2032 h` hands the animation to the application: it declares the moving
+rectangles and sets their sub-row offset each frame (`OSC 2032`), and st draws
+them shifted and keeps the lines its region scrolls pushed out to fill the
+uncovered strip. Automatic region glides are off meanwhile. The protocol and
+how to drive it are in `docs/app-smooth-scroll.md`; the code is the
+`App-driven smooth scrolling` part of `render/smoothscroll_term.c`.
 
 ### DECSCLM (`CSI ? 4 h` / `CSI ? 4 l`)
 
@@ -115,8 +132,10 @@ no configuration.
   delete a line inside the region), so it jumps.
 - The region has at least 3 rows (1-2 row regions are tickers/status lines).
 - The scroll moves fewer rows than the region has (more is a redraw).
-- Alternate screen, or the primary screen with a partial region. Full-screen
-  scrolls on the primary screen are ordinary shell output and never animate.
+- The primary screen with a partial region (full-screen scrolls on the
+  primary screen are ordinary shell output and never animate), or the
+  alternate screen with DECSCLM or `smoothscroll_regions = 2`. Not while the
+  app drives the animation itself (mode 2032).
 - The scrollback is at the bottom and not gliding.
 - Scrolls accumulating past a whole region within one glide (fast output)
   snap instead of lagging behind.

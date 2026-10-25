@@ -9,7 +9,12 @@
  *   to it.  The lines that left the band are kept as copies and slide out.
  *   st has no left/right margins, so apps with side panels scroll the whole
  *   width and repaint the panels in place; comparing the band before and
- *   after each batch finds the columns that really moved (see classify()). */
+ *   after each batch finds the columns that really moved (see classify()).
+ *   Full-screen apps (alternate screen) glide this way only when they ask
+ *   for it (DECSCLM) or with smoothscroll_regions = 2.
+ * - App-driven (CSI ? 2032 h, docs/app-smooth-scroll.md): the application
+ *   declares the moving rectangles and sets their sub-row offset each frame;
+ *   st only draws them shifted and keeps the lines its scrolls pushed out. */
 
 #include <limits.h>
 #include <stdint.h>
@@ -64,7 +69,30 @@ static struct {
 static struct {
 	int on;
 	double shift;
+	/* App-driven copies clip to their rectangle [top, end) x [left, right). */
+	int app, top, end, left, right;
 } ghost;
+
+/* App-driven smooth scrolling (CSI ? 2032 h). */
+#define APP_MAXRECTS 8
+typedef struct {
+	int top, bot, left, right;	/* rows top..bot, columns [left, right) */
+} AppRect;
+static struct {
+	int on;
+	int nrects;
+	AppRect rect[APP_MAXRECTS];
+	double offset;		/* rows; positive: drawn lower */
+	/* Lines the last scrolls of region gtop..gbot pushed out, nearest
+	 * first: above[0] left over the top edge, below[0] over the bottom. */
+	int gtop, gbot, gcols, cap;
+	Glyph **above, **below;
+	int nabove, nbelow;
+	/* Geometry the state belongs to: a resize or screen switch clears it. */
+	int rows, cols, alt;
+} app;
+
+static void appclear(void);
 
 static double
 monotonicms(void)
@@ -106,6 +134,8 @@ void
 smoothscroll_configure(int enabled, double duration_ms, int regions)
 {
 	regreset();
+	appclear();
+	app.on = 0;
 	sst.enabled = enabled;
 	sst.regions = regions;
 	sst.decsclm = 0;
@@ -210,7 +240,8 @@ copyline(int y, int cols)
 /* Drop the first `drop` copies, then put copies of the `n` departing rows
  * (y0, y0 + step, ...) first, keeping at most a band height of copies. */
 static void
-ghostspush(Glyph **list, int *count, int drop, int y0, int step, int n)
+ghostspushn(Glyph **list, int *count, int cap, int cols, int drop, int y0,
+		int step, int n)
 {
 	int i, keep;
 
@@ -219,12 +250,217 @@ ghostspush(Glyph **list, int *count, int drop, int y0, int step, int n)
 		free(list[i]);
 	memmove(list, list + drop, (*count - drop) * sizeof(*list));
 	*count -= drop;
-	keep = MIN(*count, reg.cap - n);
+	keep = MIN(*count, cap - n);
 	ghostsfree(list, count, MAX(0, keep));
 	memmove(list + n, list, *count * sizeof(*list));
 	for (i = 0; i < n; i++)
-		list[i] = copyline(y0 + i * step, reg.cols);
+		list[i] = copyline(y0 + i * step, cols);
 	*count += n;
+}
+
+static void
+ghostspush(Glyph **list, int *count, int drop, int y0, int step, int n)
+{
+	ghostspushn(list, count, reg.cap, reg.cols, drop, y0, step, n);
+}
+
+/* ---- App-driven smooth scrolling ---- */
+
+static void
+appghostsfree(void)
+{
+	ghostsfree(app.above, &app.nabove, 0);
+	ghostsfree(app.below, &app.nbelow, 0);
+	free(app.above);
+	free(app.below);
+	app.above = app.below = NULL;
+	app.gtop = app.gbot = -1;
+	app.gcols = app.cap = 0;
+}
+
+/* Offset, rectangles and copies go; the mode itself stays. */
+static void
+appclear(void)
+{
+	appghostsfree();
+	app.nrects = 0;
+	app.offset = 0.0;
+	app.rows = trow();
+	app.cols = tcol();
+	app.alt = tisaltscreen();
+}
+
+/* A scroll of region top..bot by n while the app drives: keep the lines it
+ * pushed out so a shifted rectangle can show them past its edge. */
+static void
+appcapture(int top, int bot, int orig, int n)
+{
+	int height = bot - top + 1, distance = n < 0 ? -n : n;
+
+	if (orig != top)
+		return;	/* IL/DL below the top margin: an edit, not a scroll */
+	if (app.gtop != top || app.gbot != bot || app.gcols != tcol()) {
+		appghostsfree();
+		app.above = calloc(height, sizeof(*app.above));
+		app.below = calloc(height, sizeof(*app.below));
+		if (!app.above || !app.below) {
+			appghostsfree();
+			return;
+		}
+		app.gtop = top;
+		app.gbot = bot;
+		app.gcols = tcol();
+		app.cap = height;
+	}
+	if (distance >= height) {	/* nothing adjacent survives */
+		ghostsfree(app.above, &app.nabove, 0);
+		ghostsfree(app.below, &app.nbelow, 0);
+		return;
+	}
+	if (n > 0) {
+		ghostspushn(app.above, &app.nabove, app.cap, app.gcols, 0,
+		    top + n - 1, -1, distance);
+		ghostspushn(app.below, &app.nbelow, app.cap, app.gcols,
+		    distance, 0, 0, 0);
+	} else {
+		ghostspushn(app.below, &app.nbelow, app.cap, app.gcols, 0,
+		    bot - distance + 1, 1, distance);
+		ghostspushn(app.above, &app.nabove, app.cap, app.gcols,
+		    distance, 0, 0, 0);
+	}
+}
+
+void
+smoothscroll_app_mode(int set)
+{
+	regreset();
+	appclear();
+	app.on = set && sst.enabled;
+}
+
+int
+smoothscroll_app_state(void)
+{
+	if (!sst.enabled)
+		return -1;
+	return app.on;
+}
+
+static int
+parseint(const char *s, int *out)
+{
+	char *end;
+	long v = strtol(s, &end, 10);
+
+	if (end == s || v < INT_MIN || v > INT_MAX)
+		return 0;
+	*out = (int)v;
+	return *end == '\0' || *end == ',';
+}
+
+/* OSC 2032 ; r ; T,L,B,R ; ...   rectangles (1-based, inclusive)
+ * OSC 2032 ; o ; N               offset in thousandths of a row
+ * OSC 2032 ; c                   clear offset, rectangles and copies */
+void
+smoothscroll_app_osc(int narg, char **args)
+{
+	int i, v;
+
+	if (!sst.enabled || !app.on || narg < 2)
+		return;
+	if (app.rows != trow() || app.cols != tcol() ||
+	    app.alt != tisaltscreen())
+		appclear();
+	switch (args[1][0]) {
+	case 'r':
+		app.nrects = 0;
+		for (i = 2; i < narg && app.nrects < APP_MAXRECTS; i++) {
+			int t, l, b, r;
+			const char *p = args[i];
+
+			if (!parseint(p, &t) || !(p = strchr(p, ',')) ||
+			    !parseint(++p, &l) || !(p = strchr(p, ',')) ||
+			    !parseint(++p, &b) || !(p = strchr(p, ',')) ||
+			    !parseint(++p, &r))
+				continue;
+			t = MAX(1, t);
+			l = MAX(1, l);
+			b = MIN(trow(), b);
+			r = MIN(tcol(), r);
+			if (t > b || l > r)
+				continue;
+			app.rect[app.nrects++] = (AppRect){ t - 1, b - 1,
+			    l - 1, r };
+		}
+		break;
+	case 'o':
+		if (narg < 3 || !parseint(args[2], &v))
+			return;
+		v = MAX(-1000 * trow(), MIN(1000 * trow(), v));
+		app.offset = v / 1000.0;
+		if (v == 0) {	/* at rest: the copies served their glide */
+			ghostsfree(app.above, &app.nabove, 0);
+			ghostsfree(app.below, &app.nbelow, 0);
+		}
+		break;
+	case 'c':
+		appclear();
+		break;
+	}
+}
+
+static const AppRect *
+apprect(int x, int y)
+{
+	int i;
+
+	if (!app.on || app.offset == 0.0)
+		return NULL;
+	for (i = 0; i < app.nrects; i++) {
+		const AppRect *r = &app.rect[i];
+		if (y >= r->top && y <= r->bot && x >= r->left && x < r->right)
+			return r;
+	}
+	return NULL;
+}
+
+static void
+drawappghost(Glyph *line, const AppRect *r, int asrow, double shift)
+{
+	int right = MIN(r->right, app.gcols);
+
+	if (right <= r->left)
+		return;
+	ghost.on = 1;
+	ghost.app = 1;
+	ghost.shift = shift;
+	ghost.top = r->top;
+	ghost.end = r->bot + 1;
+	ghost.left = r->left;
+	ghost.right = r->right;
+	xdrawline(line, r->left, asrow, right);
+	ghost.on = ghost.app = 0;
+}
+
+/* Past a shifted rectangle's edge: the lines the scroll pushed out, when the
+ * edge is the scrolled region's edge; otherwise background. */
+static void
+appdrawextra(void)
+{
+	double o = app.offset;
+	int i, k;
+
+	if (!app.on || o == 0.0)
+		return;
+	for (i = 0; i < app.nrects; i++) {
+		const AppRect *r = &app.rect[i];
+		if (o > 0 && r->top == app.gtop)
+			for (k = 1; k <= app.nabove && k < o + 1; k++)
+				drawappghost(app.above[k - 1], r, r->top, o - k);
+		if (o < 0 && r->bot == app.gbot)
+			for (k = 1; k <= app.nbelow && k + o < 1; k++)
+				drawappghost(app.below[k - 1], r, r->bot, o + k);
+	}
 }
 
 /* Called by tscrollup()/tscrolldown() before rows [orig, bot] of the region
@@ -235,9 +471,19 @@ smoothscroll_region(int top, int bot, int orig, int n)
 	int alt, height, distance;
 	double now;
 
-	if (!sst.enabled || !(sst.regions || sst.decsclm) || !n)
+	if (!sst.enabled || !n)
 		return;
+	if (app.on) {	/* the application animates; keep what leaves */
+		appcapture(top, bot, orig, n);
+		return;
+	}
 	alt = tisaltscreen();
+	/* Full-screen applications glide automatically only when they ask
+	 * (DECSCLM) or with smoothscroll_regions = 2: guessing which of their
+	 * cells move tears side panels and re-wrapped text.  The app-driven
+	 * protocol (CSI ? 2032 h) is the way for them to glide. */
+	if (!sst.decsclm && sst.regions < (alt ? 2 : 1))
+		return;
 	if (!ss_region_animates(alt, trow(), top, bot, orig, n) ||
 	    tscrolled() != 0 || sst.ss.offset != 0.0) {
 		/* A redraw-sized scroll of the gliding band snaps it. */
@@ -538,6 +784,11 @@ smoothscroll_frame(void)
 		else if (reg.active)
 			regreset();
 	}
+	if (app.on && (app.rows != trow() || app.cols != tcol() ||
+	    app.alt != tisaltscreen()))
+		appclear();	/* resize / screen switch: the app starts over */
+	if (app.on && app.offset != 0.0 && app.nrects)
+		moving = 1;
 	/* The first frame back at rest also redraws everything so no row keeps
 	 * a stale shifted copy in retained (damage-tracked) buffers. */
 	sst.full = moving || sst.moved;
@@ -590,6 +841,7 @@ smoothscroll_drawextra(void)
 		}
 		return;
 	}
+	appdrawextra();
 	if (!reg.active || reg.ss.offset == 0.0)
 		return;
 	/* Copy k above the band is drawn at row top - k + o; below at bot + k + o. */
@@ -616,6 +868,8 @@ smoothscroll_shift(int x, int y)
 		return ghost.shift;
 	if (sst.ss.offset != 0.0)
 		return sst.ss.offset;
+	if (apprect(x, y))
+		return app.offset;
 	if (regmoves(x, y))
 		return reg.ss.offset;
 	return 0.0;
@@ -632,6 +886,23 @@ smoothscroll_clip(int x, int y, int *top, int *end, int *left, int *right)
 		*left = 0;
 		*right = tcol();
 		return 1;
+	}
+	if (ghost.app) {
+		*top = ghost.top;
+		*end = ghost.end;
+		*left = ghost.left;
+		*right = ghost.right;
+		return 1;
+	}
+	{
+		const AppRect *r = ghost.on ? NULL : apprect(x, y);
+		if (r) {
+			*top = r->top;
+			*end = r->bot + 1;
+			*left = r->left;
+			*right = r->right;
+			return 1;
+		}
 	}
 	if (ghost.on || regmoves(x, y)) {
 		*top = reg.top;
@@ -654,6 +925,35 @@ smoothscroll_span(int y, int *left, int *right)
 	return 1;
 }
 
+/* Grow `end` down to `edge` when it splits the run starting at x. */
+static int
+cut(int x, int end, int edge)
+{
+	return edge > x && edge < end ? edge : end;
+}
+
+int
+smoothscroll_segment(int y, int x, int x2)
+{
+	int left, right, i, end = x2;
+
+	if (!sst.enabled || ghost.on)
+		return x2;
+	if (smoothscroll_span(y, &left, &right)) {
+		end = cut(x, end, left);
+		end = cut(x, end, right);
+	}
+	if (app.on && app.offset != 0.0)
+		for (i = 0; i < app.nrects; i++) {
+			const AppRect *r = &app.rect[i];
+			if (y < r->top || y > r->bot)
+				continue;
+			end = cut(x, end, r->left);
+			end = cut(x, end, r->right);
+		}
+	return end;
+}
+
 int
 smoothscroll_band(int *top, int *end)
 {
@@ -667,6 +967,16 @@ smoothscroll_band(int *top, int *end)
 	if (reg.active && reg.ss.offset != 0.0) {
 		*top = reg.top;
 		*end = reg.bot + 1;
+		return 1;
+	}
+	if (app.on && app.offset != 0.0 && app.nrects) {
+		int i;
+		*top = trow();
+		*end = 0;
+		for (i = 0; i < app.nrects; i++) {
+			*top = MIN(*top, app.rect[i].top);
+			*end = MAX(*end, app.rect[i].bot + 1);
+		}
 		return 1;
 	}
 	return 0;
