@@ -559,24 +559,17 @@ xstartdraw(void)
 
 static void xdrawlineseg(Line, int, int, int);
 
-/* Smooth scrolling: when only some columns of a region band move (side
- * panels repainted in place), draw the row as uniform segments. */
 void
 xdrawline(Line line, int x1, int y, int x2)
 {
-	int left, right;
+	int x, end;
 
-	if (!smoothscroll_span(y, &left, &right) ||
-	    (left <= x1 && right >= x2)) {
-		xdrawlineseg(line, x1, y, x2);
-		return;
+	/* Smooth scrolling: draw the row as segments that share one shift and
+	 * clip (side panels drawn in place, app-driven rectangles). */
+	for (x = x1; x < x2; x = end) {
+		end = smoothscroll_segment(y, x, x2);
+		xdrawlineseg(line, x, y, end);
 	}
-	if (x1 < left)
-		xdrawlineseg(line, x1, y, MIN(x2, left));
-	if (MAX(x1, left) < MIN(x2, right))
-		xdrawlineseg(line, MAX(x1, left), y, MIN(x2, right));
-	if (right < x2)
-		xdrawlineseg(line, MAX(x1, right), y, x2);
 }
 
 static void

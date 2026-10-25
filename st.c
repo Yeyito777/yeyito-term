@@ -1432,6 +1432,7 @@ treset(void)
 	uint i;
 	graphics_reset();
 	smoothscroll_decsclm(0);
+	smoothscroll_app_mode(0);
 
 	term.c = (TCursor){{
 		.mode = ATTR_NULL,
@@ -2015,6 +2016,10 @@ tsetmode(int priv, int set, const int *args, int narg)
 			case 4:  /* DECSCLM -- Smooth scroll (region opt-in) */
 				smoothscroll_decsclm(set);
 				break;
+			case 2032: /* app-driven smooth scrolling */
+				smoothscroll_app_mode(set);
+				tfulldirt();
+				break;
 			case 0:  /* Error (IGNORED) */
 			case 2:  /* DECANM -- ANSI/VT52 (IGNORED) */
 			case 3:  /* DECCOLM -- Column  (IGNORED) */
@@ -2154,6 +2159,14 @@ csihandle(void)
 		return;
 	}
 	/* DECRQM replies for supported DEC private modes. */
+	if (csiescseq.priv && csiescseq.arg[0] == 2032 &&
+		csiescseq.mode[0] == '$' && csiescseq.mode[1] == 'p') {
+		int state = smoothscroll_app_state();
+		len = snprintf(buf, sizeof(buf), "\033[?2032;%d$y",
+			state < 0 ? 4 : state ? 1 : 2);
+		ttywrite(buf, len, 0);
+		return;
+	}
 	if (csiescseq.priv &&
 		(csiescseq.arg[0] == 2026 || csiescseq.arg[0] == 5522) &&
 		csiescseq.mode[0] == '$' && csiescseq.mode[1] == 'p') {
@@ -2646,6 +2659,10 @@ strhandle(void)
 				} else
 					sshind_show(strescseq.args[2]);
 			}
+			return;
+		case 2032: /* app-driven smooth scrolling offsets */
+			smoothscroll_app_osc(narg, strescseq.args);
+			tfulldirt();
 			return;
 		case 779: /* st custom: CWD reporting */
 			if (narg > 1 && strescseq.args[1][0] != '\0') {

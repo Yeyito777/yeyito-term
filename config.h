@@ -55,8 +55,11 @@ static int gpuvsync = 1;
  * 0 disables it: scrolling and drawing then behave exactly as without it. */
 static int smoothscroll = 1;
 static double smoothscroll_ms = 100;
-/* Also glide scroll regions that full-screen apps scroll (neovim, less, TUIs).
- * 0: only when an app opts in with DECSCLM (CSI ? 4 h). */
+/* Glide scroll regions that applications scroll without animating them.
+ * 0: only when an app opts in with DECSCLM (CSI ? 4 h).  1: primary-screen
+ * regions only; full-screen apps (neovim, less, TUIs) scroll instantly unless
+ * they animate themselves (docs/app-smooth-scroll.md).  2: also guess for
+ * full-screen apps (side panels and re-wrapped text can tear). */
 static int smoothscroll_regions = 1;
 
 /*

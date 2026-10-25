@@ -120,7 +120,8 @@ alt_reset(int regions)
 	int y;
 
 	fake_reset(1);
-	smoothscroll_configure(1, 100, regions);
+	/* 2: full-screen apps glide without opting in (the old default). */
+	smoothscroll_configure(1, 100, regions ? 2 : 0);
 	falt = 1;
 	fmode = 0;
 	for (y = 0; y < FAKE_ROWS; y++)
@@ -973,6 +974,192 @@ TEST_SUITE(smoothscroll_terminal)
 	RUN_TEST(resize_resets_offset);
 }
 
+/* ---- Full-screen apps opt in ---- */
+
+TEST(full_screen_apps_glide_only_when_they_ask)
+{
+	alt_reset(1);
+	smoothscroll_configure(1, 100, 1);	/* the default knob */
+	region_scroll(0, 7, 0, 1);
+	frame_at(1000);
+	ASSERT(NEAR(0.0, smoothscroll_shift(5, 3)));
+	ASSERT(!smoothscroll_pending());
+	smoothscroll_decsclm(1);
+	region_scroll(0, 7, 0, 1);
+	frame_at(1000);
+	ASSERT(NEAR(1.0, smoothscroll_shift(5, 3)));
+	/* A primary-screen partial region still glides with the default. */
+	alt_reset(1);
+	smoothscroll_configure(1, 100, 1);
+	falt = 0;
+	smoothscroll_region(2, 7, 2, 1);
+	frame_at(1000);
+	ASSERT(NEAR(1.0, smoothscroll_shift(5, 3)));
+}
+
+/* ---- App-driven (CSI ? 2032 h) ---- */
+
+static void
+osc(char *cmd, char *a, char *b)
+{
+	char *args[4] = { "2032", cmd, a, b };
+	smoothscroll_app_osc(b ? 4 : a ? 3 : 2, args);
+}
+
+/* Columns 0-3 stay (a sidebar); the app animates rows 0-7, columns 4-11. */
+static void
+app_reset(void)
+{
+	alt_reset(1);
+	smoothscroll_app_mode(1);
+	osc("r", "1,5,8,12", NULL);
+}
+
+TEST(app_mode_reports_and_stops_automatic_glides)
+{
+	alt_reset(1);
+	ASSERT_EQ(0, smoothscroll_app_state());
+	smoothscroll_app_mode(1);
+	ASSERT_EQ(1, smoothscroll_app_state());
+	region_scroll(0, 7, 0, 1);
+	frame_at(1000);
+	ASSERT(NEAR(0.0, smoothscroll_shift(5, 3)));	/* no guessing */
+	ASSERT(!smoothscroll_pending());
+	smoothscroll_app_mode(0);
+	ASSERT_EQ(0, smoothscroll_app_state());
+	smoothscroll_configure(0, 100, 1);
+	smoothscroll_app_mode(1);
+	ASSERT_EQ(-1, smoothscroll_app_state());	/* feature off */
+}
+
+TEST(app_offset_shifts_only_its_rectangle)
+{
+	int top, end, left, right;
+
+	app_reset();
+	region_scroll(0, 7, 0, 1);	/* content up one row ... */
+	osc("o", "1000", NULL);		/* ... drawn where it was */
+	frame_at(1000);
+	ASSERT(NEAR(1.0, smoothscroll_shift(6, 3)));
+	ASSERT(NEAR(0.0, smoothscroll_shift(1, 3)));	/* outside: still */
+	ASSERT(NEAR(0.0, smoothscroll_shift(6, 9)));	/* below the rectangle */
+	ASSERT(smoothscroll_clip(6, 3, &top, &end, &left, &right));
+	ASSERT_EQ(0, top);
+	ASSERT_EQ(8, end);
+	ASSERT_EQ(4, left);
+	ASSERT_EQ(12, right);
+	ASSERT(!smoothscroll_clip(1, 3, &top, &end, &left, &right));
+	ASSERT_EQ(4, smoothscroll_segment(3, 0, 12));
+	ASSERT_EQ(12, smoothscroll_segment(3, 4, 12));
+	ASSERT(smoothscroll_needs_full());
+	/* The line the scroll pushed out shows above the shifted rows. */
+	smoothscroll_drawextra();
+	ASSERT_EQ(1, ndrawn);
+	ASSERT_EQ(100, drawnid[0]);
+	ASSERT_EQ(0, drawn[0]);
+	ASSERT_EQ(4, drawnx1[0]);
+	ASSERT_EQ(12, drawnx2[0]);
+	ASSERT(drawnplain[0]);
+	ASSERT(NEAR(0.0, drawnshift[0]));
+	/* Halfway there: half of it is still visible. */
+	osc("o", "500", NULL);
+	ndrawn = 0;
+	smoothscroll_drawextra();
+	ASSERT_EQ(1, ndrawn);
+	ASSERT(NEAR(-0.5, drawnshift[0]));
+	/* At rest everything is drawn in place and the copies are gone. */
+	osc("o", "0", NULL);
+	frame_at(1010);
+	ASSERT(NEAR(0.0, smoothscroll_shift(6, 3)));
+	ASSERT(smoothscroll_needs_full());	/* one frame back at rest */
+	frame_at(1020);
+	ASSERT(!smoothscroll_needs_full());
+	osc("o", "500", NULL);
+	ndrawn = 0;
+	smoothscroll_drawextra();
+	ASSERT_EQ(0, ndrawn);
+}
+
+TEST(app_scroll_down_shows_departed_bottom_lines)
+{
+	app_reset();
+	region_scroll(0, 7, 0, -2);	/* content down two rows */
+	osc("o", "-1500", NULL);
+	frame_at(1000);
+	smoothscroll_drawextra();
+	ASSERT_EQ(2, ndrawn);
+	/* Old row 6 sits just below the edge, old row 7 below it. */
+	ASSERT_EQ(106, drawnid[0]);
+	ASSERT_EQ(7, drawn[0]);
+	ASSERT(NEAR(-0.5, drawnshift[0]));
+	ASSERT_EQ(107, drawnid[1]);
+	ASSERT(NEAR(0.5, drawnshift[1]));	/* half of it inside the clip */
+}
+
+TEST(app_rectangles_with_different_tops_split_rows)
+{
+	int top, end, left, right;
+
+	alt_reset(1);
+	smoothscroll_app_mode(1);
+	/* A pane beside a panel: columns 4-7 move on every row, 8-11 only
+	 * below the panel (rows 3-7). */
+	osc("r", "1,5,8,8", "4,9,8,12");
+	region_scroll(0, 7, 0, -1);
+	osc("o", "-500", NULL);
+	frame_at(1000);
+	ASSERT_EQ(8, smoothscroll_segment(5, 4, 12));
+	ASSERT_EQ(12, smoothscroll_segment(5, 8, 12));
+	ASSERT_EQ(12, smoothscroll_segment(1, 8, 12));
+	ASSERT(NEAR(0.0, smoothscroll_shift(9, 1)));	/* the panel */
+	ASSERT(NEAR(-0.5, smoothscroll_shift(9, 5)));
+	ASSERT(smoothscroll_clip(9, 5, &top, &end, &left, &right));
+	ASSERT_EQ(3, top);
+	ASSERT(smoothscroll_clip(5, 5, &top, &end, &left, &right));
+	ASSERT_EQ(0, top);
+	/* Both reach the region's bottom: both show the departed line. */
+	smoothscroll_drawextra();
+	ASSERT_EQ(2, ndrawn);
+	ASSERT_EQ(4, drawnx1[0]);
+	ASSERT_EQ(8, drawnx2[0]);
+	ASSERT_EQ(8, drawnx1[1]);
+	ASSERT_EQ(12, drawnx2[1]);
+}
+
+TEST(app_state_clears_on_resize_and_bad_input_is_ignored)
+{
+	app_reset();
+	osc("r", "1,5,8,12", "garbage");
+	osc("r", "9,1,2,3", "x,1,2,3");	/* inverted / malformed: none */
+	region_scroll(0, 7, 0, 1);
+	osc("o", "1000", NULL);
+	frame_at(1000);
+	ASSERT(NEAR(0.0, smoothscroll_shift(6, 3)));
+	osc("r", "1,5,8,12", NULL);
+	osc("o", "1000", NULL);
+	ASSERT(NEAR(1.0, smoothscroll_shift(6, 3)));
+	frows = 9;	/* resized */
+	frame_at(1010);
+	ASSERT(NEAR(0.0, smoothscroll_shift(6, 3)));
+	frows = FAKE_ROWS;
+	/* A scroll of the whole region keeps no copies. */
+	app_reset();
+	region_scroll(0, 7, 0, 8);
+	osc("o", "500", NULL);
+	smoothscroll_drawextra();
+	ASSERT_EQ(0, ndrawn);
+}
+
+TEST_SUITE(smoothscroll_app)
+{
+	RUN_TEST(full_screen_apps_glide_only_when_they_ask);
+	RUN_TEST(app_mode_reports_and_stops_automatic_glides);
+	RUN_TEST(app_offset_shifts_only_its_rectangle);
+	RUN_TEST(app_scroll_down_shows_departed_bottom_lines);
+	RUN_TEST(app_rectangles_with_different_tops_split_rows);
+	RUN_TEST(app_state_clears_on_resize_and_bad_input_is_ignored);
+}
+
 int
 main(void)
 {
@@ -980,5 +1167,6 @@ main(void)
 	RUN_SUITE(smoothscroll_terminal);
 	RUN_SUITE(smoothscroll_regions);
 	RUN_SUITE(smoothscroll_static_columns);
+	RUN_SUITE(smoothscroll_app);
 	return test_summary();
 }
