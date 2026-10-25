@@ -85,6 +85,56 @@ spare_free_request(SpareRequest *request)
 	memset(request, 0, sizeof(*request));
 }
 
+static size_t
+put_field(char *buffer, size_t at, const char *key, const char *value)
+{
+	size_t k = strlen(key), v = strlen(value);
+	if (buffer) {
+		memcpy(buffer + at, key, k);
+		memcpy(buffer + at + k, value, v);
+		buffer[at + k + v] = '\0';
+	}
+	return at + k + v + 1;
+}
+
+char *
+spare_build_request(const char *cwd, char *const *environment,
+    char *const *env, const char *title, char *const *argv, size_t *length)
+{
+	/* Two passes: measure, then fill. */
+	char *buffer = NULL;
+	for (int pass = 0; pass < 2; pass++) {
+		size_t at = 6;
+		if (buffer)
+			memcpy(buffer, "spawn\n", at);
+		if (cwd)
+			at = put_field(buffer, at, "cwd=", cwd);
+		if (environment) {
+			at = put_field(buffer, at, "environ", "");
+			for (char *const *entry = environment; *entry; entry++) {
+				if (valid_assignment(*entry))
+					at = put_field(buffer, at, "", *entry);
+			}
+			at = put_field(buffer, at, "", "");
+		}
+		for (char *const *entry = env; entry && *entry; entry++)
+			at = put_field(buffer, at, "env=", *entry);
+		if (title && *title)
+			at = put_field(buffer, at, "title=", title);
+		for (char *const *word = argv; word && *word; word++)
+			at = put_field(buffer, at, "arg=", *word);
+		at = put_field(buffer, at, "end", "");
+		if (buffer) {
+			*length = at;
+			return buffer;
+		}
+		buffer = malloc(at);
+		if (!buffer)
+			return NULL;
+	}
+	return NULL;
+}
+
 void
 spare_apply_environment(const SpareRequest *request)
 {
