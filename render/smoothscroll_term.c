@@ -546,9 +546,9 @@ smoothscroll_image(const void *anchor)
 }
 
 static void
-drawappghost(Glyph *line, const AppRect *r, int asrow, double shift)
+drawappghost(Glyph *line, int cols, const AppRect *r, int asrow, double shift)
 {
-	int right = MIN(r->right, app.gcols);
+	int right = MIN(r->right, cols);
 
 	if (right <= r->left)
 		return;
@@ -563,24 +563,65 @@ drawappghost(Glyph *line, const AppRect *r, int asrow, double shift)
 	ghost.on = ghost.app = 0;
 }
 
+/* A blank line in the background of grid row y, for the part of a strip
+ * st kept nothing for: the app's own background, never the terminal's. */
+static Glyph *
+appfillline(int y)
+{
+	static Glyph *fill;
+	static int fillcols;
+	Line src;
+	int x, cols = tcol();
+
+	if (cols > fillcols) {
+		Glyph *grown = realloc(fill, cols * sizeof(*fill));
+		if (!grown)
+			return NULL;
+		fill = grown;
+		fillcols = cols;
+	}
+	src = tviewline(MAX(0, MIN(trow() - 1, y)));
+	for (x = 0; x < cols; x++) {
+		Glyph g = src ? src[x] : (Glyph){ 0 };
+		fill[x] = (Glyph){ .u = ' ', .mode = g.mode & ATTR_REVERSE,
+		    .fg = g.fg, .bg = g.bg };
+		if (!src)
+			fill[x].fg = defaultfg, fill[x].bg = defaultbg;
+	}
+	return fill;
+}
+
 /* Past a shifted rectangle's edge: the lines the scroll pushed out, when the
- * edge is the scrolled region's edge; otherwise background. */
+ * edge is the scrolled region's edge; past those (or for an edge inside the
+ * region, such as below a panel) the background of the row beyond the edge,
+ * so a fast glide never uncovers bare terminal background. */
 static void
 appdrawextra(void)
 {
 	double o = app.offset;
-	int i, k;
+	int i, k, kept;
+	Glyph *fill;
 
 	if (!app.on || o == 0.0)
 		return;
 	for (i = 0; i < app.nrects; i++) {
 		const AppRect *r = &app.rect[i];
-		if (o > 0 && r->top == app.gtop)
-			for (k = 1; k <= app.nabove && k < o + 1; k++)
-				drawappghost(app.above[k - 1], r, r->top, o - k);
-		if (o < 0 && r->bot == app.gbot)
-			for (k = 1; k <= app.nbelow && k + o < 1; k++)
-				drawappghost(app.below[k - 1], r, r->bot, o + k);
+		if (o > 0) {
+			kept = r->top == app.gtop ? app.nabove : 0;
+			for (k = 1; k <= kept && k < o + 1; k++)
+				drawappghost(app.above[k - 1], app.gcols, r, r->top, o - k);
+			if (k < o + 1 && (fill = appfillline(r->top - 1)))
+				for (; k < o + 1; k++)
+					drawappghost(fill, tcol(), r, r->top, o - k);
+		}
+		if (o < 0) {
+			kept = r->bot == app.gbot ? app.nbelow : 0;
+			for (k = 1; k <= kept && k + o < 1; k++)
+				drawappghost(app.below[k - 1], app.gcols, r, r->bot, o + k);
+			if (k + o < 1 && (fill = appfillline(r->bot + 1)))
+				for (; k + o < 1; k++)
+					drawappghost(fill, tcol(), r, r->bot, o + k);
+		}
 	}
 }
 

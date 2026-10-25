@@ -51,8 +51,10 @@ the cursor are keyed by grid cells, so they move with their cells.
 
 The strip a shifted rectangle uncovers at its top (o > 0) or bottom (o < 0)
 shows the lines st's own scrolls pushed out of the scroll region, when that
-edge of the rectangle is the edge of the region, nearest line first. Otherwise
-the strip is background.
+edge of the rectangle is the edge of the region, nearest line first. Past
+those, or for an edge inside the region (a rectangle starting below a panel),
+it is filled with the background of the row just beyond the edge, so a glide
+never uncovers bare terminal background.
 
 st keeps those lines while mode 2032 is on: every scroll of a region (`CSI n
 S`/`T`, IND/LF at the bottom margin, RI at the top margin, IL/DL with the
@@ -75,8 +77,11 @@ glides are off while the mode is on.
    term cancels it at first, so nothing jumps, then eases out. Inputs that
    arrive mid-glide add up the same way.
 3. Lay the content out at a whole row slightly ahead of the position in the
-   direction of travel (the Exocortex TUI looks 30 ms ahead), so st's own
-   clock never reaches a row the application has not laid out: scrolling
+   direction of travel (the Exocortex TUI looks 30 ms ahead, but never more
+   than the row just past the position), so st's own clock does not reach a
+   row the application has not laid out, while the offset stays within about
+   a row (content laid out further ahead than that is drawn far from where it
+   was laid out, which shows wherever the application re-wraps text): scrolling
    back (content moving down) the layout is lower than the position and the
    offset negative, so the strip is at the bottom and shows lines the scroll
    pushed out of the bottom; scrolling forward the reverse.
