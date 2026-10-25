@@ -69,6 +69,11 @@ int aero_parse_answer(const char *json, size_t length, AeroAnswer *answer);
 void aero_free_answer(AeroAnswer *answer);
 
 /* A slot file line, "PID WINDOW-ID STAMP". Returns 0 or -1. */
+/* Whether a KERN_PROCARGS2 buffer (int argc, executable path, padding,
+ * then argc NUL-terminated arguments) has a --spare or --spare-slot
+ * argument: the process is an st spare, not whatever reused its pid. */
+int launch_args_name_spare(const char *buffer, size_t size);
+
 int launch_parse_slot(const char *line, pid_t *pid, unsigned long long *window,
     char *stamp, size_t stampsize);
 

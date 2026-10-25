@@ -43,6 +43,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
 #include <sys/time.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -425,6 +426,23 @@ read_line(const char *path, char *line, size_t size)
 
 /* Claim the warm spare. rename(2) is atomic, so concurrent launchers can
  * never claim the same one; a dead or outdated spare is discarded. */
+/* Whether pid runs with a --spare/--spare-slot argument (KERN_PROCARGS2) */
+static int
+is_spare_process(pid_t pid)
+{
+	int mib[3] = {CTL_KERN, KERN_PROCARGS2, pid};
+	size_t size = 0;
+	if (sysctl(mib, 3, NULL, &size, NULL, 0) < 0 || !size)
+		return 0;
+	char *arguments = malloc(size);
+	if (!arguments)
+		return 0;
+	int spare = sysctl(mib, 3, arguments, &size, NULL, 0) == 0 &&
+	    launch_args_name_spare(arguments, size);
+	free(arguments);
+	return spare;
+}
+
 static int
 claim_spare(const char *runtime, const char *slot, const char *stbinary,
     pid_t *pid, unsigned long long *window)
@@ -454,8 +472,10 @@ claim_spare(const char *runtime, const char *slot, const char *stbinary,
 			return 1;
 		}
 	}
+	/* An outdated or broken spare is stopped, but only if the pid still
+	 * runs an st: the slot may outlive its spare and the pid be reused. */
 	int stale;
-	if (sscanf(line, "%d", &stale) == 1 && stale > 1)
+	if (sscanf(line, "%d", &stale) == 1 && stale > 1 && is_spare_process(stale))
 		kill(stale, SIGTERM);
 	return 0;
 }

@@ -387,6 +387,41 @@ TEST(parses_unsigned_numbers)
 	ASSERT_EQ(-1, (int)launch_parse_uint("1 ", 10));
 }
 
+static size_t
+procargs(char *buffer, int argc, const char *const *argv)
+{
+	size_t length = sizeof(argc);
+	memcpy(buffer, &argc, sizeof(argc));
+	memcpy(buffer + length, "/bin/sh\0\0\0", 10); /* path + padding */
+	length += 10;
+	for (int i = 0; i < argc; i++) {
+		size_t n = strlen(argv[i]) + 1;
+		memcpy(buffer + length, argv[i], n);
+		length += n;
+	}
+	memcpy(buffer + length, "HOME=/x\0", 8); /* the environment follows */
+	return length + 8;
+}
+
+TEST(recognizes_spare_processes_by_arguments)
+{
+	char buffer[256];
+	static const char *const spare[] = {"/bin/sh", "/tmp/st", "--spare"};
+	static const char *const privateslot[] = {"st", "--spare-slot", "/tmp/slot"};
+	static const char *const other[] = {"vim", "notes.txt"};
+	static const char *const envlike[] = {"sh"};
+	ASSERT_EQ(1, launch_args_name_spare(buffer, procargs(buffer, 3, spare)));
+	ASSERT_EQ(1, launch_args_name_spare(buffer, procargs(buffer, 3, privateslot)));
+	ASSERT_EQ(0, launch_args_name_spare(buffer, procargs(buffer, 2, other)));
+	/* "--spare" in the environment is not an argument. */
+	size_t n = procargs(buffer, 1, envlike);
+	memcpy(buffer + n - 8, "--spare\0", 8);
+	ASSERT_EQ(0, launch_args_name_spare(buffer, n));
+	/* Truncated buffers are not spares. */
+	ASSERT_EQ(0, launch_args_name_spare(buffer, 3));
+	ASSERT_EQ(0, launch_args_name_spare(buffer, procargs(buffer, 3, spare) - 30));
+}
+
 TEST_SUITE(macos_aerospace)
 {
 	RUN_TEST(request_has_explicit_null_context);
@@ -410,6 +445,7 @@ TEST_SUITE(macos_aerospace)
 	RUN_TEST(spawn_request_round_trips);
 	RUN_TEST(plain_spawn_request_starts_the_shell);
 	RUN_TEST(parses_unsigned_numbers);
+	RUN_TEST(recognizes_spare_processes_by_arguments);
 }
 
 int

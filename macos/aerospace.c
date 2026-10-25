@@ -571,3 +571,27 @@ launch_read_venv(const char *context, char **venv)
 	*venv = line;
 	return 1;
 }
+
+int
+launch_args_name_spare(const char *buffer, size_t size)
+{
+	int argc;
+	if (size < sizeof(argc))
+		return 0;
+	memcpy(&argc, buffer, sizeof(argc));
+	const char *p = buffer + sizeof(argc), *end = buffer + size;
+	p = memchr(p, '\0', end - p); /* the executable path */
+	if (!p)
+		return 0;
+	while (p < end && !*p)
+		p++;
+	for (int i = 0; i < argc && p < end; i++) {
+		const char *next = memchr(p, '\0', end - p);
+		if (!next)
+			return 0;
+		if (!strcmp(p, "--spare") || !strcmp(p, "--spare-slot"))
+			return 1;
+		p = next + 1;
+	}
+	return 0;
+}
