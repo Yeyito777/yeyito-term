@@ -1325,7 +1325,8 @@ tlineviewrow(Line target, int alt)
 	    slot = (slot + 1) & (lineviewcap - 1))
 		if (lineview[slot].line == target)
 			return lineview[slot].row;
-	return INT_MIN;
+	/* A line an app-driven glide pushed out, still drawn past the edge. */
+	return smoothscroll_copy_row(target);
 }
 
 static int

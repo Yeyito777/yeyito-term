@@ -86,6 +86,7 @@ void graphics_draw_rows(int alt, int stage, int cell_width, int cell_height,
 		void *context);
 void graphics_recycle_line(Line line);
 void graphics_reanchor_line(Line oldline, Line newline);
+void graphics_detach_line(Line oldline, Line newline, int keep_rows);
 void graphics_reanchor_line_address(uintptr_t oldline, Line newline);
 void graphics_reflow_line(Line oldline, int logical_offset, int new_columns,
 		long long first_output, GraphicsReflowLineAt line_at, void *context);

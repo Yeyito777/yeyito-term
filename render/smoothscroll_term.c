@@ -17,6 +17,7 @@
  *   st only draws them shifted and keeps the lines its scrolls pushed out. */
 
 #include <limits.h>
+#include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,6 +27,7 @@
 
 #include "../st.h"
 #include "../win.h"
+#include "../graphics.h"
 #include "smoothscroll.h"
 
 /* Precise input snaps to a row this long after the last event once the
@@ -75,6 +77,7 @@ static struct {
 
 /* App-driven smooth scrolling (CSI ? 2032 h). */
 #define APP_MAXRECTS 8
+#define APP_MAXTERMS 32
 typedef struct {
 	int top, bot, left, right;	/* rows top..bot, columns [left, right) */
 } AppRect;
@@ -82,7 +85,12 @@ static struct {
 	int on;
 	int nrects;
 	AppRect rect[APP_MAXRECTS];
-	double offset;		/* rows; positive: drawn lower */
+	/* The offset in rows (positive: drawn lower) is base plus easing terms
+	 * timed by st, so the glide runs at the display's refresh whatever the
+	 * pty delivers; offset is its value this frame. */
+	double base, offset;
+	struct { double rows, start, ms; } term[APP_MAXTERMS];
+	int nterms;
 	/* Lines the last scrolls of region gtop..gbot pushed out, nearest
 	 * first: above[0] left over the top edge, below[0] over the bottom. */
 	int gtop, gbot, gcols, cap;
@@ -90,6 +98,9 @@ static struct {
 	int nabove, nbelow;
 	/* Geometry the state belongs to: a resize or screen switch clears it. */
 	int rows, cols, alt;
+	/* Rows app-mode region scrolls moved content (up positive), for the
+	 * frame log: offset - scrolled is where the content is drawn. */
+	long scrolled;
 } app;
 
 static void appclear(void);
@@ -106,13 +117,21 @@ monotonicms(void)
 /* Replaced by the unit tests to step time deterministically. */
 static double (*nowms)(void) = monotonicms;
 
+/* A copied line goes, with any images that went with it. */
+static void
+freecopy(Glyph *copy)
+{
+	graphics_recycle_line((Line)copy);
+	free(copy);
+}
+
 static void
 ghostsfree(Glyph **list, int *n, int from)
 {
 	int i;
 
 	for (i = from; i < *n; i++)
-		free(list[i]);
+		freecopy(list[i]);
 	if (*n > from)
 		*n = from;
 }
@@ -247,7 +266,7 @@ ghostspushn(Glyph **list, int *count, int cap, int cols, int drop, int y0,
 
 	drop = MIN(drop, *count);
 	for (i = 0; i < drop; i++)
-		free(list[i]);
+		freecopy(list[i]);
 	memmove(list, list + drop, (*count - drop) * sizeof(*list));
 	*count -= drop;
 	keep = MIN(*count, cap - n);
@@ -284,7 +303,8 @@ appclear(void)
 {
 	appghostsfree();
 	app.nrects = 0;
-	app.offset = 0.0;
+	app.base = app.offset = 0.0;
+	app.nterms = 0;
 	app.rows = trow();
 	app.cols = tcol();
 	app.alt = tisaltscreen();
@@ -295,10 +315,11 @@ appclear(void)
 static void
 appcapture(int top, int bot, int orig, int n)
 {
-	int height = bot - top + 1, distance = n < 0 ? -n : n;
+	int height = bot - top + 1, distance = n < 0 ? -n : n, i;
 
 	if (orig != top)
 		return;	/* IL/DL below the top margin: an edit, not a scroll */
+	app.scrolled += n;
 	if (app.gtop != top || app.gbot != bot || app.gcols != tcol()) {
 		appghostsfree();
 		app.above = calloc(height, sizeof(*app.above));
@@ -328,6 +349,34 @@ appcapture(int top, int bot, int orig, int n)
 		ghostspushn(app.above, &app.nabove, app.cap, app.gcols,
 		    distance, 0, 0, 0);
 	}
+	/* Images on the departing lines leave with them (the scroll would
+	 * drop them).  Over the top only the rows that left go along: the
+	 * rest of an image stays on the grid, where the app places it. */
+	for (i = 0; i < distance; i++) {
+		if (n > 0)
+			graphics_detach_line(tviewline(top + n - 1 - i),
+			    (Line)app.above[i], i + 1);
+		else
+			graphics_detach_line(tviewline(bot - distance + 1 + i),
+			    (Line)app.below[i], 0);
+	}
+}
+
+/* Grid row a copied line is drawn as (its images too), or INT_MIN. */
+int
+smoothscroll_copy_row(const void *line)
+{
+	int k;
+
+	if (!app.on || !line)
+		return INT_MIN;
+	for (k = 0; k < app.nabove; k++)
+		if ((const void *)app.above[k] == line)
+			return app.gtop - 1 - k;
+	for (k = 0; k < app.nbelow; k++)
+		if ((const void *)app.below[k] == line)
+			return app.gbot + 1 + k;
+	return INT_MIN;
 }
 
 void
@@ -358,8 +407,36 @@ parseint(const char *s, int *out)
 	return *end == '\0' || *end == ',';
 }
 
+/* The offset at time `now`: base plus what the easing terms still have
+ * left, never past the lines st kept for that side.  At rest the copies
+ * (and their images) have served their glide. */
+static void
+appoffset(double now)
+{
+	double o = app.base;
+	int i, j;
+
+	for (i = j = 0; i < app.nterms; i++) {
+		double left = ss_ease((now - app.term[i].start) / app.term[i].ms);
+		if (left == 0.0)
+			continue;
+		o += app.term[i].rows * left;
+		app.term[j++] = app.term[i];
+	}
+	app.nterms = j;
+	o = MIN(o, (double)app.nabove);
+	o = MAX(o, -(double)app.nbelow);
+	app.offset = o;
+	if (o == 0.0 && app.nterms == 0 && app.base == 0.0) {
+		ghostsfree(app.above, &app.nabove, 0);
+		ghostsfree(app.below, &app.nbelow, 0);
+	}
+}
+
 /* OSC 2032 ; r ; T,L,B,R ; ...   rectangles (1-based, inclusive)
- * OSC 2032 ; o ; N               offset in thousandths of a row
+ * OSC 2032 ; o ; N               offset N thousandths of a row, no easing
+ * OSC 2032 ; m ; dA ; B ; D      move: offset += dA, plus B easing to 0
+ *                                over D ms from now (st times it)
  * OSC 2032 ; c                   clear offset, rectangles and copies */
 void
 smoothscroll_app_osc(int narg, char **args)
@@ -397,31 +474,75 @@ smoothscroll_app_osc(int narg, char **args)
 		if (narg < 3 || !parseint(args[2], &v))
 			return;
 		v = MAX(-1000 * trow(), MIN(1000 * trow(), v));
-		app.offset = v / 1000.0;
-		if (v == 0) {	/* at rest: the copies served their glide */
-			ghostsfree(app.above, &app.nabove, 0);
-			ghostsfree(app.below, &app.nbelow, 0);
-		}
+		app.base = v / 1000.0;
+		app.nterms = 0;
+		appoffset(nowms());
 		break;
+	case 'm': {
+		int b = 0, d = 0;
+		if (narg < 3 || !parseint(args[2], &v))
+			return;
+		if (narg >= 5 && (!parseint(args[3], &b) || !parseint(args[4], &d)))
+			return;
+		v = MAX(-1000 * trow(), MIN(1000 * trow(), v));
+		b = MAX(-1000 * trow(), MIN(1000 * trow(), b));
+		app.base += v / 1000.0;
+		if (b != 0 && d > 0) {
+			if (app.nterms == APP_MAXTERMS) {	/* oldest jumps */
+				memmove(app.term, app.term + 1,
+				    (APP_MAXTERMS - 1) * sizeof(app.term[0]));
+				app.nterms--;
+			}
+			app.term[app.nterms].rows = b / 1000.0;
+			app.term[app.nterms].start = nowms();
+			app.term[app.nterms].ms = MIN(d, 10000);
+			app.nterms++;
+		}
+		appoffset(nowms());
+		break;
+	}
 	case 'c':
 		appclear();
 		break;
 	}
 }
 
+/* The image being drawn is anchored on this line (smoothscroll_image()). */
+static const void *imageline;
+
+/* The rectangle cell (x, y) moves with.  Rectangles also clip at rest, so
+ * an image the app lets run past one (to have it while gliding) never
+ * draws outside it.  An image on a copied line belongs to the rectangle
+ * whose edge its line left through. */
 static const AppRect *
 apprect(int x, int y)
 {
-	int i;
+	int i, row;
 
-	if (!app.on || app.offset == 0.0)
+	if (!app.on)
 		return NULL;
+	if (imageline && (row = smoothscroll_copy_row(imageline)) != INT_MIN) {
+		for (i = 0; i < app.nrects; i++) {
+			const AppRect *r = &app.rect[i];
+			if (x >= r->left && x < r->right &&
+			    (row < app.gtop ? r->top == app.gtop :
+			    r->bot == app.gbot))
+				return r;
+		}
+		return NULL;
+	}
 	for (i = 0; i < app.nrects; i++) {
 		const AppRect *r = &app.rect[i];
 		if (y >= r->top && y <= r->bot && x >= r->left && x < r->right)
 			return r;
 	}
 	return NULL;
+}
+
+void
+smoothscroll_image(const void *anchor)
+{
+	imageline = anchor;
 }
 
 static void
@@ -753,6 +874,26 @@ settle(double now)
 	ss_settle(&sst.ss, now, sst.duration);
 }
 
+/* ST_SMOOTHSCROLL_LOG=file: one line per frame drawn while something moves
+ * (time in ms, scrollback / region / app offsets in rows, rows app-mode
+ * region scrolls moved so far), to check pacing and smoothness. */
+static void
+framelog(double now, int moving)
+{
+	static FILE *log;
+	static int opened;
+
+	if (!opened) {
+		const char *path = getenv("ST_SMOOTHSCROLL_LOG");
+		opened = 1;
+		if (path && *path && (log = fopen(path, "w")))
+			setvbuf(log, NULL, _IOLBF, 0);
+	}
+	if (log && (moving || sst.moved))
+		fprintf(log, "%.3f %.4f %.4f %.4f %ld\n", now, sst.ss.offset,
+		    reg.active ? reg.ss.offset : 0.0, app.offset, app.scrolled);
+}
+
 void
 smoothscroll_frame(void)
 {
@@ -787,8 +928,12 @@ smoothscroll_frame(void)
 	if (app.on && (app.rows != trow() || app.cols != tcol() ||
 	    app.alt != tisaltscreen()))
 		appclear();	/* resize / screen switch: the app starts over */
-	if (app.on && app.offset != 0.0 && app.nrects)
-		moving = 1;
+	if (app.on) {
+		appoffset(now);
+		if ((app.offset != 0.0 || app.nterms) && app.nrects)
+			moving = 1;
+	}
+	framelog(now, moving);
 	/* The first frame back at rest also redraws everything so no row keeps
 	 * a stale shifted copy in retained (damage-tracked) buffers. */
 	sst.full = moving || sst.moved;
@@ -868,7 +1013,7 @@ smoothscroll_shift(int x, int y)
 		return ghost.shift;
 	if (sst.ss.offset != 0.0)
 		return sst.ss.offset;
-	if (apprect(x, y))
+	if (app.offset != 0.0 && apprect(x, y))
 		return app.offset;
 	if (regmoves(x, y))
 		return reg.ss.offset;
@@ -901,6 +1046,11 @@ smoothscroll_clip(int x, int y, int *top, int *end, int *left, int *right)
 			*end = r->bot + 1;
 			*left = r->left;
 			*right = r->right;
+			return 1;
+		}
+		if (!ghost.on && imageline &&
+		    smoothscroll_copy_row(imageline) != INT_MIN) {
+			*top = *end = *left = *right = 0;	/* nowhere */
 			return 1;
 		}
 	}
@@ -943,7 +1093,7 @@ smoothscroll_segment(int y, int x, int x2)
 		end = cut(x, end, left);
 		end = cut(x, end, right);
 	}
-	if (app.on && app.offset != 0.0)
+	if (app.on)
 		for (i = 0; i < app.nrects; i++) {
 			const AppRect *r = &app.rect[i];
 			if (y < r->top || y > r->bot)
@@ -1011,7 +1161,7 @@ smoothscroll_timeout(void)
 {
 	if (!sst.enabled)
 		return -1;
-	if (reg.active)
+	if (reg.active || (app.on && app.nterms))
 		return 0.0;
 	return ss_wait(&sst.ss, nowms());
 }
