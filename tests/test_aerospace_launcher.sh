@@ -178,6 +178,57 @@ expect_live_spare()
 	fi
 }
 
+# Every launch appends one line to the launch log under the test's HOME.
+launch_log=$tmp/home/Library/Logs/st/launch.log
+logged=0
+log_lines()
+{
+	if [ -f "$launch_log" ]; then
+		wc -l < "$launch_log" | tr -d ' '
+	else
+		printf '0\n'
+	fi
+}
+
+check_log_format()
+{
+	bad=$(grep -Ev '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}[+-][0-9]{4} st=[0-9]+ src=launcher result=(ok|fail)( [a-z0-9_]+=("[^"]*"|[^ "]+))*$' \
+		"$launch_log" || true)
+	if [ -n "$bad" ]; then
+		printf 'malformed launch log lines:\n%s\n' "$bad" >&2
+		exit 1
+	fi
+}
+
+# Exactly one line since the last check, matching every extended regex given;
+# a pattern starting with ! must not match.
+expect_logged()
+{
+	count=$(log_lines)
+	if [ "$count" -ne $((logged + 1)) ]; then
+		printf 'expected one new launch log line, got %s:\n' \
+			$((count - logged)) >&2
+		cat "$launch_log" >&2
+		exit 1
+	fi
+	logged=$count
+	check_log_format
+	line=$(tail -n 1 "$launch_log")
+	for pattern; do
+		case $pattern in
+			!*) ! printf '%s\n' "$line" | grep -Eq -- "${pattern#!}" ;;
+			*) printf '%s\n' "$line" | grep -Eq -- "$pattern" ;;
+		esac || {
+			printf 'launch log line does not satisfy <%s>:\n%s\n' \
+				"$pattern" "$line" >&2
+			exit 1
+		}
+	done
+}
+
+ms='[0-9]+\.[0-9]'
+warm_fields="result=ok path=warm spare_age=$ms cmd=shell main=$ms connected=$ms claimed=$ms target=$ms spawn=$ms detected=$ms via=(event|query) focused=$ms revealed=$ms load1=[0-9]+\.[0-9]{2}\$"
+
 launch_count=12
 launcher_pids=
 launch_number=0
@@ -214,6 +265,16 @@ done
 # Concurrent launchers race to replace the spare; exactly one wins.
 expect_live_spare
 
+# One line each, never interleaved, naming each launch's own st. The first
+# found no spare: cold.
+logged=$(log_lines)
+[ "$logged" -eq "$launch_count" ]
+check_log_format
+[ "$(grep -c ' result=ok ' "$launch_log")" -eq "$launch_count" ]
+[ "$(sed -n 's/^[^ ]* st=\([0-9]*\) .*/\1/p' "$launch_log" | sort)" = \
+	"$(printf '%s\n' $focus_ids | sort)" ]
+grep -q ' path=cold reason=no-spare cmd=shell ' "$launch_log"
+
 printf 'AeroSpace launcher concurrency and reveal handshake test passed\n'
 
 # The next launch claims the waiting spare, then leaves a fresh one.
@@ -223,6 +284,16 @@ run_launcher
 wait_for_reveal "$spare"
 expect_live_spare
 [ "$(spare_holder)" != "$spare" ]
+expect_logged "^[^ ]+ st=$spare src=launcher $warm_fields"
+
+# The spare's age is the time since it published its slot.
+spare=$(spare_holder)
+touch -t "$(date -v-2H '+%Y%m%d%H%M.%S')" "$slot"
+run_launcher -e /usr/local/bin/exocortex --flag
+wait_for_reveal "$spare"
+expect_logged "st=$spare " ' cmd=exocortex '
+age=$(tail -n 1 "$launch_log" | sed -n 's/.* spare_age=\([0-9]*\).*/\1/p')
+[ "$age" -ge 7190 ] && [ "$age" -le 7300 ]
 
 # A window AeroSpace placed elsewhere is moved, with focus, to the workspace
 # that was focused at invocation time.
@@ -232,6 +303,7 @@ printf 'TEST\n' > "$FAKE_DETECT_WORKSPACE"
 [ "$(awk '$1 == "focus" || $1 == "move" { last = $1 " " $3 } END { print last }' \
 	"$log")" = "move TEST" ]
 wait_for_reveal "$(launched)"
+expect_logged ' result=ok path=warm ' " revealed=$ms moved=1 "
 
 # A dead spare's slot is discarded and the launch still succeeds.
 holder=$(spare_holder)
@@ -243,6 +315,8 @@ run_launcher
 [ "$(launched)" != 999999 ]
 wait_for_reveal "$(launched)"
 expect_live_spare
+expect_logged "st=$(launched) src=launcher result=ok path=cold reason=dead cmd=shell main=$ms connected=$ms claimed=$ms " \
+	'!spare_age' " revealed=$ms "
 
 # A spare started from a binary that has since been replaced is never used.
 holder=$(spare_holder)
@@ -260,6 +334,7 @@ while kill -0 "$holder" 2>/dev/null; do
 	sleep 0.01
 done
 expect_live_spare
+expect_logged ' result=ok path=cold reason=outdated '
 
 # Title, command and the caller's environment reach the spawned terminal.
 (PATH="$tmp/extra:$PATH"; export ST_TEST_LAUNCHER_ONLY=yes
@@ -310,12 +385,14 @@ wait_for_reveal "$(launched)"
 
 # The window-detected event alone completes a launch: with the first
 # fallback query 10 s away, none is made.
+logged=$(log_lines)
 before=$(grep -c '^query' "$log" || true)
 ST_AEROSPACE_TICK=5
 run_launcher
 unset ST_AEROSPACE_TICK
 [ "$(grep -c '^query' "$log")" -eq "$before" ]
 wait_for_reveal "$(launched)"
+expect_logged " detected=$ms via=event "
 
 # Requests carry AeroSpace's window/workspace context, like its CLI, and
 # never leave the fields out (the server warns about that).
@@ -365,11 +442,13 @@ expect_unrevealed()
 
 # Without AeroSpace the launch fails before it takes the spare.
 holder=$(spare_holder)
+logged=$(log_lines)
 expect_failure "Can't connect to the AeroSpace server" \
 	env HOME="$tmp/home" ST_AEROSPACE_SOCKET="$tmp/missing.sock" \
 	ST_BINARY="$tmp/bin/st" "$launcher"
 [ "$(spare_holder)" = "$holder" ]
 expect_live_spare
+expect_logged "st=0 src=launcher result=fail cmd=shell main=$ms load1=[0-9.]+ error=\"Can't connect to the AeroSpace server at $tmp/missing.sock \(.*\)\. Is AeroSpace.app running\?\"\$"
 
 # A window AeroSpace never reports: queries back off (2, 4, 8 ticks), then
 # the launch fails and the claimed st is stopped, not left invisible.
@@ -383,23 +462,31 @@ rm -f "$FAKE_NO_DETECT"
 [ "$(($(grep -c '^query' "$log") - before))" -eq 3 ]
 wait_until_dead "$holder"
 expect_unrevealed "$holder"
+expect_logged "st=$holder src=launcher result=fail path=warm " " spawn=$ms " \
+	'!detected=' "error=\"AeroSpace did not register the st window for PID $holder\"\$"
 
 # A failed focus also stops the st it claimed.
 run_launcher
 holder=$(spare_holder)
 : > "$FAKE_FAIL_FOCUS"
+logged=$(log_lines)
 expect_failure "AeroSpace could not focus st window $holder" run_launcher
 rm -f "$FAKE_FAIL_FOCUS"
 wait_until_dead "$holder"
 expect_unrevealed "$holder"
+expect_logged "st=$holder src=launcher result=fail " " detected=$ms via=(event|query) " \
+	'!focused=' '!revealed=' "error=\"AeroSpace could not focus st window $holder\"\$"
 
-# Usage errors exit 64.
+# Usage errors exit 64 and are no launch: nothing is logged.
+logged=$(log_lines)
 status=0
 run_launcher --bogus 2>/dev/null || status=$?
 [ "$status" -eq 64 ]
 status=0
 run_launcher --cwd 2>/dev/null || status=$?
 [ "$status" -eq 64 ]
+[ "$(log_lines)" -eq "$logged" ]
+check_log_format
 
 printf 'AeroSpace launcher protocol and failure tests passed\n'
 

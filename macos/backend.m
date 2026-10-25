@@ -1,6 +1,7 @@
 #import <AppKit/AppKit.h>
 #import <Carbon/Carbon.h>
 #import <MetalKit/MetalKit.h>
+#import <QuartzCore/QuartzCore.h>
 
 #ifdef MIN
 #undef MIN
@@ -21,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -46,6 +48,7 @@ char *argv0;
 #include "pty.h"
 #include "reveal.h"
 #include "spare.h"
+#include "launchlog.h"
 #include "control.h"
 #include "text_input.h"
 #include "pasteboard5522.h"
@@ -151,6 +154,23 @@ static dispatch_source_t spareCheckSource;
 static id<NSObject> spareActivity;
 static char spareRuntime[PATH_MAX];
 static char spareSlot[PATH_MAX];
+static double sparePublished;          /* wall clock */
+
+/* Launch diagnostics of a claimed spare (launchlog.h), logged once
+ * LAUNCH_STATS_SECONDS after the claim: CACurrentMediaTime() stamps, 0 until
+ * reached. Only in-memory stamps and counters until then. */
+#define LAUNCH_STATS_SECONDS 3
+static struct {
+	int active;
+	double wallclock;                  /* when the spawn request arrived */
+	double spareage;                   /* s, -1 if unknown */
+	double received, handled, ordered, started, revealed, output, frame,
+	    presented, content;
+	unsigned int frames, slow;         /* drawn; of those, over 33 ms */
+	double maxframe;                   /* ms */
+	struct rusage usage;               /* at the claim */
+	char command[64];
+} launchStats;
 
 static char *opt_class;
 static char **opt_cmd;
@@ -204,7 +224,10 @@ static void cleanupNative(void);
 static void buildMenu(void);
 static void scheduleWindowReveal(void);
 static void updateWindowReveal(void);
-static void claimSpare(const char *, size_t);
+static void claimSpare(const char *, size_t, double);
+static void launchStatsFrame(double, unsigned long);
+static void launchStatsPresented(double);
+static void logLaunchStats(int);
 
 static double
 parseFontSize(const char *description)
@@ -1512,9 +1535,17 @@ updateSmoothScrollClock(void)
 - (void)drawInMTKView:(MTKView *)view
 {
 	(void)view;
+	int measuring = launchStats.active;
+	double begin = measuring ? CACurrentMediaTime() : 0;
+	unsigned long frames = measuring ? mac_renderer_frames() : 0;
+	/* Frames drawn before the reveal are never shown: ask each one. */
+	if (measuring && !launchStats.presented)
+		mac_renderer_on_next_present(launchStatsPresented);
 	drawingFrame = 1;
 	draw();
 	drawingFrame = 0;
+	if (measuring)
+		launchStatsFrame(begin, frames);
 	updateSmoothScrollClock();
 }
 
@@ -1874,6 +1905,8 @@ updateWindowReveal(void)
 		return;
 	nativeWindow.alphaValue = 1.0;
 	windowRevealed = 1;
+	if (launchStats.active)
+		launchStats.revealed = CACurrentMediaTime();
 }
 
 @interface STAppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate>
@@ -2362,7 +2395,8 @@ setupSources(void)
 	ttySource = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, ttyfd, 0,
 	    dispatch_get_main_queue());
 	dispatch_source_set_event_handler(ttySource, ^{
-		ttyread();
+		if (ttyread() && launchStats.active && !launchStats.output)
+			launchStats.output = CACurrentMediaTime();
 		macos_request_redraw();
 	});
 	dispatch_resume(ttySource);
@@ -2419,8 +2453,9 @@ setupTerminationSources(void)
 	quitSource = terminationSource(SIGQUIT);
 }
 
+/* received: CACurrentMediaTime() when the message had been read. */
 static void
-handleControlMessage(const char *message, size_t length)
+handleControlMessage(const char *message, size_t length, double received)
 {
 	const char *newline = memchr(message, '\n', length);
 	if (!newline) return;
@@ -2428,7 +2463,7 @@ handleControlMessage(const char *message, size_t length)
 	const char *payload = newline + 1;
 	size_t payloadLength = length - commandLength - 1;
 	if (commandLength == 5 && !memcmp(message, "spawn", 5)) {
-		claimSpare(payload, payloadLength);
+		claimSpare(payload, payloadLength, received);
 		return;
 	}
 	char *copy = xmalloc(payloadLength + 1);
@@ -2473,10 +2508,12 @@ startControlSocket(void)
 				char *buffer = control_read_message(client, 1024 * 1024, &length);
 				close(client);
 				if (!buffer) return;
+				double received = CACurrentMediaTime();
 				NSData *message = [NSData dataWithBytesNoCopy:buffer
 				    length:length freeWhenDone:YES];
 				dispatch_async(dispatch_get_main_queue(), ^{
-					handleControlMessage(message.bytes, message.length);
+					handleControlMessage(message.bytes, message.length,
+					    received);
 				});
 			});
 		}
@@ -2497,6 +2534,7 @@ cleanupNative(void)
 {
 	if (shuttingDown) return;
 	shuttingDown = 1;
+	logLaunchStats(1);
 	if (spareWaiting) spare_withdraw(spareSlot, getpid());
 	xcleanup();
 	if (spareWaiting) {
@@ -2564,6 +2602,108 @@ startTerminalSession(void)
 	macos_request_redraw();
 }
 
+static double
+wallclockNow(void)
+{
+	struct timeval now;
+	gettimeofday(&now, NULL);
+	return now.tv_sec + now.tv_usec / 1e6;
+}
+
+static void
+launchStatsPresented(double presented)
+{
+	if (launchStats.active && presented > 0 && !launchStats.presented)
+		launchStats.presented = presented;
+}
+
+static void
+beginLaunchStats(double received)
+{
+	memset(&launchStats, 0, sizeof(launchStats));
+	launchStats.active = 1;
+	launchStats.received = received;
+	launchStats.handled = CACurrentMediaTime();
+	launchStats.wallclock = wallclockNow() - (launchStats.handled - received);
+	launchStats.spareage = sparePublished ?
+	    launchStats.wallclock - sparePublished : -1;
+	getrusage(RUSAGE_SELF, &launchStats.usage);
+}
+
+/* After drawInMTKView's draw(), which began at begin with frames committed. */
+static void
+launchStatsFrame(double begin, unsigned long frames)
+{
+	if (mac_renderer_frames() == frames)
+		return;
+	double end = CACurrentMediaTime(), ms = (end - begin) * 1e3;
+	launchStats.frames++;
+	launchStats.slow += ms > 33;
+	if (ms > launchStats.maxframe)
+		launchStats.maxframe = ms;
+	if (!launchStats.frame)
+		launchStats.frame = end;
+	if (!launchStats.content && launchStats.output &&
+	    begin >= launchStats.output)
+		launchStats.content = end;
+}
+
+static double
+sinceClaim(double stamp)
+{
+	return stamp ? (stamp - launchStats.received) * 1e3 : -1;
+}
+
+/* Write the launch line: on the timer, or at exit (exiting) if sooner. */
+static void
+logLaunchStats(int exiting)
+{
+	if (!launchStats.active)
+		return;
+	launchStats.active = 0;
+	struct rusage usage;
+	double load;
+	getrusage(RUSAGE_SELF, &usage);
+	LaunchLine line;
+	launchlog_begin(&line, launchStats.wallclock, getpid(), "st");
+	launchlog_put(&line, "cmd", launchStats.command);
+	if (launchStats.spareage >= 0)
+		launchlog_putf(&line, "spare_age", "%.1f", launchStats.spareage);
+	launchlog_ms(&line, "handled", sinceClaim(launchStats.handled));
+	launchlog_ms(&line, "ordered", sinceClaim(launchStats.ordered));
+	launchlog_ms(&line, "started", sinceClaim(launchStats.started));
+	launchlog_ms(&line, "revealed", sinceClaim(launchStats.revealed));
+	launchlog_ms(&line, "output", sinceClaim(launchStats.output));
+	launchlog_ms(&line, "frame", sinceClaim(launchStats.frame));
+	launchlog_ms(&line, "presented", sinceClaim(launchStats.presented));
+	launchlog_ms(&line, "content", sinceClaim(launchStats.content));
+	launchlog_putf(&line, "frames", "%u", launchStats.frames);
+	launchlog_ms(&line, "max_frame", launchStats.maxframe);
+	launchlog_putf(&line, "slow", "%u", launchStats.slow);
+	launchlog_putf(&line, "pageins", "%ld",
+	    usage.ru_majflt - launchStats.usage.ru_majflt);
+	launchlog_putf(&line, "faults", "%ld",
+	    usage.ru_minflt - launchStats.usage.ru_minflt);
+	launchlog_putf(&line, "cpu", "%.0f",
+	    (usage.ru_utime.tv_sec - launchStats.usage.ru_utime.tv_sec +
+	    usage.ru_stime.tv_sec - launchStats.usage.ru_stime.tv_sec) * 1e3 +
+	    (usage.ru_utime.tv_usec - launchStats.usage.ru_utime.tv_usec +
+	    usage.ru_stime.tv_usec - launchStats.usage.ru_stime.tv_usec) / 1e3);
+	if (getloadavg(&load, 1) == 1)
+		launchlog_putf(&line, "load1", "%.2f", load);
+	if (exiting)
+		launchlog_put(&line, "exited", "1");
+	void (^write)(void) = ^{
+		char path[PATH_MAX];
+		if (launchlog_path(path, sizeof(path)) == 0)
+			launchlog_append(path, &line, LAUNCHLOG_LIMIT);
+	};
+	if (exiting)
+		write();
+	else
+		dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), write);
+}
+
 static void
 publishSpare(void)
 {
@@ -2574,6 +2714,7 @@ publishSpare(void)
 	switch (spare_publish(spareSlot, getpid(),
 	    (unsigned long)nativeWindow.windowNumber, stamp)) {
 	case 1:
+		sparePublished = wallclockNow();
 		break;
 	case 0: /* another spare is already waiting; cleanupNative tidies up */
 		spareWaiting = 1;
@@ -2605,11 +2746,12 @@ publishSpare(void)
 
 /* The launcher has claimed this spare: become the requested terminal. */
 static void
-claimSpare(const char *payload, size_t length)
+claimSpare(const char *payload, size_t length, double received)
 {
 	SpareRequest request;
 	if (!spareWaiting || spare_parse_request(payload, length, &request) < 0)
 		return;
+	beginLaunchStats(received);
 	spareWaiting = 0;
 	if (spareCheckSource) {
 		dispatch_source_cancel(spareCheckSource);
@@ -2638,6 +2780,10 @@ claimSpare(const char *payload, size_t length)
 		argv[request.argc] = NULL;
 		setTerminalCommand(request.argc, argv);
 	}
+	const char *program = opt_cmd ? opt_cmd[0] : getenv("SHELL");
+	program = program && strrchr(program, '/') ? strrchr(program, '/') + 1
+	    : program ? program : "sh";
+	strlcpy(launchStats.command, program, sizeof(launchStats.command));
 	opt_title = request.title ? xstrdup(request.title)
 	    : (opt_line || !opt_cmd) ? "st" : opt_cmd[0];
 	nativeWindow.title = [NSString stringWithUTF8String:opt_title];
@@ -2646,8 +2792,14 @@ claimSpare(const char *payload, size_t length)
 	/* Show first: the window manager detects the window while the shell
 	 * starts. The app is inactive, so plain orderFront: would be ignored. */
 	[nativeWindow orderFrontRegardless];
+	launchStats.ordered = CACurrentMediaTime();
 	startTerminalSession();
+	launchStats.started = CACurrentMediaTime();
 	updateWindowReveal();
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+	    LAUNCH_STATS_SECONDS * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+		logLaunchStats(0);
+	});
 }
 
 int

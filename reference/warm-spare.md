@@ -112,6 +112,7 @@ request sent, pipelined behind the version) before anything else.
 
 `ST_AEROSPACE_TRACE=1` prints each step's time since the process started
 (including whatever exec'd the launcher) to stderr.
+Every launch is also logged; see [Launch log](#launch-log).
 
 The launcher itself takes about a millisecond from `main` to the spawn
 request and one round trip per AeroSpace command, so a warm launch costs
@@ -121,3 +122,73 @@ With a warm spare and the earlier shell launcher a launch took ~0.2 s from
 key press to a focused, revealed window (a cold launch, including AeroSpace
 detection, used to take 0.7–1.4 s). The shell starts in parallel with AeroSpace's detection and
 focus.
+
+## Launch log
+
+`~/Library/Logs/st/launch.log` gets two lines per launch, so that an
+occasional slow or laggy launch can be explained afterwards. Past 1 MB (a few
+thousand launches) it is renamed to `launch.log.1`, replacing the previous
+one. Each line is written with one `O_APPEND` write, so concurrent writers
+never interleave. Lines are `key=value`; values with spaces are
+double-quoted; fields not reached are left out; times are ms with one decimal.
+Both lines start with a local timestamp and `st=PID`, the claimed st, so
+`grep st=PID` finds both halves of a launch.
+
+```
+2026-10-25T16:25:01.920-0400 st=42853 src=launcher result=ok path=warm spare_age=10.3 cmd=shell main=23.1 connected=180.7 claimed=182.1 target=183.6 spawn=183.7 detected=445.7 via=event focused=453.4 revealed=453.4 load1=3.70
+2026-10-25T16:25:02.119-0400 st=42853 src=st cmd=zsh spare_age=10.3 handled=4.8 ordered=33.4 started=50.2 revealed=448.3 output=691.8 frame=187.5 presented=721.4 content=697.4 frames=9 max_frame=86.9 slow=1 pageins=154 faults=1257 cpu=166 load1=3.48
+```
+
+`src=launcher` (`macos/aerospace_launch.c`) is written once per launch,
+successful or not (usage errors aside), after the `SIGUSR1` reveal and before
+the next spare is booted; nothing but timestamps is taken on the way. Its
+timestamp is the launcher's exec, and its times count from there:
+
+| Field | Meaning |
+|-------|---------|
+| `result` | `ok` or `fail` (then `error="..."`, the message printed on stderr, comes last) |
+| `path` | `warm` (claimed the shared spare) or `cold` (booted a private one) |
+| `reason` | why cold: `no-spare`, `bad-slot`, `dead` (its pid is gone), `outdated` (stamp differs from the binary), `no-socket` |
+| `spare_age` | s since the claimed spare published its slot (the slot file's mtime); warm only |
+| `cmd` | basename of `-e COMMAND`, or `shell` |
+| `main` | the launcher's `main` (exec and dyld; slow under memory pressure) |
+| `connected` | both AeroSpace connections open |
+| `claimed` | spare claimed; cold: the private spare published itself (st boot) |
+| `target` | AeroSpace's first answer: the focused workspace is known |
+| `spawn` | spawn request written to st |
+| `detected`, `via` | AeroSpace reported the window: `event` (`window-detected`) or `query` (fallback `list-windows`) |
+| `focused` | `focus`/`move-node-to-workspace` answered; `moved=1` if AeroSpace placed it on another workspace |
+| `revealed` | `SIGUSR1` sent |
+| `load1` | 1-minute load average |
+
+`src=st` (`launchStats` in `macos/backend.m`) is written by every claimed
+spare, on either launcher path, 3 s after the claim (or at exit, with
+`exited=1`, if that comes first). A plain `st` started by hand logs nothing.
+Its timestamp is when the spawn request arrived, and its times count from
+there; until the line is written only timestamps and a few counters in
+`drawInMTKView` are kept:
+
+| Field | Meaning |
+|-------|---------|
+| `cmd` | the child's command name (`zsh`, `exocortex`, ...) |
+| `spare_age` | s since this spare published itself |
+| `handled` | the main thread picked up the request (a busy or paged-out main thread shows here) |
+| `ordered` | window ordered in |
+| `started` | PTY and child started |
+| `revealed` | window made opaque: `SIGUSR1` received and the window is key |
+| `output` | first bytes from the PTY: the shell's or TUI's own startup time |
+| `frame` | first frame committed (usually before the reveal, so not shown) |
+| `presented` | first frame actually shown on screen (Metal `presentedTime`) |
+| `content` | first frame committed after the first output |
+| `frames`, `max_frame`, `slow` | frames drawn in the 3 s, the longest `draw()` in ms (including the wait for a drawable), and how many took over 33 ms |
+| `pageins`, `faults` | major (page-in) and minor faults of st during the 3 s (`getrusage`) |
+| `cpu` | ms of CPU st used during the 3 s |
+| `load1` | 1-minute load average |
+
+Reading it: a late `output` with a normal `content - output` is the child
+starting slowly (zsh config, the TUI); a late `handled`, `ordered` or
+`frame`, a high `max_frame`/`slow` or many `pageins` point at st itself
+(paged out after a long idle, cold GPU resources); a late `detected` or
+`focused` with normal st times points at AeroSpace; `main`/`claimed` high
+together with `load1` points at a loaded machine.
+

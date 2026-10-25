@@ -80,6 +80,8 @@ typedef struct {
 	__strong id<CAMetalDrawable> drawable;
 	__strong MTLRenderPassDescriptor *pass;
 	__strong id<MTLCommandBuffer> command;
+	unsigned long frames;
+	void (*presentCallback)(double);
 } MacRenderer;
 
 static MacRenderer r;
@@ -859,9 +861,30 @@ mac_renderer_end(void)
 	    [r.command renderCommandEncoderWithDescriptor:r.pass];
 	encodeFrame(encoder);
 	[encoder endEncoding];
+	if (r.presentCallback) {
+		void (*callback)(double) = r.presentCallback;
+		r.presentCallback = NULL;
+		[r.drawable addPresentedHandler:^(id<MTLDrawable> drawable) {
+			CFTimeInterval presented = drawable.presentedTime;
+			dispatch_async(dispatch_get_main_queue(), ^{ callback(presented); });
+		}];
+	}
 	[r.command presentDrawable:r.drawable];
 	[r.command commit];
+	r.frames++;
 	r.command = nil;
 	r.pass = nil;
 	r.drawable = nil;
+}
+
+unsigned long
+mac_renderer_frames(void)
+{
+	return r.frames;
+}
+
+void
+mac_renderer_on_next_present(void (*callback)(double))
+{
+	r.presentCallback = callback;
 }

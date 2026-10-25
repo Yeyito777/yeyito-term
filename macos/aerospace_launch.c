@@ -23,9 +23,14 @@
  * ST_AEROSPACE_KEEP_SPARE=0 (no spare), ST_AEROSPACE_TICK and
  * ST_AEROSPACE_MAX_TICKS (the fallback query unit and the wait bound, in
  * ticks), ST_AEROSPACE_TRACE=1 (step timings on stderr).
+ *
+ * Every launch, successful or not, appends one line to
+ * $HOME/Library/Logs/st/launch.log (launchlog.h): after the reveal, never
+ * before it, and before the next spare is booted.
  */
 
 #include "aerospace.h"
+#include "launchlog.h"
 #include "spare.h"
 
 #include <errno.h>
@@ -70,6 +75,21 @@ static int maxticks = 24;
 static int tracing;
 static double started;                /* process start, wall clock */
 
+/* The launch log's fields: ms since the process started, -1 until reached. */
+static struct {
+	pid_t st;                     /* the claimed st, 0 before the claim */
+	const char *path;             /* "warm" or "cold" */
+	const char *reason;           /* why cold */
+	double spareage;              /* s since the claimed spare published */
+	const char *command;          /* -e COMMAND's basename, or "shell" */
+	double main, connected, target, claimed, spawned, detected, focused,
+	    revealed;
+	const char *via;              /* detected by "event" or "query" */
+	int moved;                    /* AeroSpace placed it elsewhere */
+} launch = {.spareage = -1, .main = -1, .connected = -1, .target = -1,
+    .claimed = -1, .spawned = -1, .detected = -1, .focused = -1,
+    .revealed = -1};
+
 /* What fail() and the signal handler clean up. */
 static volatile sig_atomic_t claimed; /* st to kill on failure */
 static char privateslot[PATH_MAX];
@@ -84,6 +104,20 @@ now(void)
 }
 
 static double
+wallclock(void)
+{
+	struct timeval time;
+	gettimeofday(&time, NULL);
+	return time.tv_sec + time.tv_usec / 1e6;
+}
+
+static double
+elapsed(void)
+{
+	return (wallclock() - started) * 1e3;
+}
+
+static double
 bound(void)
 {
 	return tick * maxticks;
@@ -92,12 +126,53 @@ bound(void)
 static void
 trace(const char *step)
 {
-	if (!tracing)
+	if (tracing)
+		fprintf(stderr, "st-aerospace-launch: %8.2f ms  %s\n", elapsed(),
+		    step);
+}
+
+/* Record a launch log field and trace the step. */
+static void
+mark(double *field, const char *step)
+{
+	*field = elapsed();
+	trace(step);
+}
+
+static void
+log_launch(const char *error)
+{
+	char path[PATH_MAX];
+	double load;
+	if (launchlog_path(path, sizeof(path)) < 0)
 		return;
-	struct timeval time;
-	gettimeofday(&time, NULL);
-	fprintf(stderr, "st-aerospace-launch: %8.2f ms  %s\n",
-	    (time.tv_sec + time.tv_usec / 1e6 - started) * 1e3, step);
+	LaunchLine line;
+	launchlog_begin(&line, started, launch.st, "launcher");
+	launchlog_put(&line, "result", error ? "fail" : "ok");
+	if (launch.path)
+		launchlog_put(&line, "path", launch.path);
+	if (launch.reason)
+		launchlog_put(&line, "reason", launch.reason);
+	if (launch.spareage >= 0)
+		launchlog_putf(&line, "spare_age", "%.1f", launch.spareage);
+	launchlog_put(&line, "cmd", launch.command);
+	launchlog_ms(&line, "main", launch.main);
+	launchlog_ms(&line, "connected", launch.connected);
+	launchlog_ms(&line, "claimed", launch.claimed);
+	launchlog_ms(&line, "target", launch.target);
+	launchlog_ms(&line, "spawn", launch.spawned);
+	launchlog_ms(&line, "detected", launch.detected);
+	if (launch.via)
+		launchlog_put(&line, "via", launch.via);
+	launchlog_ms(&line, "focused", launch.focused);
+	launchlog_ms(&line, "revealed", launch.revealed);
+	if (launch.moved)
+		launchlog_put(&line, "moved", "1");
+	if (getloadavg(&load, 1) == 1)
+		launchlog_putf(&line, "load1", "%.2f", load);
+	if (error)
+		launchlog_put(&line, "error", error);
+	launchlog_append(path, &line, LAUNCHLOG_LIMIT);
 }
 
 static void
@@ -116,13 +191,15 @@ cleanup(void)
 static void __attribute__((noreturn, format(printf, 1, 2)))
 fail(const char *format, ...)
 {
+	char message[512];
 	va_list arguments;
 	va_start(arguments, format);
-	vfprintf(stderr, format, arguments);
+	vsnprintf(message, sizeof(message), format, arguments);
 	va_end(arguments);
-	fputc('\n', stderr);
+	fprintf(stderr, "%s\n", message);
 	if (claimed > 0)
 		kill(claimed, SIGTERM);
+	log_launch(message);
 	cleanup();
 	exit(1);
 }
@@ -443,34 +520,49 @@ is_spare_process(pid_t pid)
 	return spare;
 }
 
+/* Returns 1 with the spare, or 0 with *reason (for the launch log). */
 static int
 claim_spare(const char *runtime, const char *slot, const char *stbinary,
-    pid_t *pid, unsigned long long *window)
+    pid_t *pid, unsigned long long *window, const char **reason)
 {
 	char claim[PATH_MAX], line[256], stamp[128], sparestamp[128];
 	if (spare_exe_stamp(stbinary, stamp, sizeof(stamp)) < 0)
 		stamp[0] = '\0';
 	snprintf(claim, sizeof(claim), "%s/spare.claim.%d", runtime,
 	    (int)getpid());
-	if (rename(slot, claim) < 0)
+	if (rename(slot, claim) < 0) {
+		*reason = "no-spare";
 		return 0;
+	}
+	/* The slot file is written once, when the spare publishes itself. */
+	struct stat published;
+	int haspublished = stat(claim, &published) == 0;
 	read_line(claim, line, sizeof(line));
 	unlink(claim);
 
 	pid_t spare;
 	unsigned long long id;
+	char socket[PATH_MAX];
+	struct stat info;
 	if (launch_parse_slot(line, &spare, &id, sparestamp,
-	    sizeof(sparestamp)) == 0 && *stamp && !strcmp(sparestamp, stamp) &&
-	    kill(spare, 0) == 0) {
-		char socket[PATH_MAX];
-		struct stat info;
-		snprintf(socket, sizeof(socket), "%s/st-%d/control.sock", runtime,
-		    (int)spare);
-		if (stat(socket, &info) == 0 && S_ISSOCK(info.st_mode)) {
-			*pid = spare;
-			*window = id;
-			return 1;
-		}
+	    sizeof(sparestamp)) < 0) {
+		*reason = "bad-slot";
+	} else if (kill(spare, 0) < 0) {
+		*reason = "dead";
+	} else if (!*stamp || strcmp(sparestamp, stamp)) {
+		*reason = "outdated";
+	} else if (snprintf(socket, sizeof(socket), "%s/st-%d/control.sock",
+	    runtime, (int)spare) >= (int)sizeof(socket) ||
+	    stat(socket, &info) < 0 || !S_ISSOCK(info.st_mode)) {
+		*reason = "no-socket";
+	} else {
+		*pid = spare;
+		*window = id;
+		if (haspublished)
+			launch.spareage = wallclock() -
+			    (published.st_mtimespec.tv_sec +
+			    published.st_mtimespec.tv_nsec / 1e9);
+		return 1;
 	}
 	/* An outdated or broken spare is stopped, but only if the pid still
 	 * runs an st: the slot may outlive its spare and the pid be reused. */
@@ -559,17 +651,21 @@ main(int argc, char **argv)
 		}
 	}
 
+	/* Times count from the exec, which includes whatever ran first. */
+	struct proc_bsdinfo process;
+	started = wallclock();
+	if (proc_pidinfo(getpid(), PROC_PIDTBSDINFO, 0, &process,
+	    sizeof(process)) == sizeof(process))
+		started = process.pbi_start_tvsec + process.pbi_start_tvusec / 1e6;
 	const char *value;
-	if ((value = getenv("ST_AEROSPACE_TRACE")) && *value && strcmp(value, "0")) {
-		struct proc_bsdinfo info;
-		struct timeval time;
+	if ((value = getenv("ST_AEROSPACE_TRACE")) && *value && strcmp(value, "0"))
 		tracing = 1;
-		gettimeofday(&time, NULL);
-		started = time.tv_sec + time.tv_usec / 1e6;
-		if (proc_pidinfo(getpid(), PROC_PIDTBSDINFO, 0, &info,
-		    sizeof(info)) == sizeof(info))
-			started = info.pbi_start_tvsec + info.pbi_start_tvusec / 1e6;
-		trace("main");
+	mark(&launch.main, "main");
+	if (commandargv) {
+		const char *slash = strrchr(commandargv[0], '/');
+		launch.command = slash ? slash + 1 : commandargv[0];
+	} else {
+		launch.command = "shell";
 	}
 	if ((value = getenv("ST_AEROSPACE_TICK")) && atof(value) > 0)
 		tick = atof(value);
@@ -592,51 +688,41 @@ main(int argc, char **argv)
 		    "%s/Applications/st.app/Contents/MacOS/st", home);
 		stbinary = defaultbinary;
 	}
-	if (access(stbinary, X_OK) < 0) {
-		fprintf(stderr, "st is not installed at %s\n", stbinary);
-		return 1;
-	}
+	if (access(stbinary, X_OK) < 0)
+		fail("st is not installed at %s", stbinary);
 
 	/* Subscribe first: the first event is the focus at invocation time,
 	 * the workspace this terminal belongs on even if the user switches
 	 * meanwhile. Both connections are answered while we claim the spare. */
 	value = getenv("ST_AEROSPACE_SOCKET");
 	if (value && *value) {
-		if (strlen(value) >= sizeof(socketpath)) {
-			fprintf(stderr, "AeroSpace socket path is too long: %s\n", value);
-			return 1;
-		}
+		if (strlen(value) >= sizeof(socketpath))
+			fail("AeroSpace socket path is too long: %s", value);
 		strcpy(socketpath, value);
 	} else {
 		struct passwd *user = getpwuid(getuid());
 		const char *name = user ? user->pw_name : getenv("USER");
 		if (snprintf(socketpath, sizeof(socketpath),
 		    "/tmp/bobko.aerospace-%s.sock", name ? name : "") >=
-		    (int)sizeof(socketpath)) {
-			fprintf(stderr, "AeroSpace socket path is too long\n");
-			return 1;
-		}
+		    (int)sizeof(socketpath))
+			fail("AeroSpace socket path is too long");
 	}
 	static const char *const subscribe[] = {"subscribe", "focus-changed",
 	    "window-detected"};
 	AeroBuffer request = {0};
 	if (aero_frame_request(&request, subscribe, 3, envwindow,
 	    envworkspace) < 0 || connection_open(&events, &request) < 0 ||
-	    connection_open(&commands, NULL) < 0) {
-		fprintf(stderr, "Can't connect to the AeroSpace server at %s (%s). "
-		    "Is AeroSpace.app running?\n", socketpath, strerror(errno));
-		return 1;
-	}
+	    connection_open(&commands, NULL) < 0)
+		fail("Can't connect to the AeroSpace server at %s (%s). "
+		    "Is AeroSpace.app running?", socketpath, strerror(errno));
 	aero_buffer_free(&request);
-	trace("connected");
+	mark(&launch.connected, "connected");
 
 	char runtime[PATH_MAX], slot[PATH_MAX];
 	if (spare_runtime_dir(runtime, sizeof(runtime)) < 0 ||
 	    snprintf(slot, sizeof(slot), "%s/spare", runtime) >=
-	    (int)sizeof(slot)) {
-		fprintf(stderr, "Could not create %s/.runtime/st\n", home);
-		return 1;
-	}
+	    (int)sizeof(slot))
+		fail("Could not create %s/.runtime/st", home);
 	handle_interrupts(interrupted);
 
 	char *directory = NULL, *venv = NULL;
@@ -653,10 +739,13 @@ main(int argc, char **argv)
 
 	pid_t pid = 0;
 	unsigned long long window = 0;
-	if (claim_spare(runtime, slot, stbinary, &pid, &window)) {
-		claimed = pid;
-		trace("claimed spare");
+	if (claim_spare(runtime, slot, stbinary, &pid, &window,
+	    &launch.reason)) {
+		claimed = launch.st = pid;
+		launch.path = "warm";
+		mark(&launch.claimed, "claimed spare");
 	} else {
+		launch.path = "cold";
 		/* Cold path: boot a private spare and wait until it serves
 		 * requests. */
 		snprintf(privateslot, sizeof(privateslot), "%s/spare.private.%d",
@@ -666,7 +755,7 @@ main(int argc, char **argv)
 		    privateslot);
 		if (booting < 0)
 			fail("st did not start");
-		claimed = booting;
+		claimed = launch.st = booting;
 		struct stat info;
 		for (int attempt = 0; attempt < 800; attempt++) {
 			if ((stat(privateslot, &info) == 0 && info.st_size > 0) ||
@@ -680,8 +769,8 @@ main(int argc, char **argv)
 		hasprivateslot = 0;
 		if (launch_parse_slot(line, &pid, &window, stamp, sizeof(stamp)) < 0)
 			fail("st did not start");
-		claimed = pid;
-		trace("booted private spare");
+		claimed = launch.st = pid;
+		mark(&launch.claimed, "booted private spare");
 		/* AeroSpace gives up registering an app that is busy launching;
 		 * ask again now that it answers, so it sees the window as soon as
 		 * it opens. */
@@ -704,7 +793,7 @@ main(int argc, char **argv)
 	}
 	if (!target || !*target)
 		fail("Could not determine the focused AeroSpace workspace");
-	trace("focused workspace");
+	mark(&launch.target, "focused workspace");
 
 	/* The terminal gets this launcher's environment, as if it had started
 	 * st itself; the spare's own is just whatever booted it. */
@@ -719,7 +808,7 @@ main(int argc, char **argv)
 	if (!spawn || send_request(runtime, pid, spawn, length) < 0)
 		fail("Could not reach st process %d", (int)pid);
 	free(spawn);
-	trace("sent spawn request");
+	mark(&launch.spawned, "sent spawn request");
 
 	/* Wait for AeroSpace to report the window. Without an event, query
 	 * after 2, 4, 8, ... ticks: each query's session ends in the full
@@ -736,6 +825,7 @@ main(int argc, char **argv)
 			got = wait_event("window-detected", &window, 0, wake, &workspace);
 			if (got == 1) {
 				detected = 1;
+				launch.via = "event";
 				break;
 			}
 			if (got < 0)
@@ -752,15 +842,18 @@ main(int argc, char **argv)
 			detected = answer.out &&
 			    launch_window_workspace(answer.out, window, &workspace);
 			aero_free_answer(&answer);
+			if (detected)
+				launch.via = "query";
 		}
 	}
 	if (!detected)
 		fail("AeroSpace did not register the st window for PID %d", (int)pid);
-	trace("window detected");
+	mark(&launch.detected, "window detected");
 
 	char windowtext[24];
 	snprintf(windowtext, sizeof(windowtext), "%llu", window);
 	int focus = workspace && !strcmp(workspace, target);
+	launch.moved = !focus;
 	AeroAnswer answer;
 	int ok = focus
 	    ? command(&answer, "focus", "--window-id", windowtext, NULL) == 0
@@ -775,7 +868,7 @@ main(int argc, char **argv)
 	if (!ok)
 		fail("AeroSpace could not move st window %s to workspace %s",
 		    windowtext, target);
-	trace("focused window");
+	mark(&launch.focused, "focused window");
 
 	/* Managed st windows stay transparent until AeroSpace has finished
 	 * both layout and native focus. SIGUSR1 completes that handshake
@@ -786,7 +879,8 @@ main(int argc, char **argv)
 	claimed = 0;
 	cleanup();
 	handle_interrupts(SIG_DFL);
-	trace("revealed");
+	mark(&launch.revealed, "revealed");
+	log_launch(NULL);
 
 	/* Boot the next spare. Once it serves requests, ask AeroSpace to look
 	 * at the running apps again: it skipped this one while it was busy

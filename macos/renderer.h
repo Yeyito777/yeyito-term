@@ -66,5 +66,10 @@ void mac_renderer_set_row(double dy, int clip, double clip_left,
 		double clip_top, double clip_right, double clip_bottom);
 void mac_renderer_remove_image(uint64_t serial);
 void mac_renderer_end(void);
+/* Launch diagnostics: frames committed so far, and a one-shot callback, on
+ * the main queue, with the next committed frame's presentation time
+ * (CACurrentMediaTime's clock; 0 if it was never shown). */
+unsigned long mac_renderer_frames(void);
+void mac_renderer_on_next_present(void (*callback)(double presented));
 
 #endif
