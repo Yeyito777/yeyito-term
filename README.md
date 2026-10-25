@@ -120,7 +120,8 @@ state.
 
 Other options: `--cwd DIR` starts in `DIR`, `-T TITLE` sets the window title
 and `-e COMMAND [ARG ...]` runs a command instead of the shell, like `st -e`.
-The launcher forwards its own `PATH`, so a wrapper can extend it first.
+The terminal gets the launcher's environment, so a wrapper can extend `PATH`
+or export variables first.
 
 Launches are near-instant because the launcher keeps a **warm spare**: an
 `st --spare` that has already done the expensive startup (AppKit, Metal,

@@ -46,6 +46,7 @@ char *argv0;
 #include "pty.h"
 #include "reveal.h"
 #include "spare.h"
+#include "control.h"
 #include "text_input.h"
 #include "pasteboard5522.h"
 #include "../sync.h"
@@ -2463,28 +2464,20 @@ startControlSocket(void)
 		for (;;) {
 			int client = accept(controlFD, NULL, NULL);
 			if (client < 0) break;
-			struct timeval timeout = {.tv_sec = 1, .tv_usec = 0};
-			setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
 			/* A spare's spawn request is latency-critical: read it at
-			 * user-interactive QoS. Spawn requests carry PATH and argv. */
+			 * user-interactive QoS. It carries a whole environment, so
+			 * allow up to ARG_MAX. */
 			dispatch_async(dispatch_get_global_queue(
 			    spareWaiting ? QOS_CLASS_USER_INTERACTIVE : QOS_CLASS_UTILITY, 0), ^{
-				enum { limit = 64 * 1024 };
-				char *buffer = malloc(limit); size_t total = 0; ssize_t got;
-				if (!buffer) { close(client); return; }
-				while (total < limit &&
-				    (got = read(client, buffer + total, limit - total)) > 0)
-					total += got;
+				size_t length;
+				char *buffer = control_read_message(client, 1024 * 1024, &length);
 				close(client);
-				if (total && total < limit) {
-					NSData *message = [NSData dataWithBytesNoCopy:buffer
-					    length:total freeWhenDone:YES];
-					dispatch_async(dispatch_get_main_queue(), ^{
-						handleControlMessage(message.bytes, message.length);
-					});
-				} else {
-					free(buffer);
-				}
+				if (!buffer) return;
+				NSData *message = [NSData dataWithBytesNoCopy:buffer
+				    length:length freeWhenDone:YES];
+				dispatch_async(dispatch_get_main_queue(), ^{
+					handleControlMessage(message.bytes, message.length);
+				});
 			});
 		}
 	});
@@ -2628,14 +2621,13 @@ claimSpare(const char *payload, size_t length)
 		spareActivity = nil;
 	}
 
-	int pathChanged = 0;
-	for (int i = 0; i < request.nenv; i++) {
-		char *assignment = request.env[i], *equals = strchr(assignment, '=');
-		*equals = '\0';
-		setenv(assignment, equals + 1, 1);
-		pathChanged |= !strcmp(assignment, "PATH");
-	}
-	if (pathChanged) prefixResourcePath();
+	/* The launcher's environment, not that of whoever booted the spare; then
+	 * what st itself exports, exactly as a cold launch would. */
+	spare_apply_environment(&request);
+	macos_init_utf8_locale();
+	setenv("WINDOWID", [[NSString stringWithFormat:@"%ld",
+	    nativeWindow.windowNumber] UTF8String], 1);
+	prefixResourcePath();
 	if (request.cwd && chdir(request.cwd) < 0) {
 		const char *home = getenv("HOME");
 		if (home) chdir(home);

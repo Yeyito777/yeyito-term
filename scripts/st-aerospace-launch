@@ -181,11 +181,14 @@ done
 [ -n "$target_workspace" ] ||
 	fail 'Could not determine the focused AeroSpace workspace'
 
-# Forward PATH (callers may extend it) and the venv; NUL-separated fields.
+# NUL-separated fields. The terminal gets this launcher's environment, as if
+# it had started st itself; the spare's own is just whatever booted it.
 {
 	printf 'spawn\n'
 	printf 'cwd=%s\0' "$start_directory"
-	printf 'env=PATH=%s\0' "$PATH"
+	printf 'environ\0'
+	env -0
+	printf '\0'
 	printf 'env=ST_INHERIT_VIRTUAL_ENV=%s\0' "${inherit_virtualenv:-}"
 	[ -n "$title" ] && printf 'title=%s\0' "$title"
 	if [ -n "$has_command" ]; then
@@ -193,6 +196,7 @@ done
 			printf 'arg=%s\0' "$argument"
 		done
 	fi
+	printf 'end\0'
 } | nc -U "$runtime/st-$st_pid/control.sock" ||
 	fail "Could not reach st process $st_pid"
 

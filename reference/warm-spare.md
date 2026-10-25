@@ -41,16 +41,23 @@ outdated spare is killed. It then sends a `spawn` request over
 ```
 spawn\n
 cwd=DIR\0
-env=NAME=VALUE\0      (repeatable; the launcher sends PATH and ST_INHERIT_VIRTUAL_ENV)
+environ\0 NAME=VALUE\0 ... \0   (`env -0` output, then an empty field)
+env=NAME=VALUE\0               (repeatable; the launcher sends ST_INHERIT_VIRTUAL_ENV)
 title=TITLE\0
-arg=WORD\0            (repeatable, in order; like st -e)
+arg=WORD\0                     (repeatable, in order; like st -e)
+end\0
 ```
 
-Unknown keys are ignored. The spare applies the environment (re-prefixing
-its bundled `bin` to `PATH`), changes directory (falling back to `$HOME`),
-orders its window in with `orderFrontRegardless` (plain `orderFront:` is
-ignored for an inactive app), then starts the shell. Requests are accepted
-only once.
+The `environ` block replaces the spare's environment: that is merely the
+environment of whatever booted the spare (an earlier launch, perhaps from a
+shell or a script), so the terminal gets the claiming launcher's instead,
+exactly as if it had started st itself. A request without the final `end`
+(cut short) is rejected; unknown keys are ignored. The spare applies the
+environment and then what st itself exports (`LC_CTYPE`, `WINDOWID`, its
+bundled `bin` first on `PATH`), changes directory (falling back to
+`$HOME`), orders its window in with `orderFrontRegardless` (plain
+`orderFront:` is ignored for an inactive app), then starts the shell.
+Requests are accepted only once.
 
 ## Launcher flow
 

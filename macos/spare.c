@@ -12,37 +12,63 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+static int
+valid_assignment(const char *assignment)
+{
+	return assignment[0] != '=' && strchr(assignment, '=') != NULL;
+}
+
 int
 spare_parse_request(const char *payload, size_t length, SpareRequest *request)
 {
 	memset(request, 0, sizeof(*request));
 	if (length && payload[length - 1] != '\0')
 		return -1;
+	size_t fields = 0;
+	for (size_t i = 0; i < length; i++)
+		fields += payload[i] == '\0';
 	request->storage = malloc(length + 1);
-	if (!request->storage)
-		return -1;
+	request->env = calloc(fields + 1, sizeof(*request->env));
+	request->argv = calloc(fields + 1, sizeof(*request->argv));
+	if (!request->storage || !request->env || !request->argv)
+		goto invalid;
 	memcpy(request->storage, payload, length);
 	request->storage[length] = '\0';
 
+	int inenviron = 0, ended = 0;
 	for (char *field = request->storage; field < request->storage + length;
 	    field += strlen(field) + 1) {
-		if (!strncmp(field, "cwd=", 4)) {
+		if (ended)
+			goto invalid;
+		if (inenviron) {
+			if (!*field) {
+				inenviron = 0;
+			} else if (valid_assignment(field)) {
+				request->env[request->nenv++] = field;
+			} else {
+				goto invalid;
+			}
+		} else if (!strcmp(field, "end")) {
+			ended = 1;
+		} else if (!strcmp(field, "environ")) {
+			/* Only the first block replaces; it must precede env= fields. */
+			if (request->replaceenv || request->nenv)
+				goto invalid;
+			request->replaceenv = inenviron = 1;
+		} else if (!strncmp(field, "cwd=", 4)) {
 			request->cwd = field + 4;
 		} else if (!strncmp(field, "title=", 6)) {
 			request->title = field + 6;
 		} else if (!strncmp(field, "env=", 4)) {
-			char *assignment = field + 4;
-			if (assignment[0] == '=' || !strchr(assignment, '=') ||
-			    request->nenv == SPARE_MAX_ENV)
+			if (!valid_assignment(field + 4))
 				goto invalid;
-			request->env[request->nenv++] = assignment;
+			request->env[request->nenv++] = field + 4;
 		} else if (!strncmp(field, "arg=", 4)) {
-			if (request->argc == SPARE_MAX_ARGS)
-				goto invalid;
 			request->argv[request->argc++] = field + 4;
 		}
 	}
-	request->argv[request->argc] = NULL;
+	if (inenviron || !ended)
+		goto invalid;
 	return 0;
 
 invalid:
@@ -54,7 +80,36 @@ void
 spare_free_request(SpareRequest *request)
 {
 	free(request->storage);
+	free(request->env);
+	free(request->argv);
 	memset(request, 0, sizeof(*request));
+}
+
+void
+spare_apply_environment(const SpareRequest *request)
+{
+	extern char **environ;
+	if (request->replaceenv) {
+		while (environ && environ[0]) {
+			char *entry = environ[0];
+			const char *equals = strchr(entry, '=');
+			size_t n = equals ? (size_t)(equals - entry) : strlen(entry);
+			char name[n + 1];
+			memcpy(name, entry, n);
+			name[n] = '\0';
+			if (unsetenv(name) < 0 || environ[0] == entry)
+				break; /* malformed entry that unsetenv cannot remove */
+		}
+	}
+	for (int i = 0; i < request->nenv; i++) {
+		const char *assignment = request->env[i];
+		const char *equals = strchr(assignment, '=');
+		size_t n = equals - assignment;
+		char name[n + 1];
+		memcpy(name, assignment, n);
+		name[n] = '\0';
+		setenv(name, equals + 1, 1);
+	}
 }
 
 int
