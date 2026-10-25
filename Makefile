@@ -7,7 +7,7 @@ include config.mk
 DIST_SRC = st.c x.c graphics.c graphics.h clipboard5522.c clipboard5522.h vimnav.c sshind.c notif.c persist.c cmdline.c search.c
 
 ifeq ($(UNAME_S),Darwin)
-SRC = st.c graphics.c clipboard5522.c vimnav.c persist.c cmdline.c search.c macos/locale.c macos/emoji.c
+SRC = st.c graphics.c clipboard5522.c vimnav.c persist.c cmdline.c search.c macos/locale.c macos/emoji.c macos/spare.c
 OBJC_SRC = macos/backend.m macos/renderer.m macos/pty.m macos/pasteboard5522.m
 OBJ = $(SRC:.c=.o) $(OBJC_SRC:.m=.o)
 else
@@ -40,10 +40,12 @@ render/smoothscroll_term.o: render/smoothscroll_term.c render/smoothscroll.h st.
 st.o x.o macos/backend.o: render/smoothscroll.h
 x.o macos/backend.o: render/image_occlusion.h
 clipboard5522.o: clipboard5522.c clipboard5522.h
-macos/backend.o: macos/backend.m macos/native.h macos/renderer.h macos/glyph_layout.h macos/pty.h macos/pasteboard5522.h macos/keysyms.h macos/reveal.h macos/text_input.h config.h st.h win.h graphics.h sync.h
+macos/backend.o: macos/backend.m macos/native.h macos/renderer.h macos/glyph_layout.h macos/pty.h macos/pasteboard5522.h macos/keysyms.h macos/reveal.h macos/spare.h macos/text_input.h config.h st.h win.h graphics.h sync.h
 macos/pasteboard5522.o: macos/pasteboard5522.m macos/pasteboard5522.h clipboard5522.h
 macos/locale.o: macos/locale.c macos/locale.h
 	$(CC) $(STCFLAGS) -c macos/locale.c -o macos/locale.o
+macos/spare.o: macos/spare.c macos/spare.h
+	$(CC) $(STCFLAGS) -c macos/spare.c -o macos/spare.o
 macos/emoji.o: macos/emoji.c macos/emoji.h st.h
 	$(CC) $(STCFLAGS) -c macos/emoji.c -o macos/emoji.o
 macos/renderer.o: macos/renderer.m macos/renderer.h macos/glyph_layout.h
@@ -114,7 +116,7 @@ dist: clean
 	cp -R vendor/stb_image.h st-$(VERSION)/vendor
 	cp -R macos/README.md macos/Info.plist macos/backend.m macos/pasteboard5522.h macos/pasteboard5522.m macos/keysyms.h macos/native.h macos/reveal.h macos/text_input.h\
 		macos/renderer.h macos/renderer.m macos/glyph_layout.h macos/emoji.h macos/emoji.c\
-		macos/pty.h macos/pty.m macos/locale.h macos/locale.c\
+		macos/pty.h macos/pty.m macos/locale.h macos/locale.c macos/spare.h macos/spare.c\
 		macos/st-icon.png macos/st.icns\
 		st-$(VERSION)/macos
 	cp -R scripts/st-notify scripts/st-save-cmd scripts/st-aerospace-launch scripts/st-shell-context.zsh st-$(VERSION)/scripts
@@ -284,6 +286,12 @@ tests/test_macos_reveal.o: tests/test_macos_reveal.c tests/test.h macos/reveal.h
 test_macos_reveal: tests/test_macos_reveal.o
 	$(CC) -o tests/test_macos_reveal tests/test_macos_reveal.o
 
+tests/test_macos_spare.o: tests/test_macos_spare.c tests/test.h macos/spare.h
+	$(CC) $(TESTFLAGS) -c tests/test_macos_spare.c -o tests/test_macos_spare.o
+
+test_macos_spare: tests/test_macos_spare.o macos/spare.o
+	$(CC) -o tests/test_macos_spare tests/test_macos_spare.o macos/spare.o
+
 tests/test_macos_text_input.o: tests/test_macos_text_input.c tests/test.h macos/text_input.h
 	$(CC) $(TESTFLAGS) -c tests/test_macos_text_input.c -o tests/test_macos_text_input.o
 
@@ -331,7 +339,7 @@ endif
 
 test: test_image_occlusion test_smoothscroll test_vimnav test_sshind test_scrollback test_cwd test_notif test_persist test_search test_cmdline_layout test_mode_reset test_sync test_clipboard5522 test_graphics test_aerospace_launcher
 ifeq ($(UNAME_S),Darwin)
-test: test_macos_image_occlusion test_macos_mouse_cursor test_macos_pty test_macos_reveal test_macos_text_input test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522
+test: test_macos_image_occlusion test_macos_mouse_cursor test_macos_pty test_macos_reveal test_macos_spare test_macos_text_input test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522
 test: test_macos_symbol_input
 endif
 	@echo "Running tests..."
@@ -354,6 +362,7 @@ ifeq ($(UNAME_S),Darwin)
 	@./tests/test_macos_mouse_cursor
 	@./tests/test_macos_pty
 	@./tests/test_macos_reveal
+	@./tests/test_macos_spare
 	@./tests/test_macos_text_input
 	@./tests/test_macos_symbol_input
 	@./tests/test_macos_locale
@@ -364,7 +373,7 @@ endif
 
 clean-tests:
 	rm -f tests/test_macos_symbol_input tests/test_macos_symbol_input.o tests/macos_symbol_sender
-	rm -f tests/*.o tests/test_macos_image_occlusion tests/test_macos_mouse_cursor tests/test_image_occlusion tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search tests/test_cmdline_layout tests/test_mode_reset tests/test_sync tests/test_clipboard5522 tests/test_graphics tests/test_smoothscroll tests/test_macos_pty tests/test_macos_reveal tests/test_macos_text_input tests/test_macos_locale tests/test_macos_glyph_layout tests/test_macos_emoji tests/test_macos_pasteboard5522
+	rm -f tests/*.o tests/test_macos_image_occlusion tests/test_macos_mouse_cursor tests/test_image_occlusion tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search tests/test_cmdline_layout tests/test_mode_reset tests/test_sync tests/test_clipboard5522 tests/test_graphics tests/test_smoothscroll tests/test_macos_pty tests/test_macos_reveal tests/test_macos_spare tests/test_macos_text_input tests/test_macos_locale tests/test_macos_glyph_layout tests/test_macos_emoji tests/test_macos_pasteboard5522
 
-.PHONY: all app install-app uninstall-app install-hint clean dist install uninstall test test_image_occlusion test_smoothscroll test_macos_image_occlusion test_macos_mouse_cursor test_gpu_regressions test_aerospace_launcher test_mode_reset test_sync test_graphics test_macos_pty test_macos_reveal test_macos_text_input test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522 clean-tests
+.PHONY: all app install-app uninstall-app install-hint clean dist install uninstall test test_image_occlusion test_smoothscroll test_macos_image_occlusion test_macos_mouse_cursor test_gpu_regressions test_aerospace_launcher test_mode_reset test_sync test_graphics test_macos_pty test_macos_reveal test_macos_spare test_macos_text_input test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522 clean-tests
 .PHONY: test_macos_symbol_input

@@ -17,6 +17,9 @@ not use XQuartz or link against X11.
 - `pty.m` and `pty.h` provide ordered, nonblocking PTY output. AppKit input
   handlers enqueue bytes here so a child that stops reading cannot freeze the
   window.
+- `spare.c` and `spare.h` implement the warm spare's spawn-request parsing and
+  single-slot protocol used by `st-aerospace-launch` (see
+  `reference/warm-spare.md`).
 - `native.h` is the small C bridge used by platform-neutral modules such as the
   command-line overlay.
 - `keysyms.h` provides the minimal X11-compatible key values needed by shared

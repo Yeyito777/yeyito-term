@@ -1,0 +1,167 @@
+/* See LICENSE for license details. */
+
+#include "spare.h"
+
+#include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+int
+spare_parse_request(const char *payload, size_t length, SpareRequest *request)
+{
+	memset(request, 0, sizeof(*request));
+	if (length && payload[length - 1] != '\0')
+		return -1;
+	request->storage = malloc(length + 1);
+	if (!request->storage)
+		return -1;
+	memcpy(request->storage, payload, length);
+	request->storage[length] = '\0';
+
+	for (char *field = request->storage; field < request->storage + length;
+	    field += strlen(field) + 1) {
+		if (!strncmp(field, "cwd=", 4)) {
+			request->cwd = field + 4;
+		} else if (!strncmp(field, "title=", 6)) {
+			request->title = field + 6;
+		} else if (!strncmp(field, "env=", 4)) {
+			char *assignment = field + 4;
+			if (assignment[0] == '=' || !strchr(assignment, '=') ||
+			    request->nenv == SPARE_MAX_ENV)
+				goto invalid;
+			request->env[request->nenv++] = assignment;
+		} else if (!strncmp(field, "arg=", 4)) {
+			if (request->argc == SPARE_MAX_ARGS)
+				goto invalid;
+			request->argv[request->argc++] = field + 4;
+		}
+	}
+	request->argv[request->argc] = NULL;
+	return 0;
+
+invalid:
+	spare_free_request(request);
+	return -1;
+}
+
+void
+spare_free_request(SpareRequest *request)
+{
+	free(request->storage);
+	memset(request, 0, sizeof(*request));
+}
+
+int
+spare_exe_stamp(const char *path, char *buffer, size_t size)
+{
+	struct stat info;
+	if (stat(path, &info) < 0)
+		return -1;
+	int n = snprintf(buffer, size, "%llu:%ld",
+	    (unsigned long long)info.st_ino, (long)info.st_mtime);
+	return n > 0 && (size_t)n < size ? 0 : -1;
+}
+
+int
+spare_runtime_dir(char *buffer, size_t size)
+{
+	const char *home = getenv("HOME");
+	if (!home || !*home)
+		home = "/tmp";
+	int n = snprintf(buffer, size, "%s/.runtime", home);
+	if (n <= 0 || (size_t)n >= size)
+		return -1;
+	if (mkdir(buffer, 0700) < 0 && errno != EEXIST)
+		return -1;
+	n = snprintf(buffer, size, "%s/.runtime/st", home);
+	if (n <= 0 || (size_t)n >= size)
+		return -1;
+	if (mkdir(buffer, 0700) < 0 && errno != EEXIST)
+		return -1;
+	return 0;
+}
+
+static pid_t
+slot_pid(const char *slot)
+{
+	FILE *file = fopen(slot, "r");
+	if (!file)
+		return -1;
+	long pid = -1;
+	if (fscanf(file, "%ld", &pid) != 1)
+		pid = -1;
+	fclose(file);
+	return pid > 0 ? (pid_t)pid : -1;
+}
+
+static int
+alive(pid_t pid)
+{
+	return kill(pid, 0) == 0 || errno == EPERM;
+}
+
+int
+spare_publish(const char *slot, pid_t pid, unsigned long windowid,
+    const char *stamp)
+{
+	char temporary[PATH_MAX], line[128];
+	if (snprintf(temporary, sizeof(temporary), "%s.%d.tmp", slot, (int)pid) >=
+	    (int)sizeof(temporary))
+		return -1;
+	int n = snprintf(line, sizeof(line), "%d %lu %s\n", (int)pid, windowid,
+	    stamp);
+	if (n <= 0 || n >= (int)sizeof(line))
+		return -1;
+	int fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+	if (fd < 0)
+		return -1;
+	int written = write(fd, line, n) == n;
+	close(fd);
+	if (!written) {
+		unlink(temporary);
+		return -1;
+	}
+
+	/* link() is the atomic "create only if absent": two spares racing for
+	 * the slot cannot both win, and a launcher never reads half a line. */
+	int result = -1;
+	for (int attempt = 0; attempt < 2; attempt++) {
+		if (link(temporary, slot) == 0) {
+			result = 1;
+			break;
+		}
+		if (errno != EEXIST)
+			break;
+		pid_t holder = slot_pid(slot);
+		if (holder == pid) {
+			result = 1;
+			break;
+		}
+		if (holder > 0 && alive(holder)) {
+			result = 0;
+			break;
+		}
+		unlink(slot); /* left behind by a spare that died unclaimed */
+	}
+	unlink(temporary);
+	return result;
+}
+
+int
+spare_holds_slot(const char *slot, pid_t pid)
+{
+	return slot_pid(slot) == pid;
+}
+
+void
+spare_withdraw(const char *slot, pid_t pid)
+{
+	if (slot_pid(slot) == pid)
+		unlink(slot);
+}
