@@ -1315,7 +1315,9 @@ gpudrawimage(const GraphicsPlacementView *placement, void *context)
 	    gpucelly(placement->row + placement->rows) - gpucelly(placement->row);
 	/* Smooth scrolling: the image moves with its anchor row and is clipped
 	 * to that row's band; rowdy is also picked up by gpufillcells(). */
+	smoothscroll_image(placement->anchor);
 	gpubegincell(placement->column, placement->row);
+	smoothscroll_image(NULL);
 	y += gpu.rowdy;
 	if (x >= win.w - borderpx || x + w <= borderpx ||
 	    y >= win.h - borderpx || y + h <= borderpx) {

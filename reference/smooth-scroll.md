@@ -222,11 +222,18 @@ never move.
 
 ### Frame pacing and idle cost
 
-- X11: `run()` schedules frames at ~120 Hz only while `smoothscroll_pending()`
-  (GLX vsync may pace them further). It is re-armed right after `draw()`,
-  because that is where a new scroll is noticed.
-- macOS: `MTKView` runs its display link (`preferredFramesPerSecond = 120`)
-  only while a glide or snap is pending, then returns to on-demand drawing.
+- X11: while `smoothscroll_pending()`, `run()` draws a frame every refresh
+  period of the monitor under the window's centre (XRandR, updated when the
+  window moves; 60 Hz if unknown, `ST_REFRESH_HZ` overrides). With GLX vsync
+  it starts 1 ms early and the swap waits for the refresh. It is re-armed
+  right after `draw()`, because that is where a new scroll is noticed.
+- macOS: `MTKView` runs its display link at the window's screen's
+  `maximumFramesPerSecond` (ProMotion: up to 120 Hz; updated when the window
+  changes screens) only while a glide or snap is pending, then returns to
+  on-demand drawing.
+- App-driven glides (mode 2032) are timed by st the same way: the
+  application sends easing terms, st evaluates them at each frame.
+- `ST_SMOOTHSCROLL_LOG=file` logs each frame drawn while something moves.
 - At rest nothing is scheduled: zero idle CPU/GPU. Typing never waits on the
   animation. The region hook costs a few compares per scroll; ordinary shell
   output on the primary screen is rejected on the first checks.

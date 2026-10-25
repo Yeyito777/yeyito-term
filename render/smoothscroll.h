@@ -76,6 +76,13 @@ void smoothscroll_decsclm(int set);
 void smoothscroll_app_mode(int set);
 int smoothscroll_app_state(void);
 void smoothscroll_app_osc(int narg, char **args);
+/* Grid row a line copied by an app-driven glide is drawn as, INT_MIN for
+ * any other line (st.c maps image anchors with it). */
+int smoothscroll_copy_row(const void *line);
+/* Renderers, around drawing an image placement: its anchor line, so an
+ * image that left with a copied line shifts and clips like that line
+ * (NULL afterwards). */
+void smoothscroll_image(const void *anchor);
 /* tscrollup()/tscrolldown(), before rows [orig, bot] of the scroll region
  * [top, bot] move by n rows (positive: content moves up). */
 void smoothscroll_region(int top, int bot, int orig, int n);

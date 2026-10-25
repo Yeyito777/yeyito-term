@@ -186,6 +186,7 @@ static struct {
 
 static void nativeResize(double, double);
 static void updateSmoothScrollClock(void);
+static void updateDisplayRate(void);
 static void nativeHandleKey(NSEvent *, int);
 static void nativeFocus(int);
 static void startControlSocket(void);
@@ -684,7 +685,10 @@ drawGraphicsPlacement(const GraphicsPlacementView *placement, void *context)
 	    cellY(placement->row + placement->rows) - cellY(placement->row);
 
 	/* Smooth scrolling: the image moves with its anchor row's band. */
+	/* An image that left with a copied line shifts/clips like that line. */
+	smoothscroll_image(placement->anchor);
 	double dy = beginCell(placement->column, placement->row);
+	smoothscroll_image(NULL);
 	if (x >= borderpx + win.tw || x + width <= borderpx ||
 	    y + dy >= borderpx + win.th || y + height + dy <= borderpx) {
 		endCell();
@@ -718,7 +722,9 @@ drawGraphicsPlacement(const GraphicsPlacementView *placement, void *context)
 	if (selectedImage) {
 		MacColor color = indexedColor(selectionbg);
 		color.a = 0.45f;
+		smoothscroll_image(placement->anchor);
 		beginCell(placement->column, placement->row);
+		smoothscroll_image(NULL);
 		mac_renderer_rect(stage == GRAPHICS_STAGE_ABOVE_TEXT ?
 		    MAC_LAYER_IMAGE_DECORATION : MAC_LAYER_OVERLAY_DECORATION, x, y, width,
 		    height, color);
@@ -1433,6 +1439,24 @@ nativePreciseScroll(NSEvent *event, uint state)
 	return YES;
 }
 
+/* Glides draw a frame per refresh of the screen the window is on: ProMotion
+ * panels up to 120 Hz, external displays at theirs.  Moving the window to
+ * another screen updates it (windowDidChangeScreen:). */
+static void
+updateDisplayRate(void)
+{
+	NSInteger fps = 60;
+	NSScreen *screen = nativeWindow.screen ?: NSScreen.mainScreen;
+
+	if (!nativeView)
+		return;
+	if (@available(macOS 12.0, *))
+		fps = screen.maximumFramesPerSecond;
+	if (fps <= 0)
+		fps = 60;
+	nativeView.preferredFramesPerSecond = fps;
+}
+
 /* Animation frames come from MTKView's display link only while a glide or a
  * pending snap needs them; at rest the view returns to on-demand drawing, so
  * an idle terminal does no work. */
@@ -1862,6 +1886,8 @@ updateWindowReveal(void)
 { (void)note; updateWindowReveal(); }
 - (void)windowDidResize:(NSNotification *)note
 { (void)note; updateWindowReveal(); }
+- (void)windowDidChangeScreen:(NSNotification *)note
+{ (void)note; updateDisplayRate(); }
 - (void)windowDidChangeBackingProperties:(NSNotification *)note
 {
 	(void)note;
@@ -2216,7 +2242,8 @@ initializeNativeWindow(int columns, int rows)
 		die("st: could not initialize Metal renderer\n");
 	graphics_set_image_free_callback(freeGraphicsImage, NULL);
 	smoothscroll_configure(smoothscroll, smoothscroll_ms, smoothscroll_regions);
-	/* Smooth-scroll glides run at the display's refresh (ProMotion: 120). */
+	/* Smooth-scroll glides run at the display's refresh; updateDisplayRate()
+	 * sets it from the window's screen once the window exists. */
 	nativeView.preferredFramesPerSecond = 120;
 	updateCellMetrics();
 	NSSize content = NSMakeSize(2 * borderpx + columns * win.cw,
@@ -2245,6 +2272,7 @@ initializeNativeWindow(int columns, int rows)
 	nativeWindow.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;
 	nativeWindow.delegate = appDelegate;
 	[nativeWindow center];
+	updateDisplayRate();
 	if (opt_has_position) {
 		NSScreen *screen = NSScreen.mainScreen;
 		NSRect frame = screen.visibleFrame;
