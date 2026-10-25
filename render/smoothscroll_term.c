@@ -510,33 +510,45 @@ smoothscroll_app_osc(int narg, char **args)
 /* The image being drawn is anchored on this line (smoothscroll_image()). */
 static const void *imageline;
 
-/* The rectangle cell (x, y) moves with.  Rectangles also clip at rest, so
- * an image the app lets run past one (to have it while gliding) never
- * draws outside it.  An image on a copied line belongs to the rectangle
- * whose edge its line left through. */
-static const AppRect *
-apprect(int x, int y)
+/* Where cell (x, y) moves while the app glides (nothing moves or clips at
+ * rest): the rectangle it is in.  An image (smoothscroll_image()) may span
+ * rectangles, such as the history beside a side panel and the history
+ * below it, so it clips to the bounding box of every rectangle on its anchor
+ * row; an image on a copied line, to those its line left through. */
+static int
+apprect(int x, int y, AppRect *box)
 {
-	int i, row;
+	int i, row, found = 0;
 
-	if (!app.on)
-		return NULL;
-	if (imageline && (row = smoothscroll_copy_row(imageline)) != INT_MIN) {
+	if (!app.on || app.offset == 0.0)
+		return 0;
+	if (imageline) {
+		int copy = (row = smoothscroll_copy_row(imageline)) != INT_MIN;
 		for (i = 0; i < app.nrects; i++) {
 			const AppRect *r = &app.rect[i];
-			if (x >= r->left && x < r->right &&
-			    (row < app.gtop ? r->top == app.gtop :
-			    r->bot == app.gbot))
-				return r;
+			if (copy ? (row < app.gtop ? r->top != app.gtop :
+			    r->bot != app.gbot) : (y < r->top || y > r->bot))
+				continue;
+			if (!found) {
+				*box = *r;
+				found = 1;
+				continue;
+			}
+			box->top = MIN(box->top, r->top);
+			box->bot = MAX(box->bot, r->bot);
+			box->left = MIN(box->left, r->left);
+			box->right = MAX(box->right, r->right);
 		}
-		return NULL;
+		return found && x >= box->left && x < box->right;
 	}
 	for (i = 0; i < app.nrects; i++) {
 		const AppRect *r = &app.rect[i];
-		if (y >= r->top && y <= r->bot && x >= r->left && x < r->right)
-			return r;
+		if (y >= r->top && y <= r->bot && x >= r->left && x < r->right) {
+			*box = *r;
+			return 1;
+		}
 	}
-	return NULL;
+	return 0;
 }
 
 void
@@ -1048,13 +1060,15 @@ regmoves(int x, int y)
 double
 smoothscroll_shift(int x, int y)
 {
+	AppRect box;
+
 	if (!sst.enabled)
 		return 0.0;
 	if (ghost.on)
 		return ghost.shift;
 	if (sst.ss.offset != 0.0)
 		return sst.ss.offset;
-	if (app.offset != 0.0 && apprect(x, y))
+	if (apprect(x, y, &box))
 		return app.offset;
 	if (regmoves(x, y))
 		return reg.ss.offset;
@@ -1081,12 +1095,12 @@ smoothscroll_clip(int x, int y, int *top, int *end, int *left, int *right)
 		return 1;
 	}
 	{
-		const AppRect *r = ghost.on ? NULL : apprect(x, y);
-		if (r) {
-			*top = r->top;
-			*end = r->bot + 1;
-			*left = r->left;
-			*right = r->right;
+		AppRect box;
+		if (!ghost.on && apprect(x, y, &box)) {
+			*top = box.top;
+			*end = box.bot + 1;
+			*left = box.left;
+			*right = box.right;
 			return 1;
 		}
 		if (!ghost.on && imageline &&
@@ -1134,7 +1148,7 @@ smoothscroll_segment(int y, int x, int x2)
 		end = cut(x, end, left);
 		end = cut(x, end, right);
 	}
-	if (app.on)
+	if (app.on && app.offset != 0.0)
 		for (i = 0; i < app.nrects; i++) {
 			const AppRect *r = &app.rect[i];
 			if (y < r->top || y > r->bot)

@@ -42,9 +42,12 @@ a term is running. It never goes past the lines st kept for that side (see
 below): beyond them the offset is held at that many rows.
 
 While the offset `o` is not 0, every grid cell inside a rectangle is drawn `o`
-rows lower (or higher), clipped to its rectangle. Rectangles clip images even
-at rest, so an image an application lets run past a rectangle (to have it
-while gliding) never draws outside it. Cells outside every
+rows lower (or higher), clipped to its rectangle. An image moves with the
+offset and clips to the bounding box of every rectangle on its anchor row (an
+image may span rectangles, such as the history beside a side panel and below
+it), never to just one of them. At rest nothing moves or clips: cells and
+images draw exactly as without the mode, so an application placing an image
+past a rectangle to have it while gliding must crop it again at rest. Cells outside every
 rectangle (a sidebar, a panel, status lines, the cursor's prompt) never move.
 Images anchored in a rectangle move with it. Selection, search highlights and
 the cursor are keyed by grid cells, so they move with their cells.
@@ -104,8 +107,8 @@ An image crossing an edge of the region keeps showing in the strip the glide
 uncovers. When it leaves through the top, st keeps the rows that left on the
 copied lines. When it leaves through the bottom its anchor is still inside
 the region, so the application places it uncropped below the region's last
-row (the rectangle clips it); the Exocortex TUI does this while mode 2032 is
-on.
+row (the rectangles clip it while they move) and crops it again once the
+glide is over; the Exocortex TUI does this.
 
 ### Panels and re-wrapped text
 
