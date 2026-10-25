@@ -41,7 +41,7 @@ outdated spare is killed. It then sends a `spawn` request over
 ```
 spawn\n
 cwd=DIR\0
-environ\0 NAME=VALUE\0 ... \0   (`env -0` output, then an empty field)
+environ\0 NAME=VALUE\0 ... \0   (the launcher's environ, then an empty field)
 env=NAME=VALUE\0               (repeatable; the launcher sends ST_INHERIT_VIRTUAL_ENV)
 title=TITLE\0
 arg=WORD\0                     (repeatable, in order; like st -e)
@@ -61,26 +61,63 @@ Requests are accepted only once.
 
 ## Launcher flow
 
-1. `aerospace subscribe focus-changed window-detected` writes into a FIFO
-   shared with a 250 ms ticker, so a blocking `read` wakes on whichever comes
-   first. Its first line is the focus at invocation time, which gives the
-   target workspace.
-2. Claim the spare. Without one, boot `st --spare-slot` on a private slot,
-   wait for it to publish, then run `aerospace list-apps`: AeroSpace skips
+`st-aerospace-launch` is a small C program (`macos/aerospace_launch.c`; the
+protocol and parsing helpers are in `macos/aerospace.c`, unit-tested in
+`tests/test_macos_aerospace.c`). It talks to AeroSpace's server socket,
+`/tmp/bobko.aerospace-$USER.sock` (`ST_AEROSPACE_SOCKET` overrides it),
+itself: each `aerospace` CLI call is a Swift process costing tens of
+milliseconds, and the shell launcher it replaces spent ~100 ms in such
+processes and `mktemp`/`mkfifo`/`nc`/`env` before the spawn request even
+reached st. Nothing is started on the warm path.
+
+AeroSpace's protocol (`Sources/Cli/ServerConnection.swift`,
+`Sources/AppBundle/server.swift` in AeroSpace): the client sends its
+protocol version as a native-endian `UInt32` and reads the server's; then
+every message is a native-endian `UInt32` length and JSON. A request is
+`{"args":[...],"stdin":"","windowId":ID,"workspace":NAME}`, with
+`AEROSPACE_WINDOW_ID`/`AEROSPACE_WORKSPACE` forwarded like the CLI does, or
+explicit `null`s; the answer is `{"exitCode":N,"stdout":"...","stderr":"..."}`.
+After `subscribe` a connection only streams events, so the launcher keeps
+two: one subscription, one for commands. Both are opened (and the subscribe
+request sent, pipelined behind the version) before anything else.
+
+1. `subscribe focus-changed window-detected`. Its first event is the focus
+   at invocation time, which gives the target workspace, and proves the
+   subscription is registered before the window can appear. Without the
+   server the launch fails at once, before taking the spare.
+2. `--inherit-cwd`: `list-windows --focused` names the focused st's PID;
+   its PTY child comes from `proc_listchildpids`, the child's directory from
+   `proc_pidinfo(PROC_PIDVNODEPATHINFO)`, the venv from
+   `~/.cache/st-shell-context/ST-CHILD.venv`.
+3. Claim the spare. Without one, `posix_spawn` `st --spare-slot` on a
+   private slot (in its own session, in `$HOME`, no inherited descriptors),
+   wait for it to publish, then send `list-apps`: AeroSpace skips
    registering an app that is busy launching, and that query makes it look
    again.
-3. Send `spawn`, then wait for `window-detected` with the spare's window ID.
-   If none arrives, query `list-windows --pid` after 0.5, 1, 2 and 4 s.
-   Every CLI command runs a session that cancels AeroSpace's in-flight full
-   refresh, where new windows are found, so polling faster delays detection
-   rather than speeding it up.
-4. `aerospace focus` (or `move-node-to-workspace --focus-follows-window` when
-   AeroSpace placed the window on another workspace), then `SIGUSR1`.
-5. Boot the next spare. Once it publishes, run `aerospace list-apps` so
-   AeroSpace registers it now, while it is idle. A registered app's new
-   window is reported within tens of milliseconds.
+4. Send `spawn` (one write on the control socket), then `poll()` the event
+   stream for `window-detected` with the spare's window ID. If none
+   arrives, query `list-windows --pid` after 2, 4, 8 and 16 ticks (0.5, 1,
+   2 and 4 s; `ST_AEROSPACE_TICK`), giving up after 24 ticks
+   (`ST_AEROSPACE_MAX_TICKS`). Every command runs a session that cancels
+   AeroSpace's in-flight full refresh, where new windows are found, so
+   polling faster delays detection rather than speeding it up.
+5. `focus --window-id` (or `move-node-to-workspace --focus-follows-window`
+   when AeroSpace placed the window on another workspace), then `SIGUSR1`.
+   Any failure after the claim stops the claimed st, so no invisible window
+   is left behind.
+6. Boot the next spare. Once it publishes, send `list-apps` so AeroSpace
+   registers it now, while it is idle. A registered app's new window is
+   reported within tens of milliseconds. The window is already focused and
+   revealed; only the launcher process lingers meanwhile.
 
-With a warm spare a launch takes ~0.2 s from key press to a focused,
-revealed window (a cold launch, including AeroSpace detection, used to take
-0.7–1.4 s). The shell starts in parallel with AeroSpace's detection and
+`ST_AEROSPACE_TRACE=1` prints each step's time since the process started
+(including whatever exec'd the launcher) to stderr.
+
+The launcher itself takes about a millisecond from `main` to the spawn
+request and one round trip per AeroSpace command, so a warm launch costs
+AeroSpace's detection plus its focus round trip.
+
+With a warm spare and the earlier shell launcher a launch took ~0.2 s from
+key press to a focused, revealed window (a cold launch, including AeroSpace
+detection, used to take 0.7–1.4 s). The shell starts in parallel with AeroSpace's detection and
 focus.

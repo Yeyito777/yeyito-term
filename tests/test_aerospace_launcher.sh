@@ -4,33 +4,42 @@ set -eu
 
 CDPATH=
 repo=$(cd -- "$(dirname -- "$0")/.." && pwd)
+launcher=${ST_AEROSPACE_LAUNCHER:-$repo/st-aerospace-launch}
+if [ "$(uname -s)" != Darwin ]; then
+	printf 'AeroSpace launcher tests skipped: macOS only\n'
+	exit 0
+fi
 # Not $TMPDIR: on macOS it is so long that the spares' control socket paths
 # would exceed the 104-byte sun_path limit.
 tmp=/tmp/st-aerospace-launcher-test.$$
 mkdir -p "$tmp/home" "$tmp/bin"
 tmp=$(cd "$tmp" && pwd -P)
 log=$tmp/aerospace.log
-pids=$tmp/st.pids
 ready=$tmp/ready
 reveal_log=$tmp/reveal.log
 events=$tmp/events
 slot=$tmp/home/.runtime/st/spare
+socket=$tmp/aerospace.sock
 mkdir -p "$ready"
 : > "$log"
-: > "$pids"
 : > "$reveal_log"
 : > "$events"
 
+# Every process this test leaves running names $tmp on its command line:
+# the fake server, the fake spares (also those the launcher started in their
+# own session, out of reach of this shell), their listeners and sleepers, the
+# cwd stand-ins and the watchdog. None of them polls, and each one also ends
+# on its own (a timeout, or the server noticing this shell is gone).
 cleanup()
 {
-	if [ -f "$pids" ]; then
-		while IFS= read -r pid; do
-			kill "$pid" 2>/dev/null || true
-		done < "$pids"
-	fi
+	trap - EXIT
+	pkill -f "$tmp/" 2>/dev/null || true
 	rm -rf "$tmp"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 1' INT TERM HUP
+# A hung test must not keep anything running: give up after five minutes.
+perl -e 'sleep 300; kill TERM => $ARGV[0]' "$$" "$tmp/watchdog" &
 
 # A spare like `st --spare`: publish the slot, serve one spawn request on the
 # control socket, then "open" the window, which AeroSpace reports as an event.
@@ -43,12 +52,12 @@ case "${1:-}" in
 	--spare-slot) slot=$2 ;;
 	*) exit 64 ;;
 esac
-printf '%s\n' "$$" >> "$FAKE_ST_PIDS"
 dir=$runtime/st-$$
 mkdir -p "$dir"
 # Not `nc -lU`: macOS nc in listen mode drops unread input when the sender
 # closes right after writing (requests carry a ~3 KiB environment).
 perl -MIO::Socket::UNIX -e '
+	alarm 120;
 	my $server = IO::Socket::UNIX->new(Type => SOCK_STREAM(),
 	    Local => $ARGV[0], Listen => 1) or die "listen: $!";
 	my $client = $server->accept or die "accept: $!";
@@ -58,7 +67,6 @@ perl -MIO::Socket::UNIX -e '
 	print $out $request;
 ' "$dir/control.sock" "$dir/request" &
 listener=$!
-printf '%s\n' "$listener" >> "$FAKE_ST_PIDS"
 while [ ! -S "$dir/control.sock" ]; do sleep 0.01; done
 stamp=$(stat -f '%i:%m' "$0" 2>/dev/null || stat -c '%i:%Y' "$0")
 printf '%s %s %s\n' "$$" "$$" "$stamp" > "$slot.$$.tmp"
@@ -70,6 +78,7 @@ fi
 rm -f "$slot.$$.tmp"
 trap 'printf "reveal %s\n" "$$" >> "$FAKE_REVEAL_LOG"' USR1
 wait "$listener"
+[ -s "$dir/request" ] || exit 0
 tr '\0' '\n' < "$dir/request" > "$dir/fields"
 # Like st, ignore a request that does not end with its end field.
 [ "$(tail -n 1 "$dir/fields")" = end ] || exit 65
@@ -81,82 +90,53 @@ sed -n 's/^ST_TEST_LAUNCHER_ONLY=//p' "$dir/fields" > "$FAKE_ST_READY_DIR/$$.mar
 sed -n 's/^title=//p' "$dir/fields" > "$FAKE_ST_READY_DIR/$$.title"
 sed -n 's/^arg=//p' "$dir/fields" > "$FAKE_ST_READY_DIR/$$.args"
 : > "$FAKE_ST_READY_DIR/$$"
-printf '{"_event":"window-detected","appBundleId":"io.yeyito.st","appName":"st","windowId":%s,"workspace":"%s"}\n' \
-	"$$" "$(cat "$FAKE_DETECT_WORKSPACE")" >> "$FAKE_EVENTS"
-while :; do
-	sleep 0.05
+# The fake AeroSpace server turns this into a window-detected event.
+printf 'detected %s\n' "$$" >> "$FAKE_EVENTS"
+# Wait for the reveal without forking: a trapped USR1 interrupts `wait`.
+# The sleeper bounds the lifetime of a spare whose test died.
+perl -e 'sleep 120' "$dir" &
+sleeper=$!
+while kill -0 "$sleeper" 2>/dev/null; do
+	wait "$sleeper" || :
 done
 EOF
 
-# Window ids are the owning fake st's PID.
-cat > "$tmp/bin/aerospace" <<'EOF'
-#!/bin/sh
-set -eu
-
-command=$1
-shift
-case "$command" in
-	subscribe)
-		printf '{"_event":"focus-changed","windowId":1,"workspace":"TEST"}\n'
-		exec tail -n +1 -f "$FAKE_EVENTS"
-		;;
-	list-workspaces)
-		printf 'TEST\n'
-		;;
-	list-apps)
-		printf 'list-apps\n' >> "$FAKE_AEROSPACE_LOG"
-		;;
-	list-windows)
-		if [ "${1:-}" = --focused ]; then
-			printf '%s\n' "${FAKE_FOCUSED:-}"
-			exit 0
-		fi
-		pid=
-		while [ "$#" -gt 0 ]; do
-			if [ "$1" = --pid ]; then
-				pid=$2
-				break
-			fi
-			shift
-		done
-		[ -n "$pid" ] || exit 64
-		printf 'query %s\n' "$pid" >> "$FAKE_AEROSPACE_LOG"
-		if [ -f "$FAKE_ST_READY_DIR/$pid" ] && kill -0 "$pid" 2>/dev/null; then
-			printf '%s %s\n' "$pid" "$(cat "$FAKE_DETECT_WORKSPACE")"
-		fi
-		;;
-	move-node-to-workspace)
-		[ "$1" = --focus-follows-window ] && [ "$2" = --window-id ]
-		printf 'move %s %s\n' "$3" "$4" >> "$FAKE_AEROSPACE_LOG"
-		;;
-	focus)
-		[ "$1" = --window-id ]
-		printf 'focus %s\n' "$2" >> "$FAKE_AEROSPACE_LOG"
-		;;
-	*)
-		exit 64
-		;;
-esac
-EOF
-
-chmod +x "$tmp/bin/st" "$tmp/bin/aerospace"
-export FAKE_ST_PIDS="$pids"
+chmod +x "$tmp/bin/st"
+export FAKE_TEST_PID=$$
 export FAKE_AEROSPACE_LOG="$log"
 export FAKE_ST_READY_DIR="$ready"
 export FAKE_REVEAL_LOG="$reveal_log"
 export FAKE_EVENTS="$events"
-# Where AeroSpace places new windows; a file, as spares boot long before use.
+# The server's state lives in files: it runs for the whole test, and spares
+# boot long before they are used. Window ids are the owning fake st's PID.
 export FAKE_DETECT_WORKSPACE="$tmp/detect-workspace"
+export FAKE_FOCUS_WORKSPACE="$tmp/focus-workspace"
+export FAKE_FOCUSED="$tmp/focused"
+export FAKE_NO_DETECT="$tmp/no-detect"
+export FAKE_FAIL_FOCUS="$tmp/fail-focus"
 printf 'TEST\n' > "$FAKE_DETECT_WORKSPACE"
+printf 'TEST\n' > "$FAKE_FOCUS_WORKSPACE"
+: > "$FAKE_FOCUSED"
+perl "$repo/tests/fake_aerospace_server.pl" "$socket" &
+server=$!
+attempt=0
+while [ ! -S "$socket" ]; do
+	attempt=$((attempt + 1))
+	if [ "$attempt" -gt 500 ] || ! kill -0 "$server" 2>/dev/null; then
+		printf 'fake AeroSpace server did not start\n' >&2
+		exit 1
+	fi
+	sleep 0.01
+done
 
 run_launcher()
 {
 	HOME=$tmp/home \
-	AEROSPACE_BIN=$tmp/bin/aerospace \
+	ST_AEROSPACE_SOCKET=$socket \
 	ST_BINARY=$tmp/bin/st \
-	ST_AEROSPACE_TICK=0.02 \
-	ST_AEROSPACE_MAX_TICKS=500 \
-	"$repo/scripts/st-aerospace-launch" "$@"
+	ST_AEROSPACE_TICK=${ST_AEROSPACE_TICK:-0.02} \
+	ST_AEROSPACE_MAX_TICKS=${ST_AEROSPACE_MAX_TICKS:-500} \
+	"$launcher" "$@"
 }
 
 # The window of the most recent launch (focused or moved with focus).
@@ -311,6 +291,118 @@ run_launcher
 
 printf 'AeroSpace launcher spare reuse, replacement and request tests passed\n'
 
+# Workspace names survive JSON both ways: quotes, backslashes, non-ASCII.
+name='wörk "1" \ ✓'
+printf '%s\n' "$name" > "$FAKE_FOCUS_WORKSPACE"
+printf '%s\n' "$name" > "$FAKE_DETECT_WORKSPACE"
+placement()
+{
+	grep -E '^(focus|move) ' "$log" | tail -n 1
+}
+run_launcher
+[ "$(placement)" = "focus $(launched)" ]
+printf 'OTHER\n' > "$FAKE_DETECT_WORKSPACE"
+run_launcher
+[ "$(placement)" = "move $(launched) $name" ]
+printf 'TEST\n' > "$FAKE_FOCUS_WORKSPACE"
+printf 'TEST\n' > "$FAKE_DETECT_WORKSPACE"
+wait_for_reveal "$(launched)"
+
+# The window-detected event alone completes a launch: with the first
+# fallback query 10 s away, none is made.
+before=$(grep -c '^query' "$log" || true)
+ST_AEROSPACE_TICK=5
+run_launcher
+unset ST_AEROSPACE_TICK
+[ "$(grep -c '^query' "$log")" -eq "$before" ]
+wait_for_reveal "$(launched)"
+
+# Requests carry AeroSpace's window/workspace context, like its CLI, and
+# never leave the fields out (the server warns about that).
+(export AEROSPACE_WINDOW_ID=42 AEROSPACE_WORKSPACE=W; run_launcher --inherit-cwd)
+[ "$(grep '^focused-context' "$log" | tail -n 1)" = 'focused-context 42 W' ]
+(unset AEROSPACE_WINDOW_ID AEROSPACE_WORKSPACE; run_launcher --inherit-cwd)
+[ "$(grep '^focused-context' "$log" | tail -n 1)" = 'focused-context null null' ]
+if grep -q '^incomplete-request\|^unexpected' "$log"; then
+	printf 'launcher sent requests the server did not expect:\n' >&2
+	cat "$log" >&2
+	exit 1
+fi
+
+expect_failure()
+{
+	expected=$1
+	shift
+	status=0
+	"$@" 2> "$tmp/stderr" || status=$?
+	if [ "$status" -ne 1 ] || ! grep -qF "$expected" "$tmp/stderr"; then
+		printf 'expected exit 1 and <%s>, got %s:\n' "$expected" "$status" >&2
+		cat "$tmp/stderr" >&2
+		exit 1
+	fi
+}
+
+wait_until_dead()
+{
+	attempt=0
+	while kill -0 "$1" 2>/dev/null; do
+		attempt=$((attempt + 1))
+		if [ "$attempt" -gt 200 ]; then
+			printf 'st process %s was not stopped\n' "$1" >&2
+			exit 1
+		fi
+		sleep 0.01
+	done
+}
+
+expect_unrevealed()
+{
+	if grep -q "^reveal $1\$" "$reveal_log"; then
+		printf 'st process %s was revealed after a failed launch\n' "$1" >&2
+		exit 1
+	fi
+}
+
+# Without AeroSpace the launch fails before it takes the spare.
+holder=$(spare_holder)
+expect_failure "Can't connect to the AeroSpace server" \
+	env HOME="$tmp/home" ST_AEROSPACE_SOCKET="$tmp/missing.sock" \
+	ST_BINARY="$tmp/bin/st" "$launcher"
+[ "$(spare_holder)" = "$holder" ]
+expect_live_spare
+
+# A window AeroSpace never reports: queries back off (2, 4, 8 ticks), then
+# the launch fails and the claimed st is stopped, not left invisible.
+: > "$FAKE_NO_DETECT"
+before=$(grep -c '^query' "$log" || true)
+ST_AEROSPACE_MAX_TICKS=10
+expect_failure "AeroSpace did not register the st window for PID $holder" \
+	run_launcher
+unset ST_AEROSPACE_MAX_TICKS
+rm -f "$FAKE_NO_DETECT"
+[ "$(($(grep -c '^query' "$log") - before))" -eq 3 ]
+wait_until_dead "$holder"
+expect_unrevealed "$holder"
+
+# A failed focus also stops the st it claimed.
+run_launcher
+holder=$(spare_holder)
+: > "$FAKE_FAIL_FOCUS"
+expect_failure "AeroSpace could not focus st window $holder" run_launcher
+rm -f "$FAKE_FAIL_FOCUS"
+wait_until_dead "$holder"
+expect_unrevealed "$holder"
+
+# Usage errors exit 64.
+status=0
+run_launcher --bogus 2>/dev/null || status=$?
+[ "$status" -eq 64 ]
+status=0
+run_launcher --cwd 2>/dev/null || status=$?
+[ "$status" -eq 64 ]
+
+printf 'AeroSpace launcher protocol and failure tests passed\n'
+
 check_directory()
 {
 	expected=$1
@@ -328,26 +420,23 @@ check_directory "$tmp" --cwd "$tmp"
 # A missing directory falls back to home rather than failing the launch.
 check_directory "$tmp/home" --cwd "$tmp/missing"
 
-# No focus and non-terminal focus both retain the normal home-directory launch.
-export FAKE_FOCUSED=
-check_directory "$tmp/home" --inherit-cwd
-export FAKE_FOCUSED="com.apple.finder $$"
-check_directory "$tmp/home" --inherit-cwd
+focused()
+{
+	printf '%s\n' "$1" > "$FAKE_FOCUSED"
+}
 
-# The launcher reads the focused shell's cwd with macOS's /usr/sbin/lsof.
-# Hosts without it (Linux CI) cannot exercise inheritance; skip, don't fail.
-if [ ! -x /usr/sbin/lsof ]; then
-	printf 'AeroSpace launcher cwd inheritance tests skipped: no /usr/sbin/lsof\n'
-	exit 0
-fi
+# No focus and non-terminal focus both retain the normal home-directory launch.
+focused ''
+check_directory "$tmp/home" --inherit-cwd
+focused "com.apple.finder $$"
+check_directory "$tmp/home" --inherit-cwd
 
 # Real parent/PTY-child stand-in: only the child changes directory, so reading
 # the terminal parent's cwd would fail this test. Include spaces and punctuation.
 directory="$tmp/project with spaces ' and \$"
 mkdir -p "$directory"
-sh -c 'sh -c '\''cd "$1"; exec sleep 60'\'' sh "$1" & wait' sh "$directory" &
+sh -c 'sh -c '\''cd "$1"; exec perl -e "sleep 120" "$1"'\'' sh "$1" & wait' sh "$directory" &
 terminal_pid=$!
-printf '%s\n' "$terminal_pid" >> "$pids"
 attempt=0
 child_pid=
 while [ "$attempt" -lt 100 ]; do
@@ -361,8 +450,7 @@ while [ "$attempt" -lt 100 ]; do
 	sleep 0.01
 done
 [ -n "$child_pid" ]
-printf '%s\n' "$child_pid" >> "$pids"
-export FAKE_FOCUSED="io.yeyito.st $terminal_pid"
+focused "io.yeyito.st $terminal_pid"
 check_directory "$directory" --inherit-cwd
 venv="$directory/venv with spaces"
 mkdir -p "$venv/bin" "$tmp/home/.cache/st-shell-context"
@@ -375,10 +463,10 @@ check_directory "$directory" --inherit-cwd
 check_directory "$tmp/home"
 [ -z "$(cat "$ready/$pid.venv")" ]
 # Other windows must not inherit the previously focused terminal's venv.
-export FAKE_FOCUSED="com.apple.finder $$"
+focused "com.apple.finder $$"
 check_directory "$tmp/home" --inherit-cwd
 [ -z "$(cat "$ready/$pid.venv")" ]
-export FAKE_FOCUSED="io.yeyito.st $terminal_pid"
+focused "io.yeyito.st $terminal_pid"
 # Deactivation and a deleted venv both launch a clean shell.
 printf '\n' > "$context"
 check_directory "$directory" --inherit-cwd
