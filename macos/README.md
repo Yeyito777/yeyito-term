@@ -20,6 +20,8 @@ not use XQuartz or link against X11.
 - `spare.c` and `spare.h` implement the warm spare's spawn-request parsing and
   single-slot protocol used by `st-aerospace-launch` (see
   `reference/warm-spare.md`).
+- `control.c` and `control.h` read one complete message from the per-instance
+  control socket (`st-notify`, `st-save-cmd`, spare spawn requests).
 - `native.h` is the small C bridge used by platform-neutral modules such as the
   command-line overlay.
 - `keysyms.h` provides the minimal X11-compatible key values needed by shared

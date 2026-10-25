@@ -46,7 +46,17 @@ esac
 printf '%s\n' "$$" >> "$FAKE_ST_PIDS"
 dir=$runtime/st-$$
 mkdir -p "$dir"
-nc -lU "$dir/control.sock" > "$dir/request" &
+# Not `nc -lU`: macOS nc in listen mode drops unread input when the sender
+# closes right after writing (requests carry a ~3 KiB environment).
+perl -MIO::Socket::UNIX -e '
+	my $server = IO::Socket::UNIX->new(Type => SOCK_STREAM(),
+	    Local => $ARGV[0], Listen => 1) or die "listen: $!";
+	my $client = $server->accept or die "accept: $!";
+	local $/;
+	my $request = <$client>;
+	open(my $out, ">", $ARGV[1]) or die "open: $!";
+	print $out $request;
+' "$dir/control.sock" "$dir/request" &
 listener=$!
 printf '%s\n' "$listener" >> "$FAKE_ST_PIDS"
 while [ ! -S "$dir/control.sock" ]; do sleep 0.01; done
@@ -61,10 +71,13 @@ rm -f "$slot.$$.tmp"
 trap 'printf "reveal %s\n" "$$" >> "$FAKE_REVEAL_LOG"' USR1
 wait "$listener"
 tr '\0' '\n' < "$dir/request" > "$dir/fields"
+# Like st, ignore a request that does not end with its end field.
+[ "$(tail -n 1 "$dir/fields")" = end ] || exit 65
 sed -n '1p' "$dir/fields" > "$FAKE_ST_READY_DIR/$$.command"
 sed -n 's/^cwd=//p' "$dir/fields" > "$FAKE_ST_READY_DIR/$$.cwd"
 sed -n 's/^env=ST_INHERIT_VIRTUAL_ENV=//p' "$dir/fields" > "$FAKE_ST_READY_DIR/$$.venv"
-sed -n 's/^env=PATH=//p' "$dir/fields" > "$FAKE_ST_READY_DIR/$$.path"
+sed -n 's/^PATH=//p' "$dir/fields" > "$FAKE_ST_READY_DIR/$$.path"
+sed -n 's/^ST_TEST_LAUNCHER_ONLY=//p' "$dir/fields" > "$FAKE_ST_READY_DIR/$$.marker"
 sed -n 's/^title=//p' "$dir/fields" > "$FAKE_ST_READY_DIR/$$.title"
 sed -n 's/^arg=//p' "$dir/fields" > "$FAKE_ST_READY_DIR/$$.args"
 : > "$FAKE_ST_READY_DIR/$$"
@@ -268,9 +281,15 @@ while kill -0 "$holder" 2>/dev/null; do
 done
 expect_live_spare
 
-# Title, command and the caller's PATH reach the spawned terminal.
-(PATH="$tmp/extra:$PATH"; run_launcher -T 'a title' -e /bin/echo 'two words')
+# Title, command and the caller's environment reach the spawned terminal.
+(PATH="$tmp/extra:$PATH"; export ST_TEST_LAUNCHER_ONLY=yes
+	run_launcher -T 'a title' -e /bin/echo 'two words')
 pid=$(launched)
+if [ "$(cat "$ready/$pid.marker")" != yes ]; then
+	printf 'launcher environment was not forwarded to %s; request:\n' "$pid" >&2
+	cat "$tmp/home/.runtime/st/st-$pid/fields" >&2
+	exit 1
+fi
 [ "$(cat "$ready/$pid.title")" = 'a title' ]
 [ "$(sed -n '1p' "$ready/$pid.args")" = /bin/echo ]
 [ "$(sed -n '2p' "$ready/$pid.args")" = 'two words' ]
