@@ -37,6 +37,15 @@ int spare_parse_request(const char *payload, size_t length,
     SpareRequest *request);
 void spare_free_request(SpareRequest *request);
 
+/* The whole "spawn" message a launcher sends: "spawn\n", then cwd= (if
+ * cwd), an environ block of environment (if not NULL; entries that are not
+ * NAME=VALUE are left out, the spare would reject them), env= for each of
+ * env (NULL-terminated, may be NULL), title= (if non-empty), arg= for each
+ * of argv (NULL-terminated, may be NULL) and end. Returns a malloc'd buffer
+ * of *length bytes, or NULL. */
+char *spare_build_request(const char *cwd, char *const *environment,
+    char *const *env, const char *title, char *const *argv, size_t *length);
+
 /* Replace (with an environ block) or extend this process's environment. */
 void spare_apply_environment(const SpareRequest *request);
 

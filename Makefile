@@ -17,7 +17,13 @@ endif
 OBJ += render/image_occlusion.o render/smoothscroll.o render/smoothscroll_term.o
 APP = .build/st.app
 
-all: st install-hint
+ifeq ($(UNAME_S),Darwin)
+# The AeroSpace launcher, a separate small program bundled with the app.
+LAUNCHER = st-aerospace-launch
+LAUNCHER_OBJ = macos/aerospace_launch.o macos/aerospace.o macos/spare.o
+endif
+
+all: st $(LAUNCHER) install-hint
 
 config.h:
 	cp config.def.h config.h
@@ -46,6 +52,10 @@ macos/locale.o: macos/locale.c macos/locale.h
 	$(CC) $(STCFLAGS) -c macos/locale.c -o macos/locale.o
 macos/spare.o: macos/spare.c macos/spare.h
 	$(CC) $(STCFLAGS) -c macos/spare.c -o macos/spare.o
+macos/aerospace.o: macos/aerospace.c macos/aerospace.h config.mk
+	$(CC) $(STCFLAGS) -c macos/aerospace.c -o macos/aerospace.o
+macos/aerospace_launch.o: macos/aerospace_launch.c macos/aerospace.h macos/spare.h config.mk
+	$(CC) $(STCFLAGS) -c macos/aerospace_launch.c -o macos/aerospace_launch.o
 macos/control.o: macos/control.c macos/control.h
 	$(CC) $(STCFLAGS) -c macos/control.c -o macos/control.o
 macos/emoji.o: macos/emoji.c macos/emoji.h st.h
@@ -64,16 +74,20 @@ $(OBJ): config.h config.mk
 st: $(OBJ)
 	$(CC) -o $@ $(OBJ) $(STLDFLAGS)
 
-app: st macos/Info.plist macos/st.icns
+st-aerospace-launch: $(LAUNCHER_OBJ)
+	$(CC) -o $@ $(LAUNCHER_OBJ) $(LDFLAGS)
+
+app: st st-aerospace-launch macos/Info.plist macos/st.icns
 	rm -rf $(APP)
 	mkdir -p $(APP)/Contents/MacOS $(APP)/Contents/Resources/bin
 	cp -f st $(APP)/Contents/MacOS/st
 	chmod 755 $(APP)/Contents/MacOS/st
 	cp -f macos/Info.plist $(APP)/Contents/Info.plist
 	cp -f macos/st.icns $(APP)/Contents/Resources/st.icns
-	cp -f scripts/st-notify scripts/st-save-cmd scripts/st-aerospace-launch scripts/st-shell-context.zsh $(APP)/Contents/Resources/bin/
+	cp -f scripts/st-notify scripts/st-save-cmd scripts/st-shell-context.zsh st-aerospace-launch $(APP)/Contents/Resources/bin/
 	chmod 755 $(APP)/Contents/Resources/bin/st-notify $(APP)/Contents/Resources/bin/st-save-cmd \
 		$(APP)/Contents/Resources/bin/st-aerospace-launch
+	codesign --force --sign - $(APP)/Contents/Resources/bin/st-aerospace-launch
 	codesign --force --deep --sign - $(APP)
 
 install-app: app
@@ -101,6 +115,7 @@ install-hint:
 clean:
 	rm -f st $(OBJ) st-$(VERSION).tar.gz
 	rm -f x.o sshind.o notif.o macos/backend.o macos/renderer.o macos/pasteboard5522.o
+	rm -f st-aerospace-launch macos/aerospace_launch.o macos/aerospace.o
 	rm -f a.out
 	$(MAKE) clean-tests
 	rm -rf .build
@@ -119,9 +134,10 @@ dist: clean
 	cp -R macos/README.md macos/Info.plist macos/backend.m macos/pasteboard5522.h macos/pasteboard5522.m macos/keysyms.h macos/native.h macos/reveal.h macos/text_input.h\
 		macos/renderer.h macos/renderer.m macos/glyph_layout.h macos/emoji.h macos/emoji.c\
 		macos/pty.h macos/pty.m macos/locale.h macos/locale.c macos/spare.h macos/spare.c macos/control.h macos/control.c\
+		macos/aerospace.h macos/aerospace.c macos/aerospace_launch.c\
 		macos/st-icon.png macos/st.icns\
 		st-$(VERSION)/macos
-	cp -R scripts/st-notify scripts/st-save-cmd scripts/st-aerospace-launch scripts/st-shell-context.zsh st-$(VERSION)/scripts
+	cp -R scripts/st-notify scripts/st-save-cmd scripts/st-shell-context.zsh st-$(VERSION)/scripts
 	tar -cf - st-$(VERSION) | gzip > st-$(VERSION).tar.gz
 	rm -rf st-$(VERSION)
 
@@ -294,6 +310,12 @@ tests/test_macos_spare.o: tests/test_macos_spare.c tests/test.h macos/spare.h
 test_macos_spare: tests/test_macos_spare.o macos/spare.o
 	$(CC) -o tests/test_macos_spare tests/test_macos_spare.o macos/spare.o
 
+tests/test_macos_aerospace.o: tests/test_macos_aerospace.c tests/test.h macos/aerospace.h macos/spare.h
+	$(CC) $(TESTFLAGS) -c tests/test_macos_aerospace.c -o tests/test_macos_aerospace.o
+
+test_macos_aerospace: tests/test_macos_aerospace.o macos/aerospace.o macos/spare.o
+	$(CC) -o tests/test_macos_aerospace tests/test_macos_aerospace.o macos/aerospace.o macos/spare.o
+
 tests/test_macos_control.o: tests/test_macos_control.c tests/test.h macos/control.h
 	$(CC) $(TESTFLAGS) -c tests/test_macos_control.c -o tests/test_macos_control.o
 
@@ -339,7 +361,7 @@ test_gpu_regressions: st
 	@./tests/test_cursor_rendering.sh
 	@./tests/test_image_occlusion.sh
 
-test_aerospace_launcher:
+test_aerospace_launcher: $(LAUNCHER)
 	@./tests/test_aerospace_launcher.sh
 ifeq ($(UNAME_S),Darwin)
 	@zsh -f ./tests/test_shell_context.zsh
@@ -347,7 +369,7 @@ endif
 
 test: test_image_occlusion test_smoothscroll test_vimnav test_sshind test_scrollback test_cwd test_notif test_persist test_search test_cmdline_layout test_mode_reset test_sync test_clipboard5522 test_graphics test_aerospace_launcher
 ifeq ($(UNAME_S),Darwin)
-test: test_macos_image_occlusion test_macos_mouse_cursor test_macos_pty test_macos_reveal test_macos_spare test_macos_control test_macos_text_input test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522
+test: test_macos_image_occlusion test_macos_mouse_cursor test_macos_pty test_macos_reveal test_macos_spare test_macos_aerospace test_macos_control test_macos_text_input test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522
 test: test_macos_symbol_input
 endif
 	@echo "Running tests..."
@@ -371,6 +393,7 @@ ifeq ($(UNAME_S),Darwin)
 	@./tests/test_macos_pty
 	@./tests/test_macos_reveal
 	@./tests/test_macos_spare
+	@./tests/test_macos_aerospace
 	@./tests/test_macos_control
 	@./tests/test_macos_text_input
 	@./tests/test_macos_symbol_input
@@ -382,7 +405,7 @@ endif
 
 clean-tests:
 	rm -f tests/test_macos_symbol_input tests/test_macos_symbol_input.o tests/macos_symbol_sender
-	rm -f tests/*.o tests/test_macos_image_occlusion tests/test_macos_mouse_cursor tests/test_image_occlusion tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search tests/test_cmdline_layout tests/test_mode_reset tests/test_sync tests/test_clipboard5522 tests/test_graphics tests/test_smoothscroll tests/test_macos_pty tests/test_macos_reveal tests/test_macos_spare tests/test_macos_control tests/test_macos_text_input tests/test_macos_locale tests/test_macos_glyph_layout tests/test_macos_emoji tests/test_macos_pasteboard5522
+	rm -f tests/*.o tests/test_macos_image_occlusion tests/test_macos_mouse_cursor tests/test_image_occlusion tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search tests/test_cmdline_layout tests/test_mode_reset tests/test_sync tests/test_clipboard5522 tests/test_graphics tests/test_smoothscroll tests/test_macos_pty tests/test_macos_reveal tests/test_macos_spare tests/test_macos_aerospace tests/test_macos_control tests/test_macos_text_input tests/test_macos_locale tests/test_macos_glyph_layout tests/test_macos_emoji tests/test_macos_pasteboard5522
 
-.PHONY: all app install-app uninstall-app install-hint clean dist install uninstall test test_image_occlusion test_smoothscroll test_macos_image_occlusion test_macos_mouse_cursor test_gpu_regressions test_aerospace_launcher test_mode_reset test_sync test_graphics test_macos_pty test_macos_reveal test_macos_spare test_macos_control test_macos_text_input test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522 clean-tests
+.PHONY: all app install-app uninstall-app install-hint clean dist install uninstall test test_image_occlusion test_smoothscroll test_macos_image_occlusion test_macos_mouse_cursor test_gpu_regressions test_aerospace_launcher test_mode_reset test_sync test_graphics test_macos_pty test_macos_reveal test_macos_spare test_macos_aerospace test_macos_control test_macos_text_input test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522 clean-tests
 .PHONY: test_macos_symbol_input

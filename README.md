@@ -30,7 +30,8 @@ make install-app
 
 The app is installed at `~/Applications/st.app`, appears in Spotlight as `st`,
 uses an ordinary macOS window that tiling managers can control, and bundles the
-`st-notify`, `st-save-cmd`, and `st-aerospace-launch` helper scripts.
+`st-notify` and `st-save-cmd` helper scripts and the `st-aerospace-launch`
+launcher.
 The terminal fills the entire window, with no visible title bar or traffic-light
 buttons. Window-manager controls and the Window menu still work.
 
@@ -122,6 +123,13 @@ Other options: `--cwd DIR` starts in `DIR`, `-T TITLE` sets the window title
 and `-e COMMAND [ARG ...]` runs a command instead of the shell, like `st -e`.
 The terminal gets the launcher's environment, so a wrapper can extend `PATH`
 or export variables first.
+
+The launcher is a small C program that talks to AeroSpace's server socket
+(`/tmp/bobko.aerospace-$USER.sock`; `ST_AEROSPACE_SOCKET` overrides it)
+directly instead of running the `aerospace` CLI, and starts no other process
+on the way to a focused window, so it adds only a few milliseconds to a
+launch. `ST_BINARY` overrides the st executable it uses and
+`ST_AEROSPACE_TRACE=1` prints the time of each step to stderr.
 
 Launches are near-instant because the launcher keeps a **warm spare**: an
 `st --spare` that has already done the expensive startup (AppKit, Metal,

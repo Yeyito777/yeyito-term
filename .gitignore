@@ -28,3 +28,5 @@ tests/test_sync
 tests/test_smoothscroll
 tests/test_macos_spare
 tests/test_macos_control
+/st-aerospace-launch
+tests/test_macos_aerospace

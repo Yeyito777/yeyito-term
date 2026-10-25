@@ -17,9 +17,13 @@ not use XQuartz or link against X11.
 - `pty.m` and `pty.h` provide ordered, nonblocking PTY output. AppKit input
   handlers enqueue bytes here so a child that stops reading cannot freeze the
   window.
-- `spare.c` and `spare.h` implement the warm spare's spawn-request parsing and
-  single-slot protocol used by `st-aerospace-launch` (see
+- `spare.c` and `spare.h` implement the warm spare's spawn-request parsing
+  (and building) and single-slot protocol used by `st-aerospace-launch` (see
   `reference/warm-spare.md`).
+- `aerospace_launch.c` is `st-aerospace-launch`, a separate small program
+  bundled in `Resources/bin`; `aerospace.c` and `aerospace.h` hold its
+  testable parts: AeroSpace's socket protocol (framing, requests, events,
+  answers) and the slot/venv helpers.
 - `control.c` and `control.h` read one complete message from the per-instance
   control socket (`st-notify`, `st-save-cmd`, spare spawn requests).
 - `native.h` is the small C bridge used by platform-neutral modules such as the
