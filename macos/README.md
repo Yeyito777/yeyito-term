@@ -7,7 +7,12 @@ not use XQuartz or link against X11.
   mouse input, clipboard integration, terminal drawing adapter, overlays, and
   the local control socket used by the bundled helper scripts.
 - `pasteboard5522.m` and `pasteboard5522.h` bridge native `NSPasteboard` image
-  and text types to Kitty's authenticated OSC 5522 paste-event protocol.
+  and text types to Kitty's authenticated OSC 5522 paste-event protocol. A
+  single image file copied in Finder pastes the file's pixels, not the icon
+  Finder puts beside it: PNG/JPEG/GIF/WebP up to 3 MB and 8000 px as they are,
+  anything else (HEIC, TIFF, rotated photos) decoded upright with ImageIO and
+  re-encoded as JPEG (PNG with alpha) within 2576 px and 3 MB. An image file
+  that cannot be decoded, or several files, fail the read instead.
 - `renderer.m` and `renderer.h` implement the Metal renderer, CoreText glyph
   atlas/font metrics, and cached RGBA textures for Kitty graphics placements.
 - `glyph_layout.h` keeps color-font glyphs sized and centered by their visible
