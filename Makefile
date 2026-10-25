@@ -353,7 +353,7 @@ tests/test_macos_pasteboard5522.o: tests/test_macos_pasteboard5522.m tests/test.
 	$(CC) $(STOBJCFLAGS) -c tests/test_macos_pasteboard5522.m -o tests/test_macos_pasteboard5522.o
 
 test_macos_pasteboard5522: tests/test_macos_pasteboard5522.o macos/pasteboard5522.o clipboard5522.o
-	$(CC) -o tests/test_macos_pasteboard5522 tests/test_macos_pasteboard5522.o macos/pasteboard5522.o clipboard5522.o -framework AppKit
+	$(CC) -o tests/test_macos_pasteboard5522 tests/test_macos_pasteboard5522.o macos/pasteboard5522.o clipboard5522.o -framework AppKit -framework ImageIO
 endif
 
 test_gpu_regressions: st
