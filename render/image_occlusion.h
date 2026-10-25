@@ -14,6 +14,11 @@ typedef struct {
 
 typedef void (*ImageOcclusionDraw)(Glyph, int, int, void *);
 
+/* Grid cells an image may draw on: rows [top, end), columns [left, right). */
+typedef struct {
+	int top, end, left, right;
+} ImageOcclusionClip;
+
 /* Call begin/end once per completed frame, even when no images are visible.
  * Baselines follow Line identity through scrollback and are bounded separately
  * from decoded image memory. A selected image passes a NULL draw callback so
@@ -25,5 +30,13 @@ void image_occlusion_clear(ImageOcclusion *state);
 void image_occlusion_draw(ImageOcclusion *state,
 		const GraphicsPlacementView *placement, int columns, int rows,
 		Line (*line_at)(int), ImageOcclusionDraw draw, void *context);
+/* Like image_occlusion_draw() for an image clipped to `clip` (an image clip
+ * region, OSC 2032 ; k): only the cells it can draw over are remembered and
+ * composited, and a different clip starts a new baseline, so cells the image
+ * never covered (a prompt below the pane it is clipped to) never hide it. */
+void image_occlusion_draw_clipped(ImageOcclusion *state,
+		const GraphicsPlacementView *placement, int columns, int rows,
+		Line (*line_at)(int), ImageOcclusionDraw draw, void *context,
+		const ImageOcclusionClip *clip);
 
 #endif

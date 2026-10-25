@@ -101,6 +101,10 @@ void smoothscroll_drawextra(void);
  * columns [left, right) of row y move (side panels repainted in place stay
  * put); every column of one segment shares the shift/clip of its first. */
 double smoothscroll_shift(int x, int y);
+/* An image anchored at grid cell (x, y) inside an image clip region (OSC
+ * 2032 ; k) never draws outside rows [top, end), columns [left, right). */
+int smoothscroll_image_clip(int x, int y, int *top, int *end, int *left,
+		int *right);
 int smoothscroll_clip(int x, int y, int *top, int *end, int *left,
 		int *right);
 int smoothscroll_span(int y, int *left, int *right);

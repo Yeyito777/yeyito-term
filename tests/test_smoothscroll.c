@@ -1306,6 +1306,113 @@ TEST(images_spanning_rectangles_clip_to_their_bounding_box)
 }
 
 
+/* ---- Image clip regions (OSC 2032 ; k, DECRQM 2033) ---- */
+
+/* The chat pane (rows 0-6, columns 4-11) is a clip region; rows 7-9 are a
+ * prompt below it, columns 0-3 a sidebar. */
+TEST(images_in_clip_regions_never_draw_outside_them)
+{
+	int top, end, left, right;
+
+	app_reset();	/* moving rectangle: rows 0-7, columns 4-11 */
+	osc("k", "1,5,7,12", NULL);
+	frame_at(1000);
+	/* At rest: an image anchored in the pane clips to it ... */
+	smoothscroll_image(altstore[4]);
+	ASSERT(smoothscroll_clip(6, 4, &top, &end, &left, &right));
+	ASSERT_EQ(0, top);
+	ASSERT_EQ(7, end);
+	ASSERT_EQ(4, left);
+	ASSERT_EQ(12, right);
+	ASSERT(NEAR(0.0, smoothscroll_shift(6, 4)));
+	ASSERT(smoothscroll_image_clip(6, 4, &top, &end, &left, &right));
+	ASSERT_EQ(7, end);
+	/* ... images elsewhere (the sidebar, the prompt) do not. */
+	ASSERT(!smoothscroll_clip(1, 4, &top, &end, &left, &right));
+	ASSERT(!smoothscroll_clip(6, 8, &top, &end, &left, &right));
+	smoothscroll_image(NULL);
+	/* Text cells are never clipped by a clip region. */
+	ASSERT(!smoothscroll_clip(6, 4, &top, &end, &left, &right));
+	/* Gliding: the image moves with its rectangle and clips to both. */
+	ndetached = 0;
+	region_scroll(0, 7, 0, -2);	/* two lines kept below: room for -1.5 */
+	osc("o", "-1500", NULL);
+	frame_at(1000);
+	smoothscroll_image(altstore[4]);
+	ASSERT(NEAR(-1.5, smoothscroll_shift(6, 4)));
+	ASSERT(smoothscroll_clip(6, 4, &top, &end, &left, &right));
+	ASSERT_EQ(0, top);
+	ASSERT_EQ(7, end);	/* not the moving rectangle's 8 */
+	ASSERT_EQ(4, left);
+	ASSERT_EQ(12, right);
+	/* An image on a line the scroll pushed out is clipped as before. */
+	ASSERT_EQ(2, ndetached);
+	smoothscroll_image(detachedto[0]);
+	ASSERT(smoothscroll_clip(6, 8, &top, &end, &left, &right));
+	ASSERT_EQ(8, end);
+	smoothscroll_image(NULL);
+	osc("o", "0", NULL);
+}
+
+/* A pane split by a side panel: two clip regions; an image clips to the
+ * bounding box of those on its anchor row. */
+TEST(images_clip_to_the_clip_regions_on_their_row)
+{
+	int top, end, left, right;
+
+	alt_reset(1);
+	smoothscroll_app_mode(1);
+	osc("k", "1,5,8,8", "4,9,8,12");
+	frame_at(1000);
+	smoothscroll_image(altstore[5]);	/* both regions cover row 5 */
+	ASSERT(smoothscroll_clip(5, 5, &top, &end, &left, &right));
+	ASSERT_EQ(0, top);
+	ASSERT_EQ(8, end);
+	ASSERT_EQ(4, left);
+	ASSERT_EQ(12, right);
+	smoothscroll_image(altstore[1]);	/* beside the panel: the left one */
+	ASSERT(smoothscroll_clip(5, 1, &top, &end, &left, &right));
+	ASSERT_EQ(8, right);
+	/* Anchored in the panel's columns above the second region: in none. */
+	ASSERT(!smoothscroll_clip(10, 1, &top, &end, &left, &right));
+	smoothscroll_image(NULL);
+}
+
+TEST(clip_regions_are_replaced_and_cleared_like_the_rest)
+{
+	int top, end, left, right;
+
+	app_reset();
+	osc("k", "1,5,7,12", NULL);
+	ASSERT(smoothscroll_image_clip(6, 4, &top, &end, &left, &right));
+	osc("k", "3,5,4,12", NULL);	/* replaces */
+	ASSERT(!smoothscroll_image_clip(6, 1, &top, &end, &left, &right));
+	ASSERT(smoothscroll_image_clip(6, 3, &top, &end, &left, &right));
+	ASSERT_EQ(2, top);
+	ASSERT_EQ(4, end);
+	osc("k", NULL, NULL);	/* empty: none */
+	ASSERT(!smoothscroll_image_clip(6, 3, &top, &end, &left, &right));
+	osc("k", "x,5,7,12", "7,5,1,12");	/* malformed, inverted: skipped */
+	ASSERT(!smoothscroll_image_clip(6, 3, &top, &end, &left, &right));
+	osc("k", "1,5,99,12", NULL);	/* clamped to the screen */
+	ASSERT(smoothscroll_image_clip(6, 9, &top, &end, &left, &right));
+	ASSERT_EQ(10, end);
+	osc("c", NULL, NULL);
+	ASSERT(!smoothscroll_image_clip(6, 3, &top, &end, &left, &right));
+	osc("k", "1,5,7,12", NULL);
+	smoothscroll_app_mode(0);	/* CSI ? 2032 l, RIS */
+	smoothscroll_app_mode(1);
+	ASSERT(!smoothscroll_image_clip(6, 3, &top, &end, &left, &right));
+	osc("k", "1,5,7,12", NULL);
+	falt = 0;	/* screen switch */
+	ASSERT(!smoothscroll_image_clip(6, 3, &top, &end, &left, &right));
+	falt = 1;
+	/* Without the mode nothing is clipped. */
+	smoothscroll_app_mode(0);
+	osc("k", "1,5,7,12", NULL);
+	ASSERT(!smoothscroll_image_clip(6, 3, &top, &end, &left, &right));
+}
+
 /* A rectangle whose top is inside the region (below a panel) has no kept
  * lines: the strip it uncovers takes the background of the row above it,
  * never bare terminal background. */
@@ -1346,6 +1453,9 @@ TEST_SUITE(smoothscroll_app)
 	RUN_TEST(images_leave_with_their_lines);
 	RUN_TEST(nothing_clips_or_splits_at_rest);
 	RUN_TEST(images_spanning_rectangles_clip_to_their_bounding_box);
+	RUN_TEST(images_in_clip_regions_never_draw_outside_them);
+	RUN_TEST(images_clip_to_the_clip_regions_on_their_row);
+	RUN_TEST(clip_regions_are_replaced_and_cleared_like_the_rest);
 	RUN_TEST(strips_without_kept_lines_take_the_background_of_the_row_beyond);
 }
 

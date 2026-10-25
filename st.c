@@ -2171,6 +2171,16 @@ csihandle(void)
 		ttywrite(buf, len, 0);
 		return;
 	}
+	/* 2033: image clip regions for mode 2032 (OSC 2032 ; k).  Nothing to
+	 * set: permanently set while app-driven smooth scrolling is available,
+	 * permanently reset when it is configured off. */
+	if (csiescseq.priv && csiescseq.arg[0] == 2033 &&
+		csiescseq.mode[0] == '$' && csiescseq.mode[1] == 'p') {
+		len = snprintf(buf, sizeof(buf), "\033[?2033;%d$y",
+			smoothscroll_app_state() < 0 ? 4 : 3);
+		ttywrite(buf, len, 0);
+		return;
+	}
 	if (csiescseq.priv &&
 		(csiescseq.arg[0] == 2026 || csiescseq.arg[0] == 5522) &&
 		csiescseq.mode[0] == '$' && csiescseq.mode[1] == 'p') {

@@ -29,6 +29,8 @@ struct ImageBaseline {
 	int pixel_x;
 	int pixel_y;
 	int natural_size;
+	int clipped;
+	ImageOcclusionClip clip;
 	ImageBaselineCell *cells;
 	size_t celllen;
 	size_t cellcap;
@@ -61,8 +63,13 @@ image_occlusion_end(ImageOcclusion *state)
 
 static int
 baseline_equal(const ImageBaseline *baseline,
-		const GraphicsPlacementView *placement)
+		const GraphicsPlacementView *placement, const ImageOcclusionClip *clip)
 {
+	if (baseline->clipped != !!clip || (clip &&
+	    (baseline->clip.top != clip->top || baseline->clip.end != clip->end ||
+	    baseline->clip.left != clip->left ||
+	    baseline->clip.right != clip->right)))
+		return 0;
 	return baseline->image_id == placement->image_id &&
 	    (placement->image_id || baseline->serial == placement->serial) &&
 	    baseline->placement_id == placement->placement_id &&
@@ -81,12 +88,13 @@ baseline_equal(const ImageBaseline *baseline,
 }
 
 static ImageBaseline *
-baseline_get(ImageOcclusion *state, const GraphicsPlacementView *placement)
+baseline_get(ImageOcclusion *state, const GraphicsPlacementView *placement,
+		const ImageOcclusionClip *clip)
 {
 	ImageBaseline *baseline;
 
 	for (baseline = state->baselines; baseline; baseline = baseline->next)
-		if (baseline_equal(baseline, placement)) {
+		if (baseline_equal(baseline, placement, clip)) {
 			baseline->seen = 1;
 			return baseline;
 		}
@@ -109,6 +117,9 @@ baseline_get(ImageOcclusion *state, const GraphicsPlacementView *placement)
 	baseline->pixel_x = placement->pixel_x;
 	baseline->pixel_y = placement->pixel_y;
 	baseline->natural_size = placement->natural_size;
+	baseline->clipped = !!clip;
+	if (clip)
+		baseline->clip = *clip;
 	baseline->next = state->baselines;
 	state->baselines = baseline;
 	return baseline;
@@ -197,6 +208,16 @@ image_occlusion_draw(ImageOcclusion *state,
 		const GraphicsPlacementView *placement, int columns, int rows,
 		Line (*line_at)(int), ImageOcclusionDraw draw, void *context)
 {
+	image_occlusion_draw_clipped(state, placement, columns, rows, line_at,
+	    draw, context, NULL);
+}
+
+void
+image_occlusion_draw_clipped(ImageOcclusion *state,
+		const GraphicsPlacementView *placement, int columns, int rows,
+		Line (*line_at)(int), ImageOcclusionDraw draw, void *context,
+		const ImageOcclusionClip *clip)
+{
 	ImageBaseline *baseline;
 	ImageBaselineCell *cell;
 	Line line;
@@ -204,7 +225,7 @@ image_occlusion_draw(ImageOcclusion *state,
 
 	if (placement->z < 0)
 		return;
-	baseline = baseline_get(state, placement);
+	baseline = baseline_get(state, placement, clip);
 	/* A selected image is drawn whole, so keep its baseline alive without
 	 * reading cells. Applications decorate the cells under a selected image
 	 * (a cursor-line highlight, for instance); snapshotting them would make
@@ -216,6 +237,12 @@ image_occlusion_draw(ImageOcclusion *state,
 	lastx = MIN(columns, placement->column + placement->columns);
 	firsty = MAX(0, placement->row);
 	lasty = MIN(rows, placement->row + placement->rows);
+	if (clip) {
+		firstx = MAX(firstx, clip->left);
+		lastx = MIN(lastx, clip->right);
+		firsty = MAX(firsty, clip->top);
+		lasty = MIN(lasty, clip->end);
+	}
 	for (y = firsty; y < lasty; y++) {
 		line = line_at(y);
 		if (!line)

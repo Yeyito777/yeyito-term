@@ -86,6 +86,10 @@ static struct {
 	int on;
 	int nrects;
 	AppRect rect[APP_MAXRECTS];
+	/* Image clip regions (OSC 2032 ; k): an image anchored in one never
+	 * draws outside the clip regions on its anchor row, at rest or gliding. */
+	int nclip;
+	AppRect clip[APP_MAXRECTS];
 	/* The offset in rows (positive: drawn lower) is base plus easing terms
 	 * timed by st, so the glide runs at the display's refresh whatever the
 	 * pty delivers; offset is its value this frame. */
@@ -304,6 +308,7 @@ appclear(void)
 {
 	appghostsfree();
 	app.nrects = 0;
+	app.nclip = 0;
 	app.base = app.offset = 0.0;
 	app.nterms = 0;
 	app.rows = trow();
@@ -434,7 +439,35 @@ appoffset(double now)
 	}
 }
 
+/* T,L,B,R arguments from args[2] on (1-based, inclusive), at most
+ * APP_MAXRECTS, clamped to the screen; malformed or empty ones skipped. */
+static int
+parserects(int narg, char **args, AppRect *out)
+{
+	int i, n = 0;
+
+	for (i = 2; i < narg && n < APP_MAXRECTS; i++) {
+		int t, l, b, r;
+		const char *p = args[i];
+
+		if (!parseint(p, &t) || !(p = strchr(p, ',')) ||
+		    !parseint(++p, &l) || !(p = strchr(p, ',')) ||
+		    !parseint(++p, &b) || !(p = strchr(p, ',')) ||
+		    !parseint(++p, &r))
+			continue;
+		t = MAX(1, t);
+		l = MAX(1, l);
+		b = MIN(trow(), b);
+		r = MIN(tcol(), r);
+		if (t > b || l > r)
+			continue;
+		out[n++] = (AppRect){ t - 1, b - 1, l - 1, r };
+	}
+	return n;
+}
+
 /* OSC 2032 ; r ; T,L,B,R ; ...   rectangles (1-based, inclusive)
+ * OSC 2032 ; k ; T,L,B,R ; ...   image clip regions (same form)
  * OSC 2032 ; o ; N               offset N thousandths of a row, no easing
  * OSC 2032 ; m ; dA ; B ; D      move: offset += dA, plus B easing to 0
  *                                over D ms from now (st times it)
@@ -442,7 +475,7 @@ appoffset(double now)
 void
 smoothscroll_app_osc(int narg, char **args)
 {
-	int i, v;
+	int v;
 
 	if (!sst.enabled || !app.on || narg < 2)
 		return;
@@ -451,25 +484,10 @@ smoothscroll_app_osc(int narg, char **args)
 		appclear();
 	switch (args[1][0]) {
 	case 'r':
-		app.nrects = 0;
-		for (i = 2; i < narg && app.nrects < APP_MAXRECTS; i++) {
-			int t, l, b, r;
-			const char *p = args[i];
-
-			if (!parseint(p, &t) || !(p = strchr(p, ',')) ||
-			    !parseint(++p, &l) || !(p = strchr(p, ',')) ||
-			    !parseint(++p, &b) || !(p = strchr(p, ',')) ||
-			    !parseint(++p, &r))
-				continue;
-			t = MAX(1, t);
-			l = MAX(1, l);
-			b = MIN(trow(), b);
-			r = MIN(tcol(), r);
-			if (t > b || l > r)
-				continue;
-			app.rect[app.nrects++] = (AppRect){ t - 1, b - 1,
-			    l - 1, r };
-		}
+		app.nrects = parserects(narg, args, app.rect);
+		break;
+	case 'k':
+		app.nclip = parserects(narg, args, app.clip);
 		break;
 	case 'o':
 		if (narg < 3 || !parseint(args[2], &v))
@@ -1095,8 +1113,80 @@ smoothscroll_shift(int x, int y)
 	return 0.0;
 }
 
+/* The clip regions an image anchored at grid cell (x, y) may not draw
+ * outside: the bounding box of every clip region on row y, when (x, y) lies
+ * in one of them.  Images on copied lines (rows outside the grid) and images
+ * outside every clip region are not clipped.  Only while the mode's state
+ * belongs to this geometry (a resize or screen switch drops it). */
+static int
+appimageclip(int x, int y, AppRect *box)
+{
+	int i, found = 0, inside = 0;
+
+	if (!app.on || !app.nclip || app.rows != trow() ||
+	    app.cols != tcol() || app.alt != tisaltscreen())
+		return 0;
+	for (i = 0; i < app.nclip; i++) {
+		const AppRect *r = &app.clip[i];
+		if (y < r->top || y > r->bot)
+			continue;
+		if (x >= r->left && x < r->right)
+			inside = 1;
+		if (!found) {
+			*box = *r;
+			found = 1;
+			continue;
+		}
+		box->top = MIN(box->top, r->top);
+		box->bot = MAX(box->bot, r->bot);
+		box->left = MIN(box->left, r->left);
+		box->right = MAX(box->right, r->right);
+	}
+	return inside;
+}
+
+int
+smoothscroll_image_clip(int x, int y, int *top, int *end, int *left,
+		int *right)
+{
+	AppRect box;
+
+	if (!sst.enabled || !appimageclip(x, y, &box))
+		return 0;
+	*top = box.top;
+	*end = box.bot + 1;
+	*left = box.left;
+	*right = box.right;
+	return 1;
+}
+
+static int cellclip(int x, int y, int *top, int *end, int *left, int *right);
+
+/* Where cell (x, y) is clipped this frame (rows [top, end), columns [left,
+ * right)), if anywhere.  An image (smoothscroll_image()) anchored in a clip
+ * region is also clipped to it, at rest and while gliding. */
 int
 smoothscroll_clip(int x, int y, int *top, int *end, int *left, int *right)
+{
+	int t, e, l, r;
+	int moving = cellclip(x, y, top, end, left, right);
+
+	if (ghost.on || !imageline ||
+	    !smoothscroll_image_clip(x, y, &t, &e, &l, &r))
+		return moving;
+	if (!moving) {
+		*top = t, *end = e, *left = l, *right = r;
+		return 1;
+	}
+	*top = MAX(*top, t);
+	*end = MAX(*top, MIN(*end, e));
+	*left = MAX(*left, l);
+	*right = MAX(*left, MIN(*right, r));
+	return 1;
+}
+
+static int
+cellclip(int x, int y, int *top, int *end, int *left, int *right)
 {
 	if (!sst.enabled)
 		return 0;
