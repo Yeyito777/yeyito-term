@@ -23,6 +23,7 @@
 #include <string.h>
 #include <sys/types.h>
 #include <time.h>
+#include <unistd.h>
 #include <wchar.h>
 
 #include "../st.h"
@@ -927,24 +928,43 @@ settle(double now)
 	ss_settle(&sst.ss, now, sst.duration);
 }
 
-/* ST_SMOOTHSCROLL_LOG=file: one line per frame drawn while something moves
- * (time in ms, scrollback / region / app offsets in rows, rows app-mode
- * region scrolls moved so far), to check pacing and smoothness. */
+/* Frame log, one line per frame drawn while something moves: pid, time in
+ * ms, scrollback / region / app offsets in rows, rows app-mode region
+ * scrolls moved so far.  ST_SMOOTHSCROLL_LOG=file logs from the start; a
+ * running st appends each glide to $TMPDIR/st-smoothscroll.log (or
+ * /tmp/...) while that file exists, so pacing can be checked on a terminal
+ * already in use: create the file, scroll, read it, delete it. */
 static void
 framelog(double now, int moving)
 {
-	static FILE *log;
+	static FILE *log, *trigger;
 	static int opened;
+	char path[512];
+	const char *dir;
 
 	if (!opened) {
-		const char *path = getenv("ST_SMOOTHSCROLL_LOG");
+		const char *env = getenv("ST_SMOOTHSCROLL_LOG");
 		opened = 1;
-		if (path && *path && (log = fopen(path, "w")))
+		if (env && *env && (log = fopen(env, "w")))
 			setvbuf(log, NULL, _IOLBF, 0);
 	}
-	if (log && (moving || sst.moved))
-		fprintf(log, "%.3f %.4f %.4f %.4f %ld\n", now, sst.ss.offset,
-		    reg.active ? reg.ss.offset : 0.0, app.offset, app.scrolled);
+	if (!log && moving && !sst.moved && !trigger) {
+		dir = getenv("TMPDIR");
+		snprintf(path, sizeof(path), "%s/st-smoothscroll.log",
+		    dir && *dir ? dir : "/tmp");
+		if (access(path, W_OK) == 0 && (trigger = fopen(path, "a")))
+			setvbuf(trigger, NULL, _IOLBF, 0);
+	}
+	if (moving || sst.moved) {
+		FILE *f = log ? log : trigger;
+		if (f)
+			fprintf(f, "%d %.3f %.4f %.4f %.4f %ld\n", (int)getpid(),
+			    now, sst.ss.offset, reg.active ? reg.ss.offset : 0.0,
+			    app.offset, app.scrolled);
+	} else if (trigger) {
+		fclose(trigger);
+		trigger = NULL;
+	}
 }
 
 void

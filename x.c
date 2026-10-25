@@ -240,6 +240,7 @@ static void clip5522_tick(const struct timespec *);
 
 static void run(void);
 static int xsmoothscrolltimeout(double *);
+static double xframewait(void);
 static void xupdaterefresh(void);
 /* When the last frame started drawing (smooth-scroll frame pacing). */
 static struct timespec xlastframe;
@@ -3513,6 +3514,17 @@ run(void)
 			xsetmode(0, MODE_SYNC);
 		}
 
+		/* While a glide animates, frames keep its cadence: content that
+		 * arrives in between (an app's next rows) shows on the next one
+		 * instead of drawing an extra frame out of step. */
+		if (drawing && smoothscroll_pending()) {
+			double wait = xframewait();
+			if (wait > 0) {
+				timeout = wait;
+				continue;
+			}
+		}
+
 		/* idle detected or maxlatency exhausted -> draw */
 		redraw = drawing;
 		timeout = -1;
@@ -3623,26 +3635,35 @@ xupdaterefresh(void)
  * vsync each frame is presented on the following refresh.  Lowers *timeout
  * to the next frame; returns 1 if one is due now.  Nothing is scheduled at
  * rest, so an idle terminal stays asleep. */
+/* Milliseconds until the next animation frame is due (<= 0: now): a refresh
+ * period after the last frame started.  With vsync it starts a little
+ * early, since the swap waits for the refresh; without, the timer is the
+ * clock. */
+static double
+xframewait(void)
+{
+	double period = xrefreshms > 0 ? xrefreshms : 1000.0 / 60.0;
+	double early = gpu.active && gpuvsync ? 1.0 : 0.0;
+	struct timespec now;
+
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	return period - TIMEDIFF(now, xlastframe) - early;
+}
+
 static int
 xsmoothscrolltimeout(double *timeout)
 {
-	double wait = smoothscroll_timeout(), period, since, early;
-	struct timespec now;
+	double wait = smoothscroll_timeout();
 	int due = 0;
 
 	if (wait < 0)
 		return 0;
 	if (wait <= 0) {
-		period = xrefreshms > 0 ? xrefreshms : 1000.0 / 60.0;
-		clock_gettime(CLOCK_MONOTONIC, &now);
-		since = TIMEDIFF(now, xlastframe);
-		/* With vsync, start a little early: the swap waits for the
-		 * refresh.  Without it, the timer is the clock. */
-		early = gpu.active && gpuvsync ? 1.0 : 0.0;
-		wait = period - since - early;
+		wait = xframewait();
 		if (wait <= 0) {
 			due = 1;
-			wait = period - early;
+			wait = (xrefreshms > 0 ? xrefreshms : 1000.0 / 60.0) -
+			    (gpu.active && gpuvsync ? 1.0 : 0.0);
 		}
 	}
 	if (*timeout < 0 || wait < *timeout)

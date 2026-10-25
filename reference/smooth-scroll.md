@@ -227,13 +227,16 @@ never move.
   window moves; 60 Hz if unknown, `ST_REFRESH_HZ` overrides). With GLX vsync
   it starts 1 ms early and the swap waits for the refresh. It is re-armed
   right after `draw()`, because that is where a new scroll is noticed.
+  While a glide animates, pty input does not draw an extra frame out of
+  step: it shows on the next frame of the cadence.
 - macOS: `MTKView` runs its display link at the window's screen's
   `maximumFramesPerSecond` (ProMotion: up to 120 Hz; updated when the window
   changes screens) only while a glide or snap is pending, then returns to
   on-demand drawing.
 - App-driven glides (mode 2032) are timed by st the same way: the
   application sends easing terms, st evaluates them at each frame.
-- `ST_SMOOTHSCROLL_LOG=file` logs each frame drawn while something moves.
+- `ST_SMOOTHSCROLL_LOG=file` logs each frame drawn while something moves;
+  a running st does too while `$TMPDIR/st-smoothscroll.log` exists.
 - At rest nothing is scheduled: zero idle CPU/GPU. Typing never waits on the
   animation. The region hook costs a few compares per scroll; ordinary shell
   output on the primary screen is rejected on the first checks.

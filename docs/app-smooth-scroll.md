@@ -129,5 +129,8 @@ text in the second slides under the panel's bottom edge.
   mode stays on); the application sends them again with its next frame.
 - To cancel, send `OSC 2032 ; o ; 0` (or `OSC 2032 ; c`).
 - `ST_SMOOTHSCROLL_LOG=file` makes st log every frame it draws while
-  something moves (time, offsets, rows scrolled) to check pacing;
+  something moves (pid, time in ms, scrollback / region / app offsets in
+  rows, rows scrolled so far) to check pacing. A terminal already running
+  appends each glide to `$TMPDIR/st-smoothscroll.log` (or `/tmp/...`) while
+  that file exists: create it, scroll, read it, delete it.
   `ST_REFRESH_HZ` overrides the refresh rate st detects (testing).
