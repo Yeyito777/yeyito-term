@@ -1258,17 +1258,51 @@ TEST(images_leave_with_their_lines)
 	ASSERT_EQ(8, smoothscroll_copy_row(detachedto[0]));
 }
 
-TEST(rectangles_clip_at_rest)
+TEST(nothing_clips_or_splits_at_rest)
 {
 	int top, end, left, right;
 
-	app_reset();
+	alt_reset(1);
+	smoothscroll_app_mode(1);
+	osc("r", "1,5,8,8", "4,9,8,12");
 	frame_at(1000);
-	/* An image the app lets run past the rectangle stays inside it. */
-	ASSERT(smoothscroll_clip(6, 7, &top, &end, &left, &right));
-	ASSERT_EQ(8, end);
-	ASSERT(NEAR(0.0, smoothscroll_shift(6, 7)));
+	/* Cells and images at rest draw exactly as without the mode. */
+	ASSERT(!smoothscroll_clip(6, 5, &top, &end, &left, &right));
+	smoothscroll_image(altstore[5]);
+	ASSERT(!smoothscroll_clip(6, 5, &top, &end, &left, &right));
+	ASSERT(NEAR(0.0, smoothscroll_shift(6, 5)));
+	smoothscroll_image(NULL);
+	ASSERT_EQ(12, smoothscroll_segment(5, 0, 12));
 	ASSERT(!smoothscroll_needs_full());
+}
+
+/* An image anchored left of a side panel's edge that reaches past it (the
+ * history beside the Tasks panel and the history below it are two
+ * rectangles) moves whole: it clips to both rectangles' bounding box. */
+TEST(images_spanning_rectangles_clip_to_their_bounding_box)
+{
+	int top, end, left, right;
+
+	alt_reset(1);
+	smoothscroll_app_mode(1);
+	osc("r", "1,5,8,8", "4,9,8,12");
+	region_scroll(0, 7, 0, 1);
+	osc("o", "500", NULL);
+	frame_at(1000);
+	smoothscroll_image(altstore[5]);	/* a row both rectangles cover */
+	ASSERT(NEAR(0.5, smoothscroll_shift(5, 5)));
+	ASSERT(smoothscroll_clip(5, 5, &top, &end, &left, &right));
+	ASSERT_EQ(0, top);
+	ASSERT_EQ(8, end);
+	ASSERT_EQ(4, left);
+	ASSERT_EQ(12, right);
+	smoothscroll_image(altstore[1]);	/* beside the panel: only the left one */
+	ASSERT(smoothscroll_clip(5, 1, &top, &end, &left, &right));
+	ASSERT_EQ(8, right);
+	smoothscroll_image(NULL);
+	/* Text cells still clip to their own rectangle. */
+	ASSERT(smoothscroll_clip(5, 5, &top, &end, &left, &right));
+	ASSERT_EQ(8, right);
 }
 
 
@@ -1310,7 +1344,8 @@ TEST_SUITE(smoothscroll_app)
 	RUN_TEST(app_moves_are_timed_by_st);
 	RUN_TEST(app_moves_add_up_and_never_pass_the_kept_lines);
 	RUN_TEST(images_leave_with_their_lines);
-	RUN_TEST(rectangles_clip_at_rest);
+	RUN_TEST(nothing_clips_or_splits_at_rest);
+	RUN_TEST(images_spanning_rectangles_clip_to_their_bounding_box);
 	RUN_TEST(strips_without_kept_lines_take_the_background_of_the_row_beyond);
 }
 
