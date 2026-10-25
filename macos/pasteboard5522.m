@@ -204,7 +204,7 @@ planFileImage(NSURL *url)
 	if (!urls.count)
 		return none;
 	if (urls.count == 1)
-		return planFileImage(urls[0]);
+		return planFileImage(urls.firstObject);
 	for (NSURL *url in urls) {
 		if (planFileImage(url).mime) {
 			STFileImage unreadable = {nil, @"image/png", NO};

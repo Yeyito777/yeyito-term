@@ -60,12 +60,19 @@ mimeRequest(NSString *password, NSString *mime, BOOL *ok)
 static NSArray<NSString *> *
 offeredMIMEs(NSString *offer)
 {
-	NSRange start = [offer rangeOfString:@"mime=Lg==;"];
+	/* A paste event's list packet is ...:mime=Lg==:pw=TOKEN;LIST ESC \ */
+	NSRange mime = [offer rangeOfString:@"mime=Lg=="];
+	if (mime.location == NSNotFound)
+		return @[];
+	NSRange start = [offer rangeOfString:@";" options:0
+	    range:NSMakeRange(NSMaxRange(mime), offer.length - NSMaxRange(mime))];
 	if (start.location == NSNotFound)
 		return @[];
 	NSUInteger offset = NSMaxRange(start);
 	NSRange end = [offer rangeOfString:@"\033\\" options:0
 	    range:NSMakeRange(offset, offer.length - offset)];
+	if (end.location == NSNotFound)
+		return @[];
 	NSData *list = [[NSData alloc] initWithBase64EncodedString:
 	    [offer substringWithRange:NSMakeRange(offset, end.location - offset)]
 	    options:0];
@@ -91,6 +98,8 @@ transferredData(NSString *transfer, NSString *mime)
 		NSUInteger offset = NSMaxRange(start);
 		NSRange end = [transfer rangeOfString:@"\033\\" options:0
 		    range:NSMakeRange(offset, transfer.length - offset)];
+		if (end.location == NSNotFound)
+			return nil;
 		NSData *chunk = [[NSData alloc] initWithBase64EncodedString:
 		    [transfer substringWithRange:NSMakeRange(offset,
 		    end.location - offset)] options:0];
@@ -109,7 +118,8 @@ writeImage(NSURL *url, CFStringRef type, size_t width, size_t height,
 {
 	CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
 	CGContextRef context = CGBitmapContextCreate(NULL, width, height, 8, 0,
-	    space, alpha ? kCGImageAlphaPremultipliedLast : kCGImageAlphaNoneSkipLast);
+	    space, (CGBitmapInfo)(alpha ? kCGImageAlphaPremultipliedLast :
+	    kCGImageAlphaNoneSkipLast));
 	CGColorSpaceRelease(space);
 	if (!context)
 		return NO;
@@ -191,14 +201,15 @@ pasteFirstMIME(NSPasteboard *pasteboard)
 	if (!password || !result.mimes.count)
 		return result;
 	BOOL ok = NO;
-	Clip5522Request request = mimeRequest(password, result.mimes[0], &ok);
+	NSString *first = result.mimes.firstObject;
+	Clip5522Request request = mimeRequest(password, first, &ok);
 	if (!ok)
 		return result;
 	[outputData setLength:0];
 	[transport readRequest:&request];
 	clip5522_request_free(&request);
 	result.reply = capturedString(outputData);
-	result.data = transferredData(result.reply, result.mimes[0]);
+	result.data = transferredData(result.reply, first);
 	return result;
 }
 
@@ -333,7 +344,7 @@ TEST(rotated_tiff_with_alpha_becomes_upright_png)
 	NSURL *url = tempURL(@"scan.tiff");
 	ASSERT(writeImage(url, CFSTR("public.tiff"), 50, 20, YES, 8));
 	PasteResult result = pasteFirstMIME(finderPasteboard(@[url]));
-	ASSERT([result.mimes[0] isEqualToString:@"image/png"]);
+	ASSERT([result.mimes.firstObject isEqualToString:@"image/png"]);
 	ASSERT_NOT_NULL(result.data);
 	CGSize size = decodedSize(result.data);
 	ASSERT(size.width == 20 && size.height == 50);
@@ -344,7 +355,7 @@ TEST(oversized_photo_is_fitted)
 	NSURL *url = tempURL(@"huge.jpg");
 	ASSERT(writeImage(url, CFSTR("public.jpeg"), 9000, 3000, NO, 1));
 	PasteResult result = pasteFirstMIME(finderPasteboard(@[url]));
-	ASSERT([result.mimes[0] isEqualToString:@"image/jpeg"]);
+	ASSERT([result.mimes.firstObject isEqualToString:@"image/jpeg"]);
 	ASSERT_NOT_NULL(result.data);
 	ASSERT(result.data.length <= 3U * 1024U * 1024U);
 	CGSize size = decodedSize(result.data);
@@ -357,7 +368,7 @@ TEST(unreadable_image_file_fails_instead_of_sending_icon)
 	ASSERT([[@"not a photo" dataUsingEncoding:NSUTF8StringEncoding]
 	    writeToURL:url atomically:YES]);
 	PasteResult result = pasteFirstMIME(finderPasteboard(@[url]));
-	ASSERT([result.mimes[0] isEqualToString:@"image/png"]);
+	ASSERT([result.mimes.firstObject isEqualToString:@"image/png"]);
 	ASSERT(result.data == nil);
 	ASSERT([result.reply containsString:@"status=ENOSYS"]);
 }
@@ -369,7 +380,7 @@ TEST(several_files_with_an_image_never_send_icon)
 	ASSERT(writeImage(image, CFSTR("public.png"), 8, 8, NO, 1));
 	ASSERT(writeImage(other, CFSTR("public.png"), 8, 8, NO, 1));
 	PasteResult result = pasteFirstMIME(finderPasteboard(@[image, other]));
-	ASSERT([result.mimes[0] isEqualToString:@"image/png"]);
+	ASSERT([result.mimes.firstObject isEqualToString:@"image/png"]);
 	ASSERT(result.data == nil);
 	ASSERT([result.reply containsString:@"status=ENOSYS"]);
 }
