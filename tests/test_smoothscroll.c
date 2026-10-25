@@ -29,6 +29,7 @@ static double drawnshift[64];
 static int nextid;
 
 int xismode(unsigned int flags) { return (fmode & flags) != 0; }
+unsigned int defaultfg = 7, defaultbg = 0;
 
 /* Images: which lines' placements went to which copies, and which copies'
  * images were dropped. */
@@ -1270,6 +1271,34 @@ TEST(rectangles_clip_at_rest)
 	ASSERT(!smoothscroll_needs_full());
 }
 
+
+/* A rectangle whose top is inside the region (below a panel) has no kept
+ * lines: the strip it uncovers takes the background of the row above it,
+ * never bare terminal background. */
+TEST(strips_without_kept_lines_take_the_background_of_the_row_beyond)
+{
+	alt_reset(1);
+	smoothscroll_app_mode(1);
+	osc("r", "1,5,8,8", "4,9,8,12");
+	for (int x = 0; x < FAKE_COLS; x++)	/* row 2: the panel's last row */
+		altstore[2][x] = (Glyph){ .u = 'P', .bg = 5 };
+	region_scroll(0, 7, 0, 2);
+	osc("o", "1500", NULL);
+	frame_at(1000);
+	smoothscroll_drawextra();
+	/* Left rectangle: the two lines that left; right one: two fills. */
+	ASSERT_EQ(4, ndrawn);
+	ASSERT_EQ(4, drawnx1[0]);
+	ASSERT(drawnid[0] != ' ');
+	ASSERT_EQ(8, drawnx1[2]);
+	ASSERT_EQ(12, drawnx2[2]);
+	ASSERT_EQ(' ', drawnid[2]);
+	ASSERT(drawnplain[2]);
+	ASSERT(NEAR(0.5, drawnshift[2]));
+	ASSERT_EQ(' ', drawnid[3]);
+	ASSERT(NEAR(-0.5, drawnshift[3]));
+}
+
 TEST_SUITE(smoothscroll_app)
 {
 	RUN_TEST(full_screen_apps_glide_only_when_they_ask);
@@ -1282,6 +1311,7 @@ TEST_SUITE(smoothscroll_app)
 	RUN_TEST(app_moves_add_up_and_never_pass_the_kept_lines);
 	RUN_TEST(images_leave_with_their_lines);
 	RUN_TEST(rectangles_clip_at_rest);
+	RUN_TEST(strips_without_kept_lines_take_the_background_of_the_row_beyond);
 }
 
 int
