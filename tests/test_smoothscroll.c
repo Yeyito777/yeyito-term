@@ -30,6 +30,26 @@ static int nextid;
 
 int xismode(unsigned int flags) { return (fmode & flags) != 0; }
 
+/* Images: which lines' placements went to which copies, and which copies'
+ * images were dropped. */
+static Line detachedfrom[16], detachedto[16], recycled[64];
+static int ndetached, detachedkeep[16], nrecycled;
+void
+graphics_detach_line(Line oldline, Line newline, int keep_rows)
+{
+	if (ndetached < 16) {
+		detachedfrom[ndetached] = oldline;
+		detachedto[ndetached] = newline;
+		detachedkeep[ndetached++] = keep_rows;
+	}
+}
+void
+graphics_recycle_line(Line line)
+{
+	if (nrecycled < 64)
+		recycled[nrecycled++] = line;
+}
+
 static double fakeclock(void) { return fakenow; }
 
 int trow(void) { return frows; }
@@ -1150,6 +1170,106 @@ TEST(app_state_clears_on_resize_and_bad_input_is_ignored)
 	ASSERT_EQ(0, ndrawn);
 }
 
+
+static void
+osc4(char *cmd, char *a, char *b, char *c)
+{
+	char *args[5] = { "2032", cmd, a, b, c };
+	smoothscroll_app_osc(5, args);
+}
+
+TEST(app_moves_are_timed_by_st)
+{
+	app_reset();
+	region_scroll(0, 7, 0, 1);		/* one copy above */
+	osc4("m", "0", "1000", "100");		/* drawn a row lower, easing out */
+	frame_at(1000);
+	ASSERT(NEAR(1.0, smoothscroll_shift(6, 3)));
+	ASSERT(smoothscroll_pending());
+	ASSERT(NEAR(0.0, smoothscroll_timeout()));	/* a frame every refresh */
+	frame_at(1050);
+	ASSERT(NEAR(0.125, smoothscroll_shift(6, 3)));
+	frame_at(1100);
+	ASSERT(NEAR(0.0, smoothscroll_shift(6, 3)));
+	ASSERT(!smoothscroll_pending());
+	/* At rest the copy (and any image on it) is gone. */
+	osc("o", "500", NULL);
+	ASSERT(NEAR(0.0, smoothscroll_shift(6, 3)));
+}
+
+TEST(app_moves_add_up_and_never_pass_the_kept_lines)
+{
+	app_reset();
+	region_scroll(0, 7, 0, -2);		/* two copies below */
+	osc4("m", "-1000", "0", "0");		/* a step: base -1 */
+	frame_at(1000);
+	ASSERT(NEAR(-1.0, smoothscroll_shift(6, 3)));
+	osc4("m", "0", "-3000", "100");		/* -1 - 3 > two kept lines */
+	frame_at(1000);
+	ASSERT(NEAR(-2.0, smoothscroll_shift(6, 3)));
+	frame_at(1050);
+	ASSERT(NEAR(-1.375, smoothscroll_shift(6, 3)));
+	osc("o", "1000", NULL);			/* nothing kept above */
+	ASSERT(NEAR(0.0, smoothscroll_shift(6, 3)));
+}
+
+TEST(images_leave_with_their_lines)
+{
+	int top, end, left, right;
+	Line first = altstore[0], second = altstore[1], last = altstore[7];
+
+	app_reset();
+	ndetached = nrecycled = 0;
+	region_scroll(0, 7, 0, 2);
+	ASSERT_EQ(2, ndetached);
+	/* Nearest first; only the rows that left go along. */
+	ASSERT(detachedfrom[0] == second);
+	ASSERT_EQ(1, detachedkeep[0]);
+	ASSERT(detachedfrom[1] == first);
+	ASSERT_EQ(2, detachedkeep[1]);
+	ASSERT_EQ(-1, smoothscroll_copy_row(detachedto[0]));
+	ASSERT_EQ(-2, smoothscroll_copy_row(detachedto[1]));
+	ASSERT_EQ(INT_MIN, smoothscroll_copy_row(altstore[3]));
+	osc("o", "1500", NULL);
+	frame_at(1000);
+	/* An image on a copy moves and clips like the rectangle it left. */
+	smoothscroll_image(detachedto[0]);
+	ASSERT(NEAR(1.5, smoothscroll_shift(6, -1)));
+	ASSERT(smoothscroll_clip(6, -1, &top, &end, &left, &right));
+	ASSERT_EQ(0, top);
+	ASSERT_EQ(8, end);
+	ASSERT_EQ(4, left);
+	/* Beside the rectangle (the sidebar's columns) it is drawn nowhere. */
+	ASSERT(smoothscroll_clip(1, -1, &top, &end, &left, &right));
+	ASSERT_EQ(top, end);
+	smoothscroll_image(NULL);
+	/* Back at rest the copies go, images included. */
+	osc("o", "0", NULL);
+	ASSERT_EQ(2, nrecycled);
+	ASSERT_EQ(INT_MIN, smoothscroll_copy_row(detachedto[0]));
+	/* Over the bottom, the whole image goes along. */
+	app_reset();
+	ndetached = 0;
+	region_scroll(0, 7, 0, -1);
+	ASSERT_EQ(1, ndetached);
+	ASSERT(detachedfrom[0] == last);
+	ASSERT_EQ(0, detachedkeep[0]);
+	ASSERT_EQ(8, smoothscroll_copy_row(detachedto[0]));
+}
+
+TEST(rectangles_clip_at_rest)
+{
+	int top, end, left, right;
+
+	app_reset();
+	frame_at(1000);
+	/* An image the app lets run past the rectangle stays inside it. */
+	ASSERT(smoothscroll_clip(6, 7, &top, &end, &left, &right));
+	ASSERT_EQ(8, end);
+	ASSERT(NEAR(0.0, smoothscroll_shift(6, 7)));
+	ASSERT(!smoothscroll_needs_full());
+}
+
 TEST_SUITE(smoothscroll_app)
 {
 	RUN_TEST(full_screen_apps_glide_only_when_they_ask);
@@ -1158,6 +1278,10 @@ TEST_SUITE(smoothscroll_app)
 	RUN_TEST(app_scroll_down_shows_departed_bottom_lines);
 	RUN_TEST(app_rectangles_with_different_tops_split_rows);
 	RUN_TEST(app_state_clears_on_resize_and_bad_input_is_ignored);
+	RUN_TEST(app_moves_are_timed_by_st);
+	RUN_TEST(app_moves_add_up_and_never_pass_the_kept_lines);
+	RUN_TEST(images_leave_with_their_lines);
+	RUN_TEST(rectangles_clip_at_rest);
 }
 
 int

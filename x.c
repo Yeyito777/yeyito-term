@@ -16,6 +16,7 @@
 #include <X11/keysym.h>
 #include <X11/Xft/Xft.h>
 #include <X11/XKBlib.h>
+#include <X11/extensions/Xrandr.h>
 #include <GL/gl.h>
 #include <GL/glx.h>
 #include <ft2build.h>
@@ -239,6 +240,9 @@ static void clip5522_tick(const struct timespec *);
 
 static void run(void);
 static int xsmoothscrolltimeout(double *);
+static void xupdaterefresh(void);
+/* When the last frame started drawing (smooth-scroll frame pacing). */
+static struct timespec xlastframe;
 static void usage(void);
 
 static void (*handler[LASTEvent])(XEvent *) = {
@@ -2092,6 +2096,7 @@ xinit(int cols, int rows)
 	xhints();
 	XMapWindow(xw.dpy, xw.win);
 	XFlush(xw.dpy);
+	xupdaterefresh();
 	if (gpudraw)
 		xinitatoms(thispid);
 
@@ -3345,6 +3350,7 @@ resize(XEvent *e)
 		e->xconfigure.x + e->xconfigure.width > 0 &&
 		e->xconfigure.y + e->xconfigure.height > 0;
 	MODBIT(win.mode, onscreen, MODE_ONSCREEN);
+	xupdaterefresh();	/* the window may be on another monitor now */
 	if (onscreen && !wasonscreen)
 		tfulldirt();
 	else if (!onscreen && wasonscreen && gpu.active)
@@ -3550,6 +3556,7 @@ run(void)
 
 		if (!redraw)
 			continue;
+		clock_gettime(CLOCK_MONOTONIC, &xlastframe);
 		draw();
 		XFlush(xw.dpy);
 		drawing = 0;
@@ -3558,20 +3565,85 @@ run(void)
 	}
 }
 
-/* Smooth-scroll animation frames are paced at ~120 Hz (GLX vsync may pace
- * them further).  Lowers *timeout to the next frame; returns 1 if one is due
- * now.  Nothing is scheduled at rest, so an idle terminal stays asleep. */
+/* Refresh period (ms) of the monitor under the window's centre, from
+ * XRandR; 0 when unknown.  Updated when the window maps and moves. */
+static double xrefreshms;
+
+static void
+xupdaterefresh(void)
+{
+	XRRScreenResources *res;
+	XRRCrtcInfo *crtc;
+	Window child;
+	int i, j, cx, cy, found = 0;
+	double rate, best = 0;
+
+	const char *forced = getenv("ST_REFRESH_HZ");	/* debugging/tests */
+
+	if (forced && atof(forced) > 1) {
+		xrefreshms = 1000.0 / atof(forced);
+		return;
+	}
+	if (!XTranslateCoordinates(xw.dpy, xw.win, DefaultRootWindow(xw.dpy),
+	    win.w / 2, win.h / 2, &cx, &cy, &child))
+		return;
+	res = XRRGetScreenResourcesCurrent(xw.dpy, DefaultRootWindow(xw.dpy));
+	if (!res)
+		return;
+	for (i = 0; i < res->ncrtc && !found; i++) {
+		if (!(crtc = XRRGetCrtcInfo(xw.dpy, res, res->crtcs[i])))
+			continue;
+		for (j = 0; crtc->mode && j < res->nmode; j++) {
+			const XRRModeInfo *m = &res->modes[j];
+			if (m->id != crtc->mode || !m->hTotal || !m->vTotal)
+				continue;
+			rate = (double)m->dotClock / ((double)m->hTotal * m->vTotal);
+			if (m->modeFlags & RR_DoubleScan)
+				rate /= 2;
+			if (m->modeFlags & RR_Interlace)
+				rate *= 2;
+			if (cx >= crtc->x && cy >= crtc->y &&
+			    cx < crtc->x + (int)crtc->width &&
+			    cy < crtc->y + (int)crtc->height) {
+				best = rate;
+				found = 1;
+			} else if (best == 0) {
+				best = rate;	/* off every monitor: the first one */
+			}
+		}
+		XRRFreeCrtcInfo(crtc);
+	}
+	XRRFreeScreenResources(res);
+	if (best > 1)
+		xrefreshms = 1000.0 / best;
+}
+
+/* Smooth-scroll animation frames are paced at the monitor's refresh: the
+ * next one is due a refresh period after the last one started, so with
+ * vsync each frame is presented on the following refresh.  Lowers *timeout
+ * to the next frame; returns 1 if one is due now.  Nothing is scheduled at
+ * rest, so an idle terminal stays asleep. */
 static int
 xsmoothscrolltimeout(double *timeout)
 {
-	double wait = smoothscroll_timeout();
+	double wait = smoothscroll_timeout(), period, since, early;
+	struct timespec now;
 	int due = 0;
 
 	if (wait < 0)
 		return 0;
 	if (wait <= 0) {
-		due = 1;
-		wait = 1000.0 / 120.0;
+		period = xrefreshms > 0 ? xrefreshms : 1000.0 / 60.0;
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		since = TIMEDIFF(now, xlastframe);
+		/* With vsync, start a little early: the swap waits for the
+		 * refresh.  Without it, the timer is the clock. */
+		early = gpu.active && gpuvsync ? 1.0 : 0.0;
+		wait = period - since - early;
+		if (wait <= 0) {
+			due = 1;
+			wait = period - early;
+		}
 	}
 	if (*timeout < 0 || wait < *timeout)
 		*timeout = wait;

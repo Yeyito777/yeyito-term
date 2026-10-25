@@ -1532,6 +1532,36 @@ graphics_recycle_line(Line line)
 	collect_anonymous_images();
 }
 
+/* Smooth scrolling keeps copies of lines that scrolled out of a region
+ * while the application glides it (render/smoothscroll_term.c).  Their
+ * images go with them under ids no application command addresses (so the
+ * application placing the image again does not take it back), cropped to
+ * their first keep_rows rows: the part that left with the line. */
+void
+graphics_detach_line(Line oldline, Line newline, int keep_rows)
+{
+	static uint32_t detached_id = 0xff000000u;
+	GraphicsPlacement *placement;
+
+	if (!oldline || !newline || oldline == newline)
+		return;
+	for (placement = placements; placement; placement = placement->next) {
+		if (placement->anchor != oldline)
+			continue;
+		placement->anchor = newline;
+		if (++detached_id < 0xff000000u)
+			detached_id = 0xff000000u;
+		placement->id = detached_id;
+		if (!placement->natural_size && keep_rows > 0 &&
+		    keep_rows < placement->rows) {
+			placement->source_height = MAX(1, (int)((long long)
+			    placement->source_height * keep_rows /
+			    placement->rows));
+			placement->rows = keep_rows;
+		}
+	}
+}
+
 void
 graphics_reanchor_line(Line oldline, Line newline)
 {
