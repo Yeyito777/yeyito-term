@@ -727,8 +727,14 @@ drawGraphicsPlacement(const GraphicsPlacementView *placement, void *context)
 	    placement->columns, placement->rows));
 	/* Covering cells shift and clip by their own rows. */
 	endCell();
-	image_occlusion_draw(&imageOcclusion, placement, tcol(), trow(),
-	    tlineviewline, selectedImage ? NULL : drawImageOcclusionCell, NULL);
+	/* In an image clip region (OSC 2032 ; k) only the cells the image can
+	 * draw over are remembered and composited. */
+	ImageOcclusionClip region;
+	int inregion = smoothscroll_image_clip(placement->column, placement->row,
+	    &region.top, &region.end, &region.left, &region.right);
+	image_occlusion_draw_clipped(&imageOcclusion, placement, tcol(), trow(),
+	    tlineviewline, selectedImage ? NULL : drawImageOcclusionCell, NULL,
+	    inregion ? &region : NULL);
 	if (selectedImage) {
 		MacColor color = indexedColor(selectionbg);
 		color.a = 0.45f;

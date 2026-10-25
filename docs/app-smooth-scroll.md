@@ -28,7 +28,10 @@ as judder and the traffic stays tiny even when the application runs remotely.
 | `OSC 2032 ; r ; T,L,B,R ; T,L,B,R … ST` | The moving rectangles: rows `T`..`B`, columns `L`..`R`, 1-based and inclusive, at most 8. Replaces the previous set; no rectangles moves nothing. |
 | `OSC 2032 ; m ; dA ; B ; D ST` | Move: the offset's base changes by `dA`, and an easing term of `B` starts now and eases out to 0 over `D` ms (st's cubic ease-out). `B` and `D` may be left out. Values in thousandths of a row; positive draws the content lower. |
 | `OSC 2032 ; o ; N ST` | Set the base to `N` and drop every easing term (start over, no animation). `0` is at rest. |
-| `OSC 2032 ; c ST` | Clear: offset 0, no rectangles, no kept lines. |
+| `OSC 2032 ; c ST` | Clear: offset 0, no rectangles, no clip regions, no kept lines. |
+| `OSC 2032 ; k ; T,L,B,R ; T,L,B,R … ST` | Image clip regions (same form as `r`, at most 8): an image whose anchor cell lies in one never draws outside the clip regions on its anchor row, at rest or while gliding. Replaces the previous set; no regions clears it. See [Image clip regions](#image-clip-regions). |
+| `CSI ? 2033 $ p` | DECRQM: does st support image clip regions? |
+| `CSI ? 2033 ; Ps $ y` | Reply: `3` permanently set (supported; nothing to turn on, `k` works while mode 2032 is on), `4` permanently reset (`smoothscroll = 0`). Terminals without it do not reply, or reply `0`. |
 
 `OSC` may end with `ST` (`ESC \`) or `BEL`.
 
@@ -47,7 +50,8 @@ offset and clips to the bounding box of every rectangle on its anchor row (an
 image may span rectangles, such as the history beside a side panel and below
 it), never to just one of them. At rest nothing moves or clips: cells and
 images draw exactly as without the mode, so an application placing an image
-past a rectangle to have it while gliding must crop it again at rest. Cells outside every
+past a rectangle to have it while gliding must crop it again at rest, unless it
+declares [image clip regions](#image-clip-regions). Cells outside every
 rectangle (a sidebar, a panel, status lines, the cursor's prompt) never move.
 Images anchored in a rectangle move with it. Selection, search highlights and
 the cursor are keyed by grid cells, so they move with their cells.
@@ -107,8 +111,43 @@ An image crossing an edge of the region keeps showing in the strip the glide
 uncovers. When it leaves through the top, st keeps the rows that left on the
 copied lines. When it leaves through the bottom its anchor is still inside
 the region, so the application places it uncropped below the region's last
-row (the rectangles clip it while they move) and crops it again once the
-glide is over; the Exocortex TUI does this.
+row (the rectangles clip it while they move).
+
+At rest nothing clips, so without clip regions the application must crop such
+an image again before the glide ends, and st's clock runs behind the
+application's by the trip through the pty or ssh: crop late and st draws the
+image over whatever lies below the pane (a prompt) until the crop arrives;
+crop early and the image's last pixels are missing for the end of the glide.
+Clip regions remove that race.
+
+### Image clip regions
+
+`OSC 2032 ; k` declares the rectangles images may draw in, typically the
+pane the history scrolls in. An image whose anchor cell lies in a clip region
+is clipped, every frame, to the bounding box of the clip regions on its
+anchor row (a pane split by a side panel is two regions; an image below the
+panel spans both). At rest that is the only clip; while gliding it also
+clips to the moving rectangles, as without clip regions. So the application
+places an image cut off by the pane's edge uncropped past it, always, and
+never crops it again at rest: st never draws it outside the pane. Images
+outside every clip region (a sidebar's icons, a prompt's emoji, an image
+viewer anchored outside the pane) behave exactly as before, and text cells
+are never clipped.
+
+Clip regions are part of mode 2032: they take effect only while it is on and
+are cleared with the rest by `CSI ? 2032 l`, RIS, `OSC 2032 ; c`, a resize
+and a screen switch (send them again with the next frame). Hiding an image
+whose cells change after it was drawn (st's image occlusion,
+[kitty-graphics.md](kitty-graphics.md)) then considers only the cells the
+image can draw over inside its clip regions, and a placement whose clip
+changes remembers its cells afresh: rows below the pane that an uncropped
+image never draws over never hide it.
+
+Detect support with DECRQM `CSI ? 2033 $ p`; a reply of `3` means `k` is
+understood. Mode 2033 is not used by any terminal known to us (the nearby
+2026-2031 and 2048 are synchronized output, Contour's extensions and in-band
+resize). Kitty images are drawn by the GPU renderers (X11 GL and macOS
+Metal), which both clip; the Xft fallback draws no Kitty images.
 
 ### Panels and re-wrapped text
 

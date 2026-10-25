@@ -211,6 +211,50 @@ TEST(clipping_and_missing_lines)
 	ASSERT_EQ(1, count);
 }
 
+static void
+frame_clipped(const ImageOcclusionClip *clip)
+{
+	memset(drawn, 0, sizeof(drawn));
+	count = 0;
+	image_occlusion_begin(&state);
+	image_occlusion_draw_clipped(&state, &placement, 8, 4, line_at,
+	    record_cell, NULL, clip);
+	image_occlusion_end(&state);
+}
+
+/* An image clipped to a region (a chat pane, OSC 2032 ; k) placed whole
+ * past it: only the cells it draws over count.  A prompt row below the
+ * pane changing never hides the image, and a different clip (the image
+ * placed elsewhere, the pane resized) remembers its cells afresh. */
+TEST(clip_region_limits_snapshot_and_refreshes)
+{
+	ImageOcclusionClip pane = { .top = 0, .end = 2, .left = 0, .right = 8 };
+	ImageOcclusionClip taller = { .top = 0, .end = 3, .left = 0, .right = 8 };
+
+	setup();	/* the image covers rows 1-2, columns 1-4 */
+	frame_clipped(&pane);
+	ASSERT_EQ(4, state.cells);	/* row 1 only */
+	grid[2][2].u = '>';	/* the prompt below the pane */
+	frame_clipped(&pane);
+	ASSERT_EQ(0, count);
+	grid[1][2].u = '/';	/* a menu inside the pane still occludes */
+	frame_clipped(&pane);
+	ASSERT_EQ(1, count);
+	ASSERT_EQ(1, drawn[1][2]);
+	grid[1][2].u = ' ';
+	/* The pane grows over row 2: its cells as they are now are the image's. */
+	frame_clipped(&taller);
+	ASSERT_EQ(0, count);
+	ASSERT_EQ(8, state.cells);
+	grid[2][3].u = 'x';
+	frame_clipped(&taller);
+	ASSERT_EQ(1, count);
+	ASSERT_EQ(1, drawn[2][3]);
+	/* Unclipped drawing keeps its own baseline, as before. */
+	frame(0);
+	ASSERT_EQ(0, count);
+}
+
 TEST(deletion_prunes_baselines)
 {
 	setup();
@@ -254,6 +298,7 @@ main(void)
 	RUN_TEST(scroll_follows_line_identity);
 	RUN_TEST(wide_dummy_redraws_leading_cell);
 	RUN_TEST(clipping_and_missing_lines);
+	RUN_TEST(clip_region_limits_snapshot_and_refreshes);
 	RUN_TEST(deletion_prunes_baselines);
 	RUN_TEST(cache_limit_does_not_prevent_existing_cell_occlusion);
 	image_occlusion_clear(&state);

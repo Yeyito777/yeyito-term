@@ -1397,8 +1397,18 @@ gpudrawimage(const GraphicsPlacementView *placement, void *context)
 	 * later cell changes over the atomic selection. Once selection ends, menus
 	 * and other changed cells immediately resume occluding their own regions. */
 	gpuendcell();	/* covering cells shift/clip by their own rows */
-	image_occlusion_draw(&gpu.imageocclusion, placement, tcol(), trow(),
-	    tlineviewline, selected_image ? NULL : gpuoccludecell, NULL);
+	{
+		/* In an image clip region (OSC 2032 ; k) only the cells the
+		 * image can draw over are remembered and composited. */
+		ImageOcclusionClip region;
+		int inregion = smoothscroll_image_clip(placement->column,
+		    placement->row, &region.top, &region.end, &region.left,
+		    &region.right);
+		image_occlusion_draw_clipped(&gpu.imageocclusion, placement,
+		    tcol(), trow(), tlineviewline,
+		    selected_image ? NULL : gpuoccludecell, NULL,
+		    inregion ? &region : NULL);
+	}
 	gpudrawimageocclusion();
 	if (clipped)
 		gpuimagescissor();
