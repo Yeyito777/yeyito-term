@@ -25,6 +25,8 @@ not use XQuartz or link against X11.
 - `spare.c` and `spare.h` implement the warm spare's spawn-request parsing
   (and building) and single-slot protocol used by `st-aerospace-launch` (see
   `reference/warm-spare.md`).
+- `launchlog.c` and `launchlog.h` format and append the launch diagnostics
+  log written by `st-aerospace-launch` and by a claimed spare.
 - `aerospace_launch.c` is `st-aerospace-launch`, a separate small program
   bundled in `Resources/bin`; `aerospace.c` and `aerospace.h` hold its
   testable parts: AeroSpace's socket protocol (framing, requests, events,

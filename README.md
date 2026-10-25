@@ -158,6 +158,13 @@ AeroSpace cannot see new windows while a macOS native fullscreen window is
 focused (it lives in its own Space); a launch from there fails after a few
 seconds, as it always has.
 
+Every launch appends one line to `~/Library/Logs/st/launch.log` (rotated to
+`launch.log.1` past 1 MB) with the launcher's step timings, and the terminal it
+claimed adds a second line 3 s later with its own startup timings, frame times,
+page-ins and the load average, so an occasional slow or laggy launch can be
+explained afterwards: `grep st=PID ~/Library/Logs/st/launch.log`. See
+[Launch log](reference/warm-spare.md#launch-log) for the fields.
+
 # Zsh integration
 
 To make this terminal work well with zsh, put this in your `.zshrc`:
