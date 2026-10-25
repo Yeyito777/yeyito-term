@@ -29,7 +29,7 @@ LDFLAGS = -flto
 ifeq ($(UNAME_S),Darwin)
 INCS = -I.
 LIBS = -lm -lutil -lz -framework Cocoa -framework Metal -framework MetalKit \
-       -framework QuartzCore -framework CoreText -framework CoreGraphics -framework Carbon
+       -framework QuartzCore -framework CoreText -framework CoreGraphics -framework ImageIO -framework Carbon
 STCPPFLAGS += -D_DARWIN_C_SOURCE -DST_NATIVE_MACOS
 CFLAGS = -O3 -march=native -flto
 OBJCFLAGS = -fobjc-arc -mmacosx-version-min=11.0
