@@ -118,18 +118,36 @@ that environment's `bin/activate` after its normal setup, including a working
 clone arbitrary sourced shell functions, Conda environments, or remote SSH
 state.
 
-The helper records the new `st` process ID and asks AeroSpace for the window
-owned by that exact process before moving and focusing it. This remains
-deterministic when the key is pressed repeatedly: overlapping launches cannot
-mistake another terminal's window for their own. An `st` started by this helper
-also remains transparent until AeroSpace has completed its layout and native
-focus pass, so its initial centered frame is never shown before the tiled one.
-Direct launches keep the normal standalone reveal behavior.
-`ST_AEROSPACE_MANAGED` is a one-window launch flag: st consumes it before
-starting its PTY child, so shells, Exocortex, and editor windows cannot inherit
-the hidden-until-signaled mode. After upgrading from a version that leaked
-this flag, reopen existing terminal sessions (or unset it in their shells);
-already-running child processes retain their old environment.
+Other options: `--cwd DIR` starts in `DIR`, `-T TITLE` sets the window title
+and `-e COMMAND [ARG ...]` runs a command instead of the shell, like `st -e`.
+The launcher forwards its own `PATH`, so a wrapper can extend it first.
+
+Launches are near-instant because the launcher keeps a **warm spare**: an
+`st --spare` that has already done the expensive startup (AppKit, Metal,
+fonts, window) but has neither shown its window nor started a shell. A
+launch claims it, sends the directory, command and title over its control
+socket, waits for AeroSpace's `window-detected` event and focuses the window;
+then it boots the next spare. Without a spare (first launch after login or a
+reinstall, or two launches in quick succession) it boots one for itself and
+continues the same way. The spare shows up as one more `st` in the Dock and
+the app switcher; `ST_AEROSPACE_KEEP_SPARE=0` disables keeping it. See
+[Warm spare](reference/warm-spare.md) for the protocol.
+
+Every launch targets the window of its own `st` process, so overlapping
+launches cannot mistake another terminal's window for their own. The window
+stays transparent until AeroSpace has completed its layout and native focus
+pass (the launcher's `SIGUSR1`), so its initial centered frame is never
+shown before the tiled one. Direct launches keep the normal standalone
+reveal behavior. `ST_AEROSPACE_MANAGED` is a one-window launch flag: st
+consumes it before starting its PTY child, so shells, Exocortex, and editor
+windows cannot inherit the hidden-until-signaled mode. After upgrading from a
+version that leaked this flag, reopen existing terminal sessions (or unset it
+in their shells); already-running child processes retain their old
+environment.
+
+AeroSpace cannot see new windows while a macOS native fullscreen window is
+focused (it lives in its own Space); a launch from there fails after a few
+seconds, as it always has.
 
 # Zsh integration
 

@@ -26,3 +26,4 @@ tests/test_clipboard5522
 tests/test_mode_reset
 tests/test_sync
 tests/test_smoothscroll
+tests/test_macos_spare

@@ -950,6 +950,9 @@ execsh(char *cmd, char **args)
 	signal(SIGQUIT, SIG_DFL);
 	signal(SIGTERM, SIG_DFL);
 	signal(SIGALRM, SIG_DFL);
+	/* The macOS reveal handshake ignores SIGUSR1 in st itself; exec keeps
+	 * ignored signals, so the shell and its jobs would inherit that. */
+	signal(SIGUSR1, SIG_DFL);
 
 	if (persist_get_cwd()[0])
 		chdir(persist_get_cwd());

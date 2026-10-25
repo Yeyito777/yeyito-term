@@ -45,6 +45,7 @@ char *argv0;
 #include "locale.h"
 #include "pty.h"
 #include "reveal.h"
+#include "spare.h"
 #include "text_input.h"
 #include "pasteboard5522.h"
 #include "../sync.h"
@@ -144,6 +145,11 @@ static dispatch_source_t controlSource;
 static dispatch_source_t revealSource;
 static int controlFD = -1;
 static char controlPath[sizeof(((struct sockaddr_un *)0)->sun_path)];
+static int spareWaiting;
+static dispatch_source_t spareCheckSource;
+static id<NSObject> spareActivity;
+static char spareRuntime[PATH_MAX];
+static char spareSlot[PATH_MAX];
 
 static char *opt_class;
 static char **opt_cmd;
@@ -155,6 +161,8 @@ static char *opt_name;
 static char *opt_title;
 static char *opt_fromsave;
 static int opt_fromorphan;
+static int opt_spare;
+static char *opt_spareslot;
 static int opt_fixed;
 static int opt_x, opt_y;
 static int opt_has_position;
@@ -195,6 +203,7 @@ static void cleanupNative(void);
 static void buildMenu(void);
 static void scheduleWindowReveal(void);
 static void updateWindowReveal(void);
+static void claimSpare(const char *, size_t);
 
 static double
 parseFontSize(const char *description)
@@ -2286,10 +2295,13 @@ initializeNativeWindow(int columns, int rows)
 	xloadcols();
 	/* Merely publish the window here.  Launch Services or the window manager
 	 * decides whether this launch should take focus; forcing activation races
-	 * AeroSpace and can pull the user back to this workspace after they leave. */
-	[nativeWindow orderFront:nil];
-	if (NSApp.isActive)
-		[nativeWindow makeKeyWindow];
+	 * AeroSpace and can pull the user back to this workspace after they leave.
+	 * A spare stays ordered out (invisible to AeroSpace) until it is claimed. */
+	if (!opt_spare) {
+		[nativeWindow orderFront:nil];
+		if (NSApp.isActive)
+			[nativeWindow makeKeyWindow];
+	}
 	[nativeWindow makeFirstResponder:nativeView];
 	updateWindowReveal();
 	setenv("WINDOWID", [[NSString stringWithFormat:@"%ld",
@@ -2313,7 +2325,8 @@ usage(void)
 {
 	die("usage: %s [-adiv] [-c class] [-f font] [-g geometry] "
 	    "[-n name] [-o file] [-T title] [-t title] "
-	    "[--from-save dir] [[-e] command [args ...]]\n", argv0);
+	    "[--from-save dir] [--spare | --spare-slot path] "
+	    "[[-e] command [args ...]]\n", argv0);
 }
 
 static dispatch_source_t
@@ -2394,7 +2407,11 @@ setupSources(void)
 		if (childready()) reapchild();
 	});
 	dispatch_resume(notificationSource);
+}
 
+static void
+setupTerminationSources(void)
+{
 	termSource = terminationSource(SIGTERM);
 	interruptSource = terminationSource(SIGINT);
 	hangupSource = terminationSource(SIGHUP);
@@ -2409,6 +2426,10 @@ handleControlMessage(const char *message, size_t length)
 	size_t commandLength = newline - message;
 	const char *payload = newline + 1;
 	size_t payloadLength = length - commandLength - 1;
+	if (commandLength == 5 && !memcmp(message, "spawn", 5)) {
+		claimSpare(payload, payloadLength);
+		return;
+	}
 	char *copy = xmalloc(payloadLength + 1);
 	memcpy(copy, payload, payloadLength); copy[payloadLength] = '\0';
 	if (commandLength == 6 && !memcmp(message, "notify", 6)) notif_show(copy);
@@ -2444,18 +2465,25 @@ startControlSocket(void)
 			if (client < 0) break;
 			struct timeval timeout = {.tv_sec = 1, .tv_usec = 0};
 			setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-			dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-				char buffer[4096]; size_t total = 0; ssize_t got;
-				while (total < sizeof(buffer) &&
-				    (got = read(client, buffer + total,
-				        sizeof(buffer) - total)) > 0)
+			/* A spare's spawn request is latency-critical: read it at
+			 * user-interactive QoS. Spawn requests carry PATH and argv. */
+			dispatch_async(dispatch_get_global_queue(
+			    spareWaiting ? QOS_CLASS_USER_INTERACTIVE : QOS_CLASS_UTILITY, 0), ^{
+				enum { limit = 64 * 1024 };
+				char *buffer = malloc(limit); size_t total = 0; ssize_t got;
+				if (!buffer) { close(client); return; }
+				while (total < limit &&
+				    (got = read(client, buffer + total, limit - total)) > 0)
 					total += got;
 				close(client);
-				if (total) {
-					NSData *message = [NSData dataWithBytes:buffer length:total];
+				if (total && total < limit) {
+					NSData *message = [NSData dataWithBytesNoCopy:buffer
+					    length:total freeWhenDone:YES];
 					dispatch_async(dispatch_get_main_queue(), ^{
 						handleControlMessage(message.bytes, message.length);
 					});
+				} else {
+					free(buffer);
 				}
 			});
 		}
@@ -2476,10 +2504,158 @@ cleanupNative(void)
 {
 	if (shuttingDown) return;
 	shuttingDown = 1;
+	if (spareWaiting) spare_withdraw(spareSlot, getpid());
 	xcleanup();
+	if (spareWaiting) {
+		/* Never claimed: leave no st-PID directory for orphan restore. */
+		char directory[PATH_MAX];
+		snprintf(directory, sizeof(directory), "%s/st-%d", spareRuntime,
+		    (int)getpid());
+		rmdir(directory);
+	}
 	if (persist_active()) { persist_save(); persist_cleanup(); }
 	image_occlusion_clear(&imageOcclusion);
 	mac_renderer_destroy();
+}
+
+/* -e COMMAND: run it instead of the shell, and restore it as such. */
+static void
+setTerminalCommand(int argc, char **argv)
+{
+	opt_cmd = argv;
+	if (opt_fromsave) persist_set_ephemeral(1);
+	if (argc >= 3 && argv[1][0] == '-' && strchr(argv[1], 'c'))
+		persist_set_altcmd(argv[2]);
+	else {
+		char command[PATH_MAX] = {0}; size_t used = 0;
+		for (int i = 0; i < argc && used < sizeof(command) - 1; i++) {
+			if (i) command[used++] = ' ';
+			size_t n = MIN(strlen(argv[i]), sizeof(command) - used - 1);
+			memcpy(command + used, argv[i], n); used += n;
+		}
+		persist_set_altcmd(command);
+	}
+}
+
+/* The bundled helpers (st-notify, ...) come first on the shell's PATH. */
+static void
+prefixResourcePath(void)
+{
+	NSString *resourceBin = [NSBundle.mainBundle.resourcePath
+	    stringByAppendingPathComponent:@"bin"];
+	if ([[NSFileManager defaultManager] fileExistsAtPath:resourceBin]) {
+		NSString *oldPath = [NSString stringWithUTF8String:getenv("PATH") ?: ""];
+		NSString *newPath = [NSString stringWithFormat:@"%@:%@", resourceBin, oldPath];
+		setenv("PATH", newPath.UTF8String, 1);
+	}
+}
+
+/* Start the shell (or -e command) and everything that serves it. */
+static void
+startTerminalSession(void)
+{
+	persist_init(getpid());
+	persist_register();
+	selinit();
+	ttyfd = ttynew(opt_line, shell, opt_io, opt_cmd);
+	if (macos_pty_start(ttyfd) < 0)
+		die("couldn't configure nonblocking PTY output: %s\n",
+		    strerror(errno));
+	nativeResize(nativeView.bounds.size.width, nativeView.bounds.size.height);
+	cmdline_init();
+	if (opt_fromsave && persist_get_altcmd()[0] && !persist_is_ephemeral()) {
+		ttywrite(persist_get_altcmd(), strlen(persist_get_altcmd()), 1);
+		ttywrite("\n", 1, 1);
+	}
+	setupSources();
+	macos_request_redraw();
+}
+
+static void
+publishSpare(void)
+{
+	char stamp[64];
+	const char *executable = NSBundle.mainBundle.executablePath.fileSystemRepresentation;
+	if (spare_exe_stamp(executable, stamp, sizeof(stamp)) < 0)
+		die("st: cannot stat %s\n", executable);
+	switch (spare_publish(spareSlot, getpid(),
+	    (unsigned long)nativeWindow.windowNumber, stamp)) {
+	case 1:
+		break;
+	case 0: /* another spare is already waiting; cleanupNative tidies up */
+		spareWaiting = 1;
+		[NSApp terminate:nil];
+		return;
+	default:
+		die("st: cannot publish the spare slot %s\n", spareSlot);
+	}
+	spareWaiting = 1;
+	/* An app without visible windows is App Nap's prime target (throttled
+	 * timers and I/O), but a claim must be answered at once. */
+	spareActivity = [NSProcessInfo.processInfo
+	    beginActivityWithOptions:NSActivityUserInitiatedAllowingIdleSystemSleep
+	    reason:@"warm spare waiting to be claimed"];
+	/* A slot that stops naming this process (replaced after a race, or
+	 * claimed by a launcher that died before sending its request) means
+	 * nobody will ever claim it: exit instead of idling forever. */
+	spareCheckSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+	    dispatch_get_main_queue());
+	dispatch_source_set_timer(spareCheckSource,
+	    dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_SEC), 60 * NSEC_PER_SEC,
+	    5 * NSEC_PER_SEC);
+	dispatch_source_set_event_handler(spareCheckSource, ^{
+		if (spareWaiting && !spare_holds_slot(spareSlot, getpid()))
+			[NSApp terminate:nil];
+	});
+	dispatch_resume(spareCheckSource);
+}
+
+/* The launcher has claimed this spare: become the requested terminal. */
+static void
+claimSpare(const char *payload, size_t length)
+{
+	SpareRequest request;
+	if (!spareWaiting || spare_parse_request(payload, length, &request) < 0)
+		return;
+	spareWaiting = 0;
+	if (spareCheckSource) {
+		dispatch_source_cancel(spareCheckSource);
+		spareCheckSource = nil;
+	}
+	spare_withdraw(spareSlot, getpid());
+	if (spareActivity) {
+		[NSProcessInfo.processInfo endActivity:spareActivity];
+		spareActivity = nil;
+	}
+
+	int pathChanged = 0;
+	for (int i = 0; i < request.nenv; i++) {
+		char *assignment = request.env[i], *equals = strchr(assignment, '=');
+		*equals = '\0';
+		setenv(assignment, equals + 1, 1);
+		pathChanged |= !strcmp(assignment, "PATH");
+	}
+	if (pathChanged) prefixResourcePath();
+	if (request.cwd && chdir(request.cwd) < 0) {
+		const char *home = getenv("HOME");
+		if (home) chdir(home);
+	}
+	if (request.argc > 0) {
+		char **argv = xmalloc((request.argc + 1) * sizeof(*argv));
+		for (int i = 0; i < request.argc; i++) argv[i] = xstrdup(request.argv[i]);
+		argv[request.argc] = NULL;
+		setTerminalCommand(request.argc, argv);
+	}
+	opt_title = request.title ? xstrdup(request.title)
+	    : (opt_line || !opt_cmd) ? "st" : opt_cmd[0];
+	nativeWindow.title = [NSString stringWithUTF8String:opt_title];
+	spare_free_request(&request);
+
+	/* Show first: the window manager detects the window while the shell
+	 * starts. The app is inactive, so plain orderFront: would be ignored. */
+	[nativeWindow orderFrontRegardless];
+	startTerminalSession();
+	updateWindowReveal();
 }
 
 int
@@ -2491,6 +2667,16 @@ main(int argc, char *argv[])
 			opt_fromsave = argv[i + 1];
 			memmove(&argv[i], &argv[i + 2], (argc - i - 1) * sizeof(*argv));
 			argc -= 2; break;
+		}
+		if (!strcmp(argv[i], "--spare")) {
+			opt_spare = 1;
+			memmove(&argv[i], &argv[i + 1], (argc - i) * sizeof(*argv));
+			argc--; i--; continue;
+		}
+		if (!strcmp(argv[i], "--spare-slot") && i + 1 < argc) {
+			opt_spare = 1; opt_spareslot = argv[i + 1];
+			memmove(&argv[i], &argv[i + 2], (argc - i - 1) * sizeof(*argv));
+			argc -= 2; i--; continue;
 		}
 		if (!strcmp(argv[i], "--from-orphan")) {
 			opt_fromorphan = 1;
@@ -2518,21 +2704,11 @@ main(int argc, char *argv[])
 
 run:
 	(void)opt_class; (void)opt_embed; (void)opt_name; (void)opt_fixed;
-	if (argc > 0) {
-		opt_cmd = argv;
-		if (opt_fromsave) persist_set_ephemeral(1);
-		if (argc >= 3 && argv[1][0] == '-' && strchr(argv[1], 'c'))
-			persist_set_altcmd(argv[2]);
-		else {
-			char command[PATH_MAX] = {0}; size_t used = 0;
-			for (int i = 0; i < argc && used < sizeof(command) - 1; i++) {
-				if (i) command[used++] = ' ';
-				size_t n = MIN(strlen(argv[i]), sizeof(command) - used - 1);
-				memcpy(command + used, argv[i], n); used += n;
-			}
-			persist_set_altcmd(command);
-		}
+	if (opt_spare) {
+		/* The launcher supplies directory, command and title at claim time. */
+		opt_fromsave = NULL; opt_fromorphan = 0; argc = 0;
 	}
+	if (argc > 0) setTerminalCommand(argc, argv);
 	if (!opt_title) opt_title = (opt_line || !opt_cmd) ? "st" : opt_cmd[0];
 	if (!macos_init_utf8_locale())
 		die("st: could not initialize a UTF-8 locale\n");
@@ -2546,35 +2722,30 @@ run:
 
 	[NSApplication sharedApplication];
 	[NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
-	managedWindowReveal = macos_consume_managed_reveal();
+	/* A spare is always revealed by its launcher's SIGUSR1 handshake. */
+	managedWindowReveal = macos_consume_managed_reveal() || opt_spare;
 	setupManagedWindowRevealSource();
 	appDelegate = [STAppDelegate new];
 	NSApp.delegate = appDelegate;
 	buildMenu();
 	initializeNativeWindow(cols, rows);
-	NSString *resourceBin = [NSBundle.mainBundle.resourcePath
-	    stringByAppendingPathComponent:@"bin"];
-	if ([[NSFileManager defaultManager] fileExistsAtPath:resourceBin]) {
-		NSString *oldPath = [NSString stringWithUTF8String:getenv("PATH") ?: ""];
-		NSString *newPath = [NSString stringWithFormat:@"%@:%@", resourceBin, oldPath];
-		setenv("PATH", newPath.UTF8String, 1);
+	prefixResourcePath();
+	setupTerminationSources();
+	if (opt_spare) {
+		if (spare_runtime_dir(spareRuntime, sizeof(spareRuntime)) < 0)
+			die("st: cannot create the runtime directory\n");
+		if (opt_spareslot)
+			strlcpy(spareSlot, opt_spareslot, sizeof(spareSlot));
+		else
+			snprintf(spareSlot, sizeof(spareSlot), "%s/spare", spareRuntime);
+		startControlSocket();
+		/* Publish once the run loop is serving requests, so the window
+		 * manager can register this app before anyone claims it. */
+		dispatch_async(dispatch_get_main_queue(), ^{ publishSpare(); });
+	} else {
+		startTerminalSession();
+		startControlSocket();
 	}
-	persist_init(getpid());
-	persist_register();
-	selinit();
-	ttyfd = ttynew(opt_line, shell, opt_io, opt_cmd);
-	if (macos_pty_start(ttyfd) < 0)
-		die("couldn't configure nonblocking PTY output: %s\n",
-		    strerror(errno));
-	nativeResize(nativeView.bounds.size.width, nativeView.bounds.size.height);
-	cmdline_init();
-	if (opt_fromsave && persist_get_altcmd()[0] && !persist_is_ephemeral()) {
-		ttywrite(persist_get_altcmd(), strlen(persist_get_altcmd()), 1);
-		ttywrite("\n", 1, 1);
-	}
-	startControlSocket();
-	setupSources();
-	macos_request_redraw();
 	[NSApp run];
 	cleanupNative();
 	return 0;
