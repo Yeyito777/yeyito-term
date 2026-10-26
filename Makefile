@@ -386,6 +386,9 @@ test_gpu_regressions: st
 	@./tests/test_gpu_regressions.sh
 	@./tests/test_cursor_rendering.sh
 	@./tests/test_image_occlusion.sh
+ifneq ($(UNAME_S),Darwin)
+	@./tests/test_video_e2e.sh
+endif
 
 test_aerospace_launcher: $(LAUNCHER)
 	@./tests/test_aerospace_launcher.sh

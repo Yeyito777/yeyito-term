@@ -3383,9 +3383,9 @@ run(void)
 	int w = win.w, h = win.h;
 	fd_set rfd;
 	int xfd = XConnectionNumber(xw.dpy), ttyfd, xev, drawing, videofd, maxfd;
-	int selret, ttyready, redraw;
+	int selret, ttyready, redraw, videodirty = 0;
 	struct timespec seltv, *tv, now, lastblink, trigger;
-	double timeout;
+	double timeout, videowait;
 
 	/* Waiting for window mapping */
 	do {
@@ -3486,6 +3486,19 @@ run(void)
 				(handler[ev.type])(&ev);
 		}
 
+		/* Videos: pick the frames due now and wake for the next one.
+		 * Their decoding and sound go on while the window is hidden;
+		 * a visible frame change redraws without waiting for input
+		 * to go idle, so frames keep their timing while packets
+		 * stream in. */
+		videowait = -1;
+		if (graphics_video_count()) {
+			int changed = 0;
+			videowait = video_linux_tick(&changed);
+			if (changed && IS_SET(MODE_VISIBLE) && IS_SET(MODE_ONSCREEN))
+				videodirty = 1;
+		}
+
 		/*
 		 * To reduce flicker and tearing, when new content or event
 		 * triggers drawing, we first wait a bit to ensure we got
@@ -3504,18 +3517,24 @@ run(void)
 			}
 			timeout = (maxlatency - TIMEDIFF(now, trigger)) \
 			          / maxlatency * minlatency;
-			if (timeout > 0)
+			if (timeout > 0 && !videodirty) {
+				if (videowait >= 0 && videowait < timeout)
+					timeout = videowait;
 				continue;  /* we have time, try to find idle */
+			}
 		}
 
 		/* The X fd can become readable due to internal GLX/DRI traffic without
 		 * yielding any X events.  Do not let that cut short the draw latency timer
 		 * or create an idle redraw/swap loop. */
-		if (drawing && !ttyready && !xev && selret > 0) {
+		if (drawing && !ttyready && !xev && selret > 0 && !videodirty) {
 			timeout = (maxlatency - TIMEDIFF(now, trigger)) \
 			          / maxlatency * minlatency;
-			if (timeout > 0)
+			if (timeout > 0) {
+				if (videowait >= 0 && videowait < timeout)
+					timeout = videowait;
 				continue;
+			}
 		}
 
 		/* DEC mode 2026 mutates the live grid normally but withholds all
@@ -3580,17 +3599,10 @@ run(void)
 		if (xsmoothscrolltimeout(&timeout))
 			redraw = 1;
 
-		/* Videos: pick the frames due now and wake for the next one.
-		 * Their decoding and sound go on while the window is hidden;
-		 * only a visible frame change redraws. */
-		if (graphics_video_count()) {
-			int changed = 0;
-			double wait = video_linux_tick(&changed);
-			if (changed && IS_SET(MODE_VISIBLE) && IS_SET(MODE_ONSCREEN))
-				redraw = 1;
-			if (wait >= 0 && (timeout < 0 || wait < timeout))
-				timeout = wait;
-		}
+		if (videodirty)
+			redraw = 1;
+		if (videowait >= 0 && (timeout < 0 || videowait < timeout))
+			timeout = videowait;
 
 		if (!redraw)
 			continue;
@@ -3598,6 +3610,7 @@ run(void)
 		draw();
 		XFlush(xw.dpy);
 		drawing = 0;
+		videodirty = 0;
 		/* draw() is where a new scroll is noticed: arm its next frame. */
 		xsmoothscrolltimeout(&timeout);
 	}
