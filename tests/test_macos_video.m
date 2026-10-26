@@ -8,6 +8,9 @@
 #include "../macos/renderer.m"
 #import <AudioToolbox/AudioToolbox.h>
 #import <VideoToolbox/VideoToolbox.h>
+#include <poll.h>
+#include <termios.h>
+#include <util.h>
 #include "test.h"
 
 #define FPS 30
@@ -474,6 +477,155 @@ TEST(flush_seeks_exactly)
 	ASSERT(waitState("ended", 2));
 }
 
+/* ---- through the terminal parser ------------------------------------ */
+
+/* Feed bytes to st's real input path: a PTY whose slave is st's tty line,
+ * read with ttyread() in whatever pieces the PTY hands over. */
+static int ptyMaster = -1, ptySlave = -1;
+
+static int
+openTerminalLine(void)
+{
+	char name[128];
+	struct termios mode;
+
+	if (openpty(&ptyMaster, &ptySlave, name, NULL, NULL) < 0)
+		return 0;
+	tcgetattr(ptySlave, &mode);
+	cfmakeraw(&mode);
+	tcsetattr(ptySlave, TCSANOW, &mode);
+	fcntl(ptyMaster, F_SETFL, fcntl(ptyMaster, F_GETFL) | O_NONBLOCK);
+	int input = dup(0);
+	ttynew(name, NULL, NULL, NULL);	/* opens the line as st's tty */
+	dup2(input, 0);
+	close(input);
+	return 1;
+}
+
+static void
+drainTerminalLine(void)
+{
+	struct pollfd readable = {ptySlave, POLLIN, 0};
+	while (poll(&readable, 1, 0) > 0 && (readable.revents & POLLIN))
+		ttyread();
+}
+
+static int
+writeTerminalLine(const char *data, size_t length)
+{
+	size_t offset = 0;
+	double end = CACurrentMediaTime() + 10;
+
+	while (offset < length && CACurrentMediaTime() < end) {
+		ssize_t n = write(ptyMaster, data + offset, length - offset);
+		if (n > 0)
+			offset += (size_t)n;
+		drainTerminalLine();
+	}
+	drainTerminalLine();
+	return offset == length;
+}
+
+typedef struct {
+	char *data;
+	size_t length, capacity;
+} Stream;
+
+static void
+streamAppend(Stream *stream, const char *bytes, size_t length)
+{
+	if (stream->length + length > stream->capacity) {
+		stream->capacity = (stream->length + length) * 2;
+		stream->data = realloc(stream->data, stream->capacity);
+	}
+	memcpy(stream->data + stream->length, bytes, length);
+	stream->length += length;
+}
+
+/* An APC as an application writes it: payloads over 4096 base64 bytes are
+ * split into m=1 chunks. */
+static void
+streamAPC(Stream *stream, const char *controls, const void *payload,
+		size_t length)
+{
+	size_t encoded = (length + 2) / 3 * 4, offset = 0;
+	char *base = malloc(encoded + 1);
+	char head[128];
+
+	base64(payload, length, base);
+	do {
+		size_t chunk = MIN(encoded - offset, (size_t)4096);
+		int more = offset + chunk < encoded;
+		if (!offset)
+			snprintf(head, sizeof(head), "\033_G%s%s%s", controls,
+			    more ? ",m=1" : "", length ? ";" : "");
+		else
+			snprintf(head, sizeof(head), "\033_Gm=%d;", more);
+		streamAppend(stream, head, strlen(head));
+		streamAppend(stream, base + offset, chunk);
+		streamAppend(stream, "\033\\", 2);
+		offset += chunk;
+	} while (offset < encoded);
+	free(base);
+}
+
+static void
+streamPacket(Stream *stream, int stream_id, const Encoded *frame)
+{
+	unsigned char *packet = malloc(VIDEO_PACKET_HEADER + frame->length);
+	packet[0] = (unsigned char)stream_id;
+	packet[1] = (unsigned char)frame->keyframe;
+	for (int i = 0; i < 8; i++)
+		packet[2 + i] = (unsigned char)((uint64_t)frame->pts >> (56 - 8 * i));
+	memcpy(packet + VIDEO_PACKET_HEADER, frame->data, frame->length);
+	streamAPC(stream, "a=v,i=77,k=d", packet, VIDEO_PACKET_HEADER + frame->length);
+	free(packet);
+}
+
+TEST(stream_through_the_terminal_parser)
+{
+	static const char config[] = "video=h264 width=160 height=96 prebuffer=100 "
+	    "volume=0 audio=aac rate=48000 channels=2";
+	Stream stream = {0};
+	int a = 0;
+	size_t offset = 0;
+	unsigned seed = 12345;
+
+	graphics_reset();
+	/* Text, then the video placed where the cursor is (row 1, column 1). */
+	streamAppend(&stream, "\033[H\r\nx", 6);
+	streamAPC(&stream, "a=v,i=77,k=o,q=2", config, strlen(config));
+	streamAPC(&stream, "a=p,i=77,p=1,c=4,r=2,C=1,q=2", NULL, 0);
+	for (int v = 0; v < VIDEO_FRAMES; v++) {
+		while (a < audioCount && audio[a].pts <= video[v].pts)
+			streamPacket(&stream, VIDEO_STREAM_AUDIO, &audio[a++]);
+		streamPacket(&stream, VIDEO_STREAM_VIDEO, &video[v]);
+	}
+	while (a < audioCount)
+		streamPacket(&stream, VIDEO_STREAM_AUDIO, &audio[a++]);
+	streamAPC(&stream, "a=v,i=77,k=e,q=2", NULL, 0);
+	/* Odd-sized writes split escapes, base64 and chunk boundaries. */
+	ASSERT(ptyMaster >= 0 || openTerminalLine());
+	while (offset < stream.length) {
+		seed = seed * 1103515245 + 12345;
+		size_t piece = MIN(stream.length - offset, (size_t)(1 + seed % 997));
+		ASSERT(writeTerminalLine(stream.data + offset, piece));
+		offset += piece;
+	}
+	free(stream.data);
+	ASSERT_EQ(1, (int)graphics_video_count());
+	ASSERT(statusField("rx") > 1000);
+	ASSERT(strstr(response, "error=") == NULL);
+	ASSERT(statusField("vbuf") == (VIDEO_FRAMES - 1) * FRAME_US);
+	ASSERT(waitState("playing", 2));
+	spin(0.6);
+	ASSERT_EQ('b', shownColor());
+	ASSERT_EQ(1, placed.row);
+	ASSERT_EQ(1, placed.column);
+	ASSERT(waitState("ended", 2));
+	ASSERT(statusField("shown") >= 20);
+}
+
 TEST(errors_are_reported_and_delete_stops)
 {
 	unsigned char garbage[64];
@@ -532,6 +684,7 @@ main(void)
 		RUN_TEST(video_plays_on_the_host_clock_and_ends);
 		RUN_TEST(audio_clock_pause_and_resume);
 		RUN_TEST(flush_seeks_exactly);
+		RUN_TEST(stream_through_the_terminal_parser);
 		RUN_TEST(errors_are_reported_and_delete_stops);
 		graphics_reset();
 		mac_video_shutdown();
