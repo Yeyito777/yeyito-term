@@ -192,16 +192,57 @@ the pipe accepts will buffer the whole file into the terminal's memory and
 make every pause or seek wait behind it. `st-play` therefore:
 
 1. Sends `k=q` with an increasing `seq` every ~32 KiB written (and at least
-   every 100 ms while sending). When the reply for `seq` arrives, every byte
-   written before that query has reached the terminal.
+   every 100 ms while sending, 250 ms otherwise), with at most 16 queries
+   unanswered so their replies never fill the terminal's tty buffer. When
+   the reply for `seq` arrives, every byte written before that query has
+   reached the terminal.
 2. Keeps the bytes written after the newest acknowledged query below a
-   window of about 250 ms at the measured delivery rate (at least 64 KiB).
-   Pause, seek and quit commands then reach the terminal within about that
-   time.
-3. Keeps at most a few seconds of media ahead of the reported `pos`.
-4. Measures delivery rate (acknowledged bytes per second, counted while the
-   window was full) and fits the encoder's bitrate and resolution to it,
-   remembering that base64 adds a third to every payload byte.
+   window of one round trip plus ~80 ms (at least 200 ms) at the delivery
+   rate, plus the bytes one burst of replies acknowledges, at least 64 KiB.
+   The window never plans for more than twice the rate actually seen in the
+   last half second. Pause, seek and quit commands go ahead of queued
+   packets and reach the terminal within about that time.
+3. Keeps at most a few seconds of media ahead of the reported `pos` (5 s
+   over a link, 2 s locally).
+4. Measures the delivery rate as acknowledged bytes per second over the
+   last 3 s, counting only intervals in which it always had media to send
+   (not app-limited), because replies arrive in bursts and short spans
+   overstate it. A rate well below the estimate for two round trips, with
+   a window big enough to hold the link at that rate, lowers it at once;
+   one 30% higher over 1.5 s raises it. While the media budget is full it
+   presumes the link 20% a second faster (window-limited acks correct it
+   once the encoder outruns the link) and probes for a second with a
+   larger window. The encoder's bitrate follows
+   the rate (base64 adds a third to every payload byte; APC and packet
+   headers ~42 bytes a packet) and uses less of it the less media the
+   terminal holds (`vbuf`/`abuf`); the resolution steps through a ladder
+   that never exceeds the source or the placement, up after 3 s, down
+   after 1 s.
+
+## st-play
+
+```
+st-play [--inline ROWS] [--start S] [--copy] [--bitrate KBPS]
+        [--max-bitrate KBPS] [--preset NAME] [--volume V] [--mute]
+        [--no-audio] [--prebuffer MS] [--ahead S] [--stats FILE]
+        [--log FILE] FILE|URL|-
+```
+
+Fullscreen on the alternate screen with a status line, or `--inline ROWS`
+at the cursor. Keys: space/`p` pause, left/right 5 s, down/up 60 s,
+PgDn/PgUp 10 min, `m` mute, `9`/`0` volume, `q`/Esc/Ctrl-C quit. Seeks are
+exact (decode to the target, `k=f` with `start=`, a new IDR). `--copy` passes
+8-bit H.264 through when the link has room for it (about 1.5 times its
+bitrate) and switches to transcoding at once when it falls short. `--stats` logs the flow and
+adaptation state every 250 ms. Video is always H.264 (libx264, Annex B,
+SPS/PPS on every IDR), audio AAC-LC 48 kHz stereo.
+
+`tests/fake_video_term` runs st-play on a PTY behind a link with a set
+bandwidth, round-trip time and buffer, parses the stream with `graphics.c`
+and `video.c`, and validates it with libavcodec; `tests/test_play_e2e.sh`
+uses it in `make test`. `tests/pty_throttle` puts the same kind of link
+between a real terminal and st-play:
+`st -e tests/pty_throttle --bw 3000 --rtt 150 -- st-play clip.mp4`.
 
 ## Limits
 
@@ -221,7 +262,7 @@ make every pause or seek wait behind it. `st-play` therefore:
 | `graphics.c` | `a=v` dispatch, video images and their lifecycle (open, replace, delete, reset). |
 | `macos/videoplayer.m` | VideoToolbox decode, `AVSampleBufferAudioRenderer` and `AVSampleBufferRenderSynchronizer` playback, frames as Metal textures. |
 | `render/video_linux.c` | libavcodec decode, PulseAudio playback, frames as OpenGL textures. |
-| `play/st-play.c` | Reference sender and terminal video player. |
+| `play/` | `st-play`: reference sender and terminal video player (`media.c` ffmpeg pipeline, `flow.c` flow control and adaptation, `out.c` APC framing and write queue, `input.c` key and reply parser). |
 | `tests/test_video.c` | Protocol and lifecycle tests against a mock backend. |
 
 `ST_VIDEO_VOLUME` (0..1) scales the volume of every video, so tests and
