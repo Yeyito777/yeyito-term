@@ -30,3 +30,5 @@ tests/test_macos_spare
 tests/test_macos_control
 /st-aerospace-launch
 tests/test_macos_aerospace
+tests/test_graphics
+tests/test_video

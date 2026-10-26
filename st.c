@@ -3416,6 +3416,40 @@ tfastcursorop(const char *s, int n, int *used)
 	return 1;
 }
 
+/* Append a run of printable ASCII to the control string being collected:
+ * the same as tputc() for each byte, without its per-byte dispatch.  Image
+ * and video payloads are base64, megabytes per second of it. */
+static int
+tstrputascii(const char *buf, int buflen)
+{
+	int len = 0;
+
+	if (!(term.esc & ESC_STR) || IS_SET(MODE_PRINT))
+		return 0;
+	while (len < buflen && BETWEEN((uchar)buf[len], 0x20, 0x7e))
+		len++;
+	if (len < 2 || (term.esc & ESC_STR_IGNORE))
+		return len;
+	if (strescseq.type == '_' && (strescseq.len ? strescseq.buf[0] :
+	    buf[0]) == 'G' && strescseq.len + len > GRAPHICS_APC_MAX) {
+		term.esc |= ESC_STR_IGNORE;
+		return len;
+	}
+	if (strescseq.len + len >= strescseq.siz) {
+		size_t siz = strescseq.siz;
+		while (strescseq.len + len >= siz) {
+			if (siz > (SIZE_MAX - UTF_SIZ) / 2)
+				return len;
+			siz *= 2;
+		}
+		strescseq.buf = xrealloc(strescseq.buf, siz);
+		strescseq.siz = siz;
+	}
+	memcpy(&strescseq.buf[strescseq.len], buf, len);
+	strescseq.len += len;
+	return len;
+}
+
 int
 twrite(const char *buf, int buflen, int show_ctrl)
 {
@@ -3424,6 +3458,11 @@ twrite(const char *buf, int buflen, int show_ctrl)
 	int n, used, gpu = xgpuenabled();
 
 	for (n = 0; n < buflen; n += charsize) {
+		if (!show_ctrl && (term.esc & ESC_STR) &&
+		    (used = tstrputascii(buf + n, buflen - n)) >= 2) {
+			charsize = used;
+			continue;
+		}
 		if (gpu && !show_ctrl && buf[n] == '\033' &&
 		    tfastcursorop(buf + n, buflen - n, &used)) {
 			charsize = used;

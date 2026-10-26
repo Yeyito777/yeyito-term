@@ -548,6 +548,57 @@ TEST(malformed_interleaving_aborts_chunk_transfer)
 	ASSERT_EQ(0, (int)graphics_placement_count());
 }
 
+/* mpv --vo=kitty sends every frame as a new anonymous image over the last:
+ * covered frames must go, or the video stops at the quota/placement limit. */
+TEST(raw_frame_player_keeps_one_frame)
+{
+	int i;
+	reset_state();
+	for (i = 0; i < 1100; i++) {
+		GraphicsCommandResult result =
+		    command("Ga=T,f=24,s=2,v=1,C=1,q=2;AAAA//8A", line_a);
+		ASSERT(result.redraw);
+		ASSERT_EQ(0, (int)result.response_len);
+		ASSERT_EQ(1, (int)graphics_placement_count());
+		ASSERT_EQ(1, (int)graphics_image_count());
+	}
+	ASSERT(freed_images >= 1099);
+	graphics_draw(0, GRAPHICS_STAGE_ABOVE_TEXT, 10, 20, 24,
+	    line_row, capture_draw, NULL);
+	ASSERT_EQ(1, drawn);
+
+	/* A frame elsewhere, or a smaller one, covers nothing. */
+	command("Ga=T,f=24,s=2,v=1,C=1,q=2;AAAA//8A", line_c);
+	command("Ga=T,f=24,s=1,v=1,C=1,q=2;AAAA", line_a);
+	ASSERT_EQ(3, (int)graphics_placement_count());
+	/* A bigger one at the same anchor covers both there. */
+	command("Ga=T,f=24,s=2,v=2,C=1,q=2;AAAA//8AAAAA//8A", line_a);
+	ASSERT_EQ(2, (int)graphics_placement_count());
+}
+
+TEST(covering_needs_an_opaque_frame_over_an_anonymous_image)
+{
+	reset_state();
+	/* Translucent RGBA does not hide what is below it. */
+	command("Ga=T,f=24,s=1,v=1,C=1,q=2;AAAA", line_a);
+	command("Ga=T,f=32,s=1,v=1,C=1,q=2;AAAAgA==", line_a);
+	ASSERT_EQ(2, (int)graphics_placement_count());
+	/* Opaque RGBA does. */
+	command("Ga=T,f=32,s=1,v=1,C=1,q=2;AAAA/w==", line_a);
+	ASSERT_EQ(1, (int)graphics_placement_count());
+
+	/* A named image can be placed again, so its placement stays. */
+	reset_state();
+	command("Ga=T,f=24,s=1,v=1,i=5,C=1,q=2;AAAA", line_a);
+	command("Ga=T,f=24,s=1,v=1,C=1,q=2;AAAA", line_a);
+	ASSERT_EQ(2, (int)graphics_placement_count());
+	/* So does an anonymous one drawn above the new frame. */
+	reset_state();
+	command("Ga=T,f=24,s=1,v=1,z=5,C=1,q=2;AAAA", line_a);
+	command("Ga=T,f=24,s=1,v=1,C=1,q=2;AAAA", line_a);
+	ASSERT_EQ(2, (int)graphics_placement_count());
+}
+
 TEST_SUITE(graphics)
 {
 	RUN_TEST(query_direct_rgb);
@@ -574,6 +625,8 @@ TEST_SUITE(graphics)
 	RUN_TEST(image_count_limit_evicts_and_allows_replacement);
 	RUN_TEST(malformed_interleaving_aborts_chunk_transfer);
 	RUN_TEST(draw_rows_includes_partial_rows_outside_viewport);
+	RUN_TEST(raw_frame_player_keeps_one_frame);
+	RUN_TEST(covering_needs_an_opaque_frame_over_an_anonymous_image);
 	graphics_reset();
 }
 
