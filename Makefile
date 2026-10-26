@@ -12,7 +12,7 @@ OBJC_SRC = macos/backend.m macos/renderer.m macos/pty.m macos/pasteboard5522.m
 OBJ = $(SRC:.c=.o) $(OBJC_SRC:.m=.o)
 else
 SRC = st.c x.c graphics.c video.c clipboard5522.c vimnav.c sshind.c notif.c persist.c cmdline.c search.c
-OBJ = $(SRC:.c=.o)
+OBJ = $(SRC:.c=.o) render/video_linux.o
 endif
 OBJ += render/image_occlusion.o render/smoothscroll.o render/smoothscroll_term.o
 APP = .build/st.app
@@ -35,11 +35,13 @@ config.h:
 	$(CC) $(STOBJCFLAGS) -c $< -o $@
 
 st.o: config.h st.h win.h graphics.h video.h vimnav.h persist.h macos/emoji.h
-x.o: arg.h config.h st.h win.h xstate.h graphics.h sync.h clipboard5522.h sshind.h notif.h persist.h cmdline.h search.h render/gpu.c
+x.o: arg.h config.h st.h win.h xstate.h graphics.h sync.h clipboard5522.h sshind.h notif.h persist.h cmdline.h search.h render/gpu.c render/video_linux.h
 graphics.o: graphics.c graphics.h video.h st.h vendor/stb_image.h
 video.o: video.c video.h
 render/image_occlusion.o: render/image_occlusion.c render/image_occlusion.h graphics.h st.h
 	$(CC) $(STCFLAGS) -c render/image_occlusion.c -o $@
+render/video_linux.o: render/video_linux.c render/video_linux.h video.h
+	$(CC) $(STCFLAGS) -c render/video_linux.c -o $@
 render/smoothscroll.o: render/smoothscroll.c render/smoothscroll.h
 	$(CC) $(STCFLAGS) -c render/smoothscroll.c -o $@
 render/smoothscroll_term.o: render/smoothscroll_term.c render/smoothscroll.h st.h win.h
@@ -130,7 +132,7 @@ dist: clean
 	cp -R CLAUDE.md Makefile README.md TODO.md config.mk\
 		config.def.h st.info st.1 arg.h st.h win.h xstate.h sync.h vimnav.h sshind.h notif.h persist.h cmdline.h cmdline_layout.h search.h $(DIST_SRC)\
 		st-$(VERSION)
-	cp -R render/gpu.c render/image_occlusion.c render/image_occlusion.h render/smoothscroll.c render/smoothscroll.h render/smoothscroll_term.c render/README.md st-$(VERSION)/render
+	cp -R render/gpu.c render/image_occlusion.c render/image_occlusion.h render/smoothscroll.c render/smoothscroll.h render/smoothscroll_term.c render/video_linux.c render/video_linux.h render/README.md st-$(VERSION)/render
 	cp -R docs/kitty-graphics.md st-$(VERSION)/docs
 	mkdir -p st-$(VERSION)/vendor
 	cp -R vendor/stb_image.h st-$(VERSION)/vendor
@@ -269,6 +271,15 @@ tests/test_video.o: tests/test_video.c tests/test.h graphics.h video.h st.h
 test_video: tests/test_video.o graphics.o video.o
 	$(CC) -o tests/test_video tests/test_video.o graphics.o video.o -lz
 
+# Linux video backend (includes render/video_linux.c; real decoders, fake
+# clock, null audio output)
+VIDEO_LINUX_PKGS = libavcodec libavutil libswscale libpulse
+tests/test_video_linux.o: tests/test_video_linux.c tests/test.h render/video_linux.c render/video_linux.h video.h
+	$(CC) $(TESTFLAGS) `$(PKG_CONFIG) --cflags $(VIDEO_LINUX_PKGS)` -c tests/test_video_linux.c -o $@
+
+test_video_linux: tests/test_video_linux.o video.o
+	$(CC) -o tests/test_video_linux tests/test_video_linux.o video.o `$(PKG_CONFIG) --libs $(VIDEO_LINUX_PKGS)` -lpthread -lm
+
 # smooth scrolling engine + terminal glue (includes both .c files, fake terminal)
 tests/test_smoothscroll.o: tests/test_smoothscroll.c tests/test.h render/smoothscroll.c render/smoothscroll_term.c render/smoothscroll.h st.h win.h
 	$(CC) $(TESTFLAGS) -c tests/test_smoothscroll.c -o tests/test_smoothscroll.o
@@ -383,6 +394,9 @@ ifeq ($(UNAME_S),Darwin)
 endif
 
 test: test_image_occlusion test_smoothscroll test_vimnav test_sshind test_scrollback test_cwd test_notif test_persist test_search test_cmdline_layout test_mode_reset test_sync test_clipboard5522 test_graphics test_video test_aerospace_launcher
+ifneq ($(UNAME_S),Darwin)
+test: test_video_linux
+endif
 ifeq ($(UNAME_S),Darwin)
 test: test_macos_image_occlusion test_macos_mouse_cursor test_macos_pty test_macos_reveal test_macos_spare test_macos_launchlog test_macos_aerospace test_macos_control test_macos_text_input test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522
 test: test_macos_symbol_input
@@ -401,6 +415,9 @@ endif
 	@./tests/test_clipboard5522
 	@./tests/test_graphics
 	@./tests/test_video
+ifneq ($(UNAME_S),Darwin)
+	@./tests/test_video_linux
+endif
 	@./tests/test_image_occlusion
 	@./tests/test_smoothscroll
 ifeq ($(UNAME_S),Darwin)
@@ -422,7 +439,7 @@ endif
 
 clean-tests:
 	rm -f tests/test_macos_symbol_input tests/test_macos_symbol_input.o tests/macos_symbol_sender
-	rm -f tests/*.o tests/test_macos_image_occlusion tests/test_macos_mouse_cursor tests/test_image_occlusion tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search tests/test_cmdline_layout tests/test_mode_reset tests/test_sync tests/test_clipboard5522 tests/test_graphics tests/test_video tests/test_smoothscroll tests/test_macos_pty tests/test_macos_reveal tests/test_macos_spare tests/test_macos_launchlog tests/test_macos_aerospace tests/test_macos_control tests/test_macos_text_input tests/test_macos_locale tests/test_macos_glyph_layout tests/test_macos_emoji tests/test_macos_pasteboard5522
+	rm -f tests/*.o tests/test_macos_image_occlusion tests/test_macos_mouse_cursor tests/test_image_occlusion tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search tests/test_cmdline_layout tests/test_mode_reset tests/test_sync tests/test_clipboard5522 tests/test_graphics tests/test_video tests/test_video_linux tests/test_smoothscroll tests/test_macos_pty tests/test_macos_reveal tests/test_macos_spare tests/test_macos_launchlog tests/test_macos_aerospace tests/test_macos_control tests/test_macos_text_input tests/test_macos_locale tests/test_macos_glyph_layout tests/test_macos_emoji tests/test_macos_pasteboard5522
 
-.PHONY: all app install-app uninstall-app install-hint clean dist install uninstall test test_image_occlusion test_smoothscroll test_macos_image_occlusion test_macos_mouse_cursor test_gpu_regressions test_aerospace_launcher test_mode_reset test_sync test_graphics test_video test_macos_pty test_macos_reveal test_macos_spare test_macos_launchlog test_macos_aerospace test_macos_control test_macos_text_input test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522 clean-tests
+.PHONY: all app install-app uninstall-app install-hint clean dist install uninstall test test_image_occlusion test_smoothscroll test_macos_image_occlusion test_macos_mouse_cursor test_gpu_regressions test_aerospace_launcher test_mode_reset test_sync test_graphics test_video test_video_linux test_macos_pty test_macos_reveal test_macos_spare test_macos_launchlog test_macos_aerospace test_macos_control test_macos_text_input test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522 clean-tests
 .PHONY: test_macos_symbol_input

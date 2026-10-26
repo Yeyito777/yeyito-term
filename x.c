@@ -39,6 +39,7 @@ char *argv0;
 #include "sync.h"
 #include "xstate.h"
 #include "render/smoothscroll.h"
+#include "render/video_linux.h"
 
 /* types used in config.h */
 typedef struct {
@@ -2613,6 +2614,7 @@ xstartdraw(void)
 			return 0;
 		}
 		glXMakeCurrent(xw.dpy, xw.win, gpu.ctx);
+		video_linux_begin_frame();
 		if (++gpu.frame == 0) {
 			GpuImageTexture *image;
 			gpu.frame = 1;
@@ -3380,7 +3382,7 @@ run(void)
 	XEvent ev;
 	int w = win.w, h = win.h;
 	fd_set rfd;
-	int xfd = XConnectionNumber(xw.dpy), ttyfd, xev, drawing;
+	int xfd = XConnectionNumber(xw.dpy), ttyfd, xev, drawing, videofd, maxfd;
 	int selret, ttyready, redraw;
 	struct timespec seltv, *tv, now, lastblink, trigger;
 	double timeout;
@@ -3432,6 +3434,13 @@ run(void)
 		FD_ZERO(&rfd);
 		FD_SET(ttyfd, &rfd);
 		FD_SET(xfd, &rfd);
+		maxfd = MAX(xfd, ttyfd);
+		/* Video decoders wake the loop when a frame arrives after their
+		 * queue ran empty; due frames are timed below. */
+		if ((videofd = video_linux_fd()) >= 0) {
+			FD_SET(videofd, &rfd);
+			maxfd = MAX(maxfd, videofd);
+		}
 
 		if (XPending(xw.dpy))
 			timeout = 0;  /* existing events might not set xfd */
@@ -3440,7 +3449,7 @@ run(void)
 		seltv.tv_nsec = 1E6 * (timeout - 1E3 * seltv.tv_sec);
 		tv = timeout >= 0 ? &seltv : NULL;
 
-		if ((selret = pselect(MAX(xfd, ttyfd)+1, &rfd, NULL, NULL, tv, NULL)) < 0) {
+		if ((selret = pselect(maxfd+1, &rfd, NULL, NULL, tv, NULL)) < 0) {
 			if (errno == EINTR) {
 				if (childready())
 					reapchild();
@@ -3451,6 +3460,11 @@ run(void)
 
 		if (childready())
 			reapchild();
+		if (videofd >= 0 && selret > 0 && FD_ISSET(videofd, &rfd)) {
+			uint64_t wakes;
+			if (read(videofd, &wakes, sizeof(wakes)) < 0)
+				wakes = 0;
+		}
 		clock_gettime(CLOCK_MONOTONIC, &now);
 		clip5522_tick(&now);
 
@@ -3565,6 +3579,18 @@ run(void)
 
 		if (xsmoothscrolltimeout(&timeout))
 			redraw = 1;
+
+		/* Videos: pick the frames due now and wake for the next one.
+		 * Their decoding and sound go on while the window is hidden;
+		 * only a visible frame change redraws. */
+		if (graphics_video_count()) {
+			int changed = 0;
+			double wait = video_linux_tick(&changed);
+			if (changed && IS_SET(MODE_VISIBLE) && IS_SET(MODE_ONSCREEN))
+				redraw = 1;
+			if (wait >= 0 && (timeout < 0 || wait < timeout))
+				timeout = wait;
+		}
 
 		if (!redraw)
 			continue;
