@@ -83,7 +83,7 @@ flow_ping_due(const Flow *flow, double now, int sending)
 	double since = now - flow->last_ping_time;
 	uint64_t bytes = flow->written - flow->last_ping_offset;
 
-	if (flow->ping_count >= FLOW_PINGS)
+	if (flow->ping_count >= FLOW_OUTSTANDING)
 		return 0;
 	if ((double)bytes >= ping_bytes(flow))
 		return 1;

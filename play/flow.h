@@ -21,6 +21,11 @@
 #define FLOW_PING_SENDING 0.1	/* seconds between pings while sending */
 #define FLOW_PING_IDLE    0.25	/* keepalive pings for position updates */
 #define FLOW_PINGS        2048
+/* Unanswered pings at most.  Their replies queue in the terminal's tty
+ * buffer toward us (4 KiB on Linux) while we encode; a terminal whose reply
+ * write blocks may stall or worse (st re-enters its pty reader), so keep
+ * them well under it: 16 x ~115 bytes. */
+#define FLOW_OUTSTANDING  16
 #define FLOW_ACKS         256
 #define FLOW_AVERAGE      3.0	/* seconds of window-limited acks averaged */
 
