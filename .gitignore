@@ -9,6 +9,10 @@ st-*.tar.gz
 .home/
 .runtime/
 
+st-play
+tests/test_play
+tests/fake_video_term
+tests/.play-e2e.*
 tests/test_vimnav
 tests/test_sshind
 tests/test_scrollback
