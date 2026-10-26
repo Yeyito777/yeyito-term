@@ -2419,7 +2419,18 @@ setupSources(void)
 	ttySource = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, ttyfd, 0,
 	    dispatch_get_main_queue());
 	dispatch_source_set_event_handler(ttySource, ^{
-		if (ttyread() && launchStats.active && !launchStats.output)
+		/* A macOS PTY hands over at most 1 KiB per read.  Drain what is
+		 * there, for a few milliseconds at most, in one event so that bulk
+		 * output (raw video frames, big files) isn't paced by main-queue
+		 * round trips; the descriptor is nonblocking. */
+		double deadline = CACurrentMediaTime() + 0.004;
+		size_t total = 0, n;
+		while ((n = ttyread()) > 0) {
+			total += n;
+			if (CACurrentMediaTime() >= deadline)
+				break;
+		}
+		if (total && launchStats.active && !launchStats.output)
 			launchStats.output = CACurrentMediaTime();
 		macos_request_redraw();
 	});

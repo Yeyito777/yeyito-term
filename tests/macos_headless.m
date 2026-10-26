@@ -166,15 +166,20 @@ main(int argc, char **argv)
 			struct pollfd readable = {ttyfd, POLLIN, 0};
 			int status_code;
 			if (poll(&readable, 1, 2) > 0) {
-				if (readable.revents & POLLIN)
-					ttyread();
-				else if (readable.revents & (POLLHUP | POLLERR))
+				/* As the backend's tty source does: drain for ~4 ms. */
+				if (readable.revents & POLLIN) {
+					double deadline = CACurrentMediaTime() + 0.004;
+					while (ttyread() > 0 && CACurrentMediaTime() < deadline)
+						;
+				} else if (readable.revents & (POLLHUP | POLLERR)) {
 					break;
+				}
 			}
 			if (waitpid(-1, &status_code, WNOHANG) > 0)
 				break;
-			[NSRunLoop.mainRunLoop runUntilDate:[NSDate
-			    dateWithTimeIntervalSinceNow:0.001]];
+			/* Main-queue work (decoder callbacks) without blocking. */
+			[NSRunLoop.mainRunLoop runMode:NSDefaultRunLoopMode
+			    beforeDate:NSDate.distantPast];
 			double now = CACurrentMediaTime();
 			mac_video_tick(now + 1.0 / fps);
 			if (now >= nextFrame) {
@@ -185,8 +190,10 @@ main(int argc, char **argv)
 				snprintf(path, sizeof(path), "%s/shot-%03d.png", outdir, shot++);
 				saveSnapshot(path);
 				mac_video_describe(status, sizeof(status));
-				printf("%6.2fs %s frames=%d %s\n", now - start, path,
-				    headlessFrames, status);
+				printf("%6.2fs %s frames=%d images=%zu placements=%zu "
+				    "image_mb=%.1f %s\n", now - start, path, headlessFrames,
+				    graphics_image_count(), graphics_placement_count(),
+				    graphics_image_bytes() / 1048576.0, status);
 				fflush(stdout);
 				nextShot += every;
 			}
