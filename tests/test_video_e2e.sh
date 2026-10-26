@@ -59,6 +59,7 @@ display=$(xenv display -e "$env_name")
 PULSE_SERVER=unix:/nonexistent DISPLAY=$display "$st_bin" -T "$title" -e python3 -c '
 import os, select, sys, termios, time, tty
 
+sys.dont_write_bytecode = True
 sys.path.insert(0, sys.argv[2])
 import video_feed as vf
 
