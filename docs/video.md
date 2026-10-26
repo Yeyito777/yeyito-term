@@ -210,7 +210,9 @@ make every pause or seek wait behind it. `st-play` therefore:
    overstate it. A rate well below the estimate for two round trips, with
    a window big enough to hold the link at that rate, lowers it at once;
    one 30% higher over 1.5 s raises it. While the media budget is full it
-   probes for a second with a larger window. The encoder's bitrate follows
+   presumes the link 20% a second faster (window-limited acks correct it
+   once the encoder outruns the link) and probes for a second with a
+   larger window. The encoder's bitrate follows
    the rate (base64 adds a third to every payload byte; APC and packet
    headers ~42 bytes a packet) and uses less of it the less media the
    terminal holds (`vbuf`/`abuf`); the resolution steps through a ladder
