@@ -23,6 +23,8 @@ tests/test_search
 tests/test_cmdline_layout
 tests/test_image_occlusion
 tests/test_macos_image_occlusion
+tests/test_macos_video
+tests/macos_headless
 tests/test_macos_mouse_cursor
 tests/test_macos_symbol_input
 tests/macos_symbol_sender
@@ -36,3 +38,4 @@ tests/test_macos_control
 tests/test_macos_aerospace
 tests/test_graphics
 tests/test_video
+tests/test_video_linux

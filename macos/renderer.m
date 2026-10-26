@@ -82,6 +82,9 @@ typedef struct {
 	__strong id<MTLCommandBuffer> command;
 	unsigned long frames;
 	void (*presentCallback)(double);
+	/* CoreFoundation objects to release when this frame completes. */
+	const void **releases;
+	size_t releaseCount, releaseCapacity;
 } MacRenderer;
 
 static MacRenderer r;
@@ -686,11 +689,13 @@ mac_renderer_image(int stage, uint64_t serial, const uint8_t *rgba,
 	float scale, left, top, right, bottom, u0, v0, u1, v1;
 	MacVertex a, b, c, d;
 
-	if (stage < 0 || stage > 2 || !rgba || imageWidth <= 0 || imageHeight <= 0 ||
+	if (stage < 0 || stage > 2 || imageWidth <= 0 || imageHeight <= 0 ||
 	    sourceWidth <= 0 || sourceHeight <= 0 || width <= 0 || height <= 0)
 		return;
 	key = @(serial);
 	texture = r.images[key];
+	if (!texture && !rgba)
+		return;
 	if (!texture) {
 		MTLTextureDescriptor *descriptor = [MTLTextureDescriptor
 		    texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
@@ -748,6 +753,33 @@ void
 mac_renderer_remove_image(uint64_t serial)
 {
 	[r.images removeObjectForKey:@(serial)];
+}
+
+void
+mac_renderer_set_image_texture(uint64_t serial, void *texture)
+{
+	if (texture)
+		r.images[@(serial)] = (__bridge id<MTLTexture>)texture;
+	else
+		[r.images removeObjectForKey:@(serial)];
+}
+
+void
+mac_renderer_release_after_frame(const void *object)
+{
+	if (!object)
+		return;
+	if (r.releaseCount == r.releaseCapacity) {
+		size_t capacity = r.releaseCapacity ? r.releaseCapacity * 2 : 16;
+		const void **grown = realloc(r.releases, capacity * sizeof(*grown));
+		if (!grown) {
+			/* Leaking is safer than releasing what the GPU may read. */
+			return;
+		}
+		r.releases = grown;
+		r.releaseCapacity = capacity;
+	}
+	r.releases[r.releaseCount++] = object;
 }
 
 void
@@ -867,6 +899,18 @@ mac_renderer_end(void)
 		[r.drawable addPresentedHandler:^(id<MTLDrawable> drawable) {
 			CFTimeInterval presented = drawable.presentedTime;
 			dispatch_async(dispatch_get_main_queue(), ^{ callback(presented); });
+		}];
+	}
+	if (r.releaseCount) {
+		const void **releases = r.releases;
+		size_t count = r.releaseCount;
+		r.releases = NULL;
+		r.releaseCount = r.releaseCapacity = 0;
+		[r.command addCompletedHandler:^(id<MTLCommandBuffer> buffer) {
+			(void)buffer;
+			for (size_t i = 0; i < count; i++)
+				CFRelease(releases[i]);
+			free((void *)releases);
 		}];
 	}
 	[r.command presentDrawable:r.drawable];

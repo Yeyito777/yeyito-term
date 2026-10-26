@@ -8,6 +8,7 @@
  */
 
 #include "image_occlusion.h"
+#include "video_linux.h"
 
 static float gpupal[512][3];
 static int gpupalvalid;
@@ -46,6 +47,11 @@ typedef struct GpuImageTexture {
 	uint64_t frame;
 	GLuint texture;
 	int width, height;
+	/* st video: the frame's Y, U, V planes (or texture, as RGBA, when
+	 * shaders are unavailable) and which frame they hold. */
+	GLuint planes[3];
+	int planew[3], planeh[3];
+	uint64_t videoseq;
 } GpuImageTexture;
 
 typedef struct {
@@ -80,6 +86,11 @@ typedef struct {
 	GpuBatch obg, otext, octext, odeco;
 	GpuImageTexture *images;
 	ImageOcclusion imageocclusion;
+	/* YUV -> RGB program for video frames; videoprogstate is 0 untried,
+	 * 1 built, -1 unavailable (frames convert to RGBA on the CPU). */
+	GLuint videoprog;
+	int videoprogstate;
+	GLint videoloc[6];
 	uint64_t frame;
 	/* Smooth scrolling: quads of the cells being emitted are shifted by
 	 * rowdy pixels and, if rowclip, clipped to [clipleft, clipright) x
@@ -486,6 +497,8 @@ gpuinit(void)
 	}
 	gpu.active = 1;
 	gpu.needclear = 1;
+	/* Videos are drawn through this renderer only. */
+	graphics_set_video_backend(video_linux_backend());
 	gpu.fontpx = usedfontsize;
 		gpu.atlasw = 1024;
 		gpu.atlash = 1024;
@@ -513,6 +526,19 @@ gpuinit(void)
 }
 
 static void
+gpuimagetexturedelete(GpuImageTexture *image)
+{
+	int i;
+
+	if (image->texture)
+		glDeleteTextures(1, &image->texture);
+	for (i = 0; i < 3; i++)
+		if (image->planes[i])
+			glDeleteTextures(1, &image->planes[i]);
+	free(image);
+}
+
+static void
 gpureleaseimages(void)
 {
 	GpuImageTexture *image, *next;
@@ -523,9 +549,7 @@ gpureleaseimages(void)
 		glXMakeCurrent(xw.dpy, xw.win, gpu.ctx);
 	for (image = gpu.images; image; image = next) {
 		next = image->next;
-		if (image->texture)
-			glDeleteTextures(1, &image->texture);
-		free(image);
+		gpuimagetexturedelete(image);
 	}
 	gpu.images = NULL;
 }
@@ -1216,6 +1240,258 @@ gpuimagetexture(const GraphicsPlacementView *placement)
 	return image;
 }
 
+/* st video frames: the planes of the current frame are uploaded only when
+ * the frame changes and converted to RGB by a small shader.  Without
+ * shaders, frames are converted to RGBA on the CPU instead. */
+#ifndef GL_FRAGMENT_SHADER
+#define GL_FRAGMENT_SHADER 0x8B30
+#define GL_VERTEX_SHADER 0x8B31
+#define GL_COMPILE_STATUS 0x8B81
+#define GL_LINK_STATUS 0x8B82
+#endif
+#ifndef GL_TEXTURE0
+#define GL_TEXTURE0 0x84C0
+#endif
+#ifndef GL_UNPACK_ROW_LENGTH
+#define GL_UNPACK_ROW_LENGTH 0x0CF2
+#endif
+
+static struct {
+	GLuint (*createshader)(GLenum);
+	void (*shadersource)(GLuint, GLsizei, const char *const *, const GLint *);
+	void (*compileshader)(GLuint);
+	void (*getshaderiv)(GLuint, GLenum, GLint *);
+	void (*deleteshader)(GLuint);
+	GLuint (*createprogram)(void);
+	void (*attachshader)(GLuint, GLuint);
+	void (*linkprogram)(GLuint);
+	void (*getprogramiv)(GLuint, GLenum, GLint *);
+	void (*useprogram)(GLuint);
+	GLint (*getuniformlocation)(GLuint, const char *);
+	void (*uniform1i)(GLint, GLint);
+	void (*uniform3f)(GLint, GLfloat, GLfloat, GLfloat);
+	void (*activetexture)(GLenum);
+} gpugl;
+
+static const char gpuvideovertex[] =
+	"#version 110\n"
+	"varying vec2 tc;\n"
+	"void main() {\n"
+	"	gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;\n"
+	"	tc = gl_MultiTexCoord0.xy;\n"
+	"}\n";
+
+static const char gpuvideofragment[] =
+	"#version 110\n"
+	"uniform sampler2D ytex, utex, vtex;\n"
+	"uniform vec3 offset, rcoef, gcoef, bcoef;\n"
+	"varying vec2 tc;\n"
+	"void main() {\n"
+	"	vec3 yuv = vec3(texture2D(ytex, tc).r, texture2D(utex, tc).r,\n"
+	"	    texture2D(vtex, tc).r) - offset;\n"
+	"	gl_FragColor = vec4(dot(rcoef, yuv), dot(gcoef, yuv),\n"
+	"	    dot(bcoef, yuv), 1.0);\n"
+	"}\n";
+
+static GLuint
+gpuvideoshader(GLenum type, const char *source)
+{
+	GLuint shader = gpugl.createshader(type);
+	GLint ok = 0;
+
+	gpugl.shadersource(shader, 1, &source, NULL);
+	gpugl.compileshader(shader);
+	gpugl.getshaderiv(shader, GL_COMPILE_STATUS, &ok);
+	if (!ok) {
+		gpugl.deleteshader(shader);
+		return 0;
+	}
+	return shader;
+}
+
+static void
+gpuvideoprogram(void)
+{
+	static const char *names[6] = {
+		"offset", "rcoef", "gcoef", "bcoef", "ytex", "utex",
+	};
+	GLuint vertex, fragment, program;
+	GLint ok = 0;
+	int i;
+
+	gpu.videoprogstate = -1;
+	if (getenv("ST_VIDEO_NO_SHADER"))	/* debugging/tests */
+		return;
+#define GPULOAD(field, name) \
+	if (!(*(void **)&gpugl.field = (void *)glXGetProcAddressARB( \
+	    (const GLubyte *)name))) \
+		return;
+	GPULOAD(createshader, "glCreateShader");
+	GPULOAD(shadersource, "glShaderSource");
+	GPULOAD(compileshader, "glCompileShader");
+	GPULOAD(getshaderiv, "glGetShaderiv");
+	GPULOAD(deleteshader, "glDeleteShader");
+	GPULOAD(createprogram, "glCreateProgram");
+	GPULOAD(attachshader, "glAttachShader");
+	GPULOAD(linkprogram, "glLinkProgram");
+	GPULOAD(getprogramiv, "glGetProgramiv");
+	GPULOAD(useprogram, "glUseProgram");
+	GPULOAD(getuniformlocation, "glGetUniformLocation");
+	GPULOAD(uniform1i, "glUniform1i");
+	GPULOAD(uniform3f, "glUniform3f");
+	GPULOAD(activetexture, "glActiveTexture");
+#undef GPULOAD
+	vertex = gpuvideoshader(GL_VERTEX_SHADER, gpuvideovertex);
+	fragment = gpuvideoshader(GL_FRAGMENT_SHADER, gpuvideofragment);
+	if (!vertex || !fragment) {
+		if (vertex)
+			gpugl.deleteshader(vertex);
+		if (fragment)
+			gpugl.deleteshader(fragment);
+		return;
+	}
+	program = gpugl.createprogram();
+	gpugl.attachshader(program, vertex);
+	gpugl.attachshader(program, fragment);
+	gpugl.linkprogram(program);
+	gpugl.deleteshader(vertex);
+	gpugl.deleteshader(fragment);
+	gpugl.getprogramiv(program, GL_LINK_STATUS, &ok);
+	if (!ok)
+		return;
+	for (i = 0; i < 6; i++)
+		gpu.videoloc[i] = gpugl.getuniformlocation(program, names[i]);
+	gpugl.useprogram(program);
+	gpugl.uniform1i(gpu.videoloc[4], 0);
+	gpugl.uniform1i(gpu.videoloc[5], 1);
+	gpugl.uniform1i(gpugl.getuniformlocation(program, "vtex"), 2);
+	gpugl.useprogram(0);
+	gpu.videoprog = program;
+	gpu.videoprogstate = 1;
+}
+
+static void
+gpuvideotextureparams(void)
+{
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+}
+
+/* The texture(s) of a video placement's current frame, uploaded if the
+ * frame changed since; NULL before the first frame. */
+static GpuImageTexture *
+gpuvideotexture(const GraphicsPlacementView *placement, VideoFrameView *frame)
+{
+	GpuImageTexture *image;
+	int i;
+
+	for (image = gpu.images; image; image = image->next)
+		if (image->serial == placement->serial)
+			break;
+	if (!image) {
+		if (!(image = calloc(1, sizeof(*image))))
+			return NULL;
+		image->serial = placement->serial;
+		image->next = gpu.images;
+		gpu.images = image;
+	}
+	image->frame = gpu.frame;
+	if (!gpu.videoprogstate)
+		gpuvideoprogram();
+	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+	if (gpu.videoprogstate > 0) {
+		if (!video_linux_frame(placement->video, frame))
+			return NULL;
+		if (image->videoseq == frame->seq)
+			return image;
+		for (i = 0; i < 3; i++) {
+			int w = frame->plane_width[i], h = frame->plane_height[i];
+			if (!image->planes[i]) {
+				glGenTextures(1, &image->planes[i]);
+				glBindTexture(GL_TEXTURE_2D, image->planes[i]);
+				gpuvideotextureparams();
+			} else {
+				glBindTexture(GL_TEXTURE_2D, image->planes[i]);
+			}
+			glPixelStorei(GL_UNPACK_ROW_LENGTH, frame->linesize[i]);
+			if (image->planew[i] != w || image->planeh[i] != h) {
+				glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, w, h, 0,
+				    GL_LUMINANCE, GL_UNSIGNED_BYTE, frame->plane[i]);
+				image->planew[i] = w;
+				image->planeh[i] = h;
+			} else {
+				glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h,
+				    GL_LUMINANCE, GL_UNSIGNED_BYTE, frame->plane[i]);
+			}
+		}
+		glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+		image->width = frame->width;
+		image->height = frame->height;
+		image->videoseq = frame->seq;
+	} else {
+		const unsigned char *rgba;
+		uint64_t seq;
+		int w, h;
+
+		memset(frame, 0, sizeof(*frame));
+		if (!(rgba = video_linux_frame_rgba(placement->video, &w, &h, &seq)))
+			return NULL;
+		if (image->videoseq == seq && image->texture)
+			return image;
+		if (!image->texture) {
+			glGenTextures(1, &image->texture);
+			glBindTexture(GL_TEXTURE_2D, image->texture);
+			gpuvideotextureparams();
+		} else {
+			glBindTexture(GL_TEXTURE_2D, image->texture);
+		}
+		if (image->width != w || image->height != h)
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA,
+			    GL_UNSIGNED_BYTE, rgba);
+		else
+			glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA,
+			    GL_UNSIGNED_BYTE, rgba);
+		image->width = w;
+		image->height = h;
+		image->videoseq = seq;
+	}
+	return image;
+}
+
+/* Bind the frame's planes and the conversion for its colour matrix and
+ * range (Kr/Kb of BT.601, BT.709, BT.2020; limited or full range). */
+static void
+gpuvideobind(const GpuImageTexture *image, const VideoFrameView *frame)
+{
+	static const double kr[] = {0.299, 0.2126, 0.2627};
+	static const double kb[] = {0.114, 0.0722, 0.0593};
+	double r = kr[frame->matrix], b = kb[frame->matrix], g = 1 - r - b;
+	double ys = frame->full_range ? 1 : 255.0 / 219.0;
+	double cs = frame->full_range ? 1 : 255.0 / 224.0;
+	int i;
+
+	gpugl.useprogram(gpu.videoprog);
+	gpugl.uniform3f(gpu.videoloc[0], frame->full_range ? 0 : 16.0f / 255,
+	    128.0f / 255, 128.0f / 255);
+	gpugl.uniform3f(gpu.videoloc[1], ys, 0, cs * 2 * (1 - r));
+	gpugl.uniform3f(gpu.videoloc[2], ys, -cs * 2 * b * (1 - b) / g,
+	    -cs * 2 * r * (1 - r) / g);
+	gpugl.uniform3f(gpu.videoloc[3], ys, cs * 2 * (1 - b), 0);
+	for (i = 2; i >= 0; i--) {
+		gpugl.activetexture(GL_TEXTURE0 + i);
+		glBindTexture(GL_TEXTURE_2D, image->planes[i]);
+	}
+}
+
+static void
+gpuvideounbind(void)
+{
+	gpugl.useprogram(0);
+	gpugl.activetexture(GL_TEXTURE0);
+}
+
 /* Keep decoded pixels in the terminal's bounded scrollback cache, but keep GL
  * textures resident only while an image is actually in the current viewport.
  * Otherwise every image ever viewed in every st window consumes VRAM until its
@@ -1232,9 +1508,7 @@ gpupruneimages(void)
 			continue;
 		}
 		*link = image->next;
-		if (image->texture)
-			glDeleteTextures(1, &image->texture);
-		free(image);
+		gpuimagetexturedelete(image);
 	}
 }
 
@@ -1302,8 +1576,9 @@ gpudrawimage(const GraphicsPlacementView *placement, void *context)
 	GpuVertex vertices[6];
 	double x, y, w, h, u0, v0, u1, v1;
 	float selection[3];
-	int selected_image, clipped;
+	int selected_image, clipped, yuv;
 	const void *voff, *toff, *coff;
+	VideoFrameView frame;
 	(void)context;
 
 	x = gpucellx(placement->column) + placement->pixel_x * gpuxscale();
@@ -1324,24 +1599,42 @@ gpudrawimage(const GraphicsPlacementView *placement, void *context)
 		gpuendcell();
 		return;
 	}
+	/* Only videos drawn in a frame ask for redraws when theirs change. */
+	if (placement->video)
+		video_linux_drawn(placement->video);
 	clipped = gpu.rowclip;
 	if (clipped)
 		glScissor((int)gpu.clipleft, win.h - (int)gpu.clipbot,
 		    MAX(0, (int)(gpu.clipright - gpu.clipleft)),
 		    MAX(0, (int)(gpu.clipbot - gpu.cliptop)));
-	image = gpuimagetexture(placement);
+	image = placement->video ? gpuvideotexture(placement, &frame) :
+	    gpuimagetexture(placement);
 	if (!image) {
 		gpuendcell();
 		if (clipped)
 			gpuimagescissor();
 		return;
 	}
-	u0 = (placement->source_x + 0.5) / placement->image_width;
-	v0 = (placement->source_y + 0.5) / placement->image_height;
-	u1 = (placement->source_x + placement->source_width - 0.5) /
-	    placement->image_width;
-	v1 = (placement->source_y + placement->source_height - 0.5) /
-	    placement->image_height;
+	if (placement->video) {
+		/* Source rectangles are in the declared size; the frame may
+		 * be coded at another. */
+		double sx = (double)image->width / placement->image_width;
+		double sy = (double)image->height / placement->image_height;
+		u0 = (placement->source_x * sx + 0.5) / image->width;
+		v0 = (placement->source_y * sy + 0.5) / image->height;
+		u1 = ((placement->source_x + placement->source_width) * sx - 0.5) /
+		    image->width;
+		v1 = ((placement->source_y + placement->source_height) * sy - 0.5) /
+		    image->height;
+	} else {
+		u0 = (placement->source_x + 0.5) / placement->image_width;
+		v0 = (placement->source_y + 0.5) / placement->image_height;
+		u1 = (placement->source_x + placement->source_width - 0.5) /
+		    placement->image_width;
+		v1 = (placement->source_y + placement->source_height - 0.5) /
+		    placement->image_height;
+	}
+	yuv = placement->video && gpu.videoprogstate > 0;
 #define IVERTEX(px, py, tu, tv) \
 	(GpuVertex){(GLfloat)(px), (GLfloat)(py), (GLfloat)(tu), (GLfloat)(tv), 1, 1, 1, 1}
 	vertices[0] = IVERTEX(x, y, u0, v0);
@@ -1367,8 +1660,12 @@ gpudrawimage(const GraphicsPlacementView *placement, void *context)
 	glEnable(GL_ALPHA_TEST);
 	glAlphaFunc(GL_GREATER, 0.0f);
 	glEnable(GL_TEXTURE_2D);
-	glBindTexture(GL_TEXTURE_2D, image->texture);
-	glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+	if (yuv) {
+		gpuvideobind(image, &frame);
+	} else {
+		glBindTexture(GL_TEXTURE_2D, image->texture);
+		glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+	}
 	glEnableClientState(GL_VERTEX_ARRAY);
 	glEnableClientState(GL_TEXTURE_COORD_ARRAY);
 	glEnableClientState(GL_COLOR_ARRAY);
@@ -1376,6 +1673,8 @@ gpudrawimage(const GraphicsPlacementView *placement, void *context)
 	glTexCoordPointer(2, GL_FLOAT, sizeof(GpuVertex), toff);
 	glColorPointer(4, GL_FLOAT, sizeof(GpuVertex), coff);
 	glDrawArrays(GL_TRIANGLES, 0, 6);
+	if (yuv)
+		gpuvideounbind();
 	if (selected_image) {
 		/* The image is one atomic visual character. Tint its full rendered
 		 * rectangle when either the terminal or the application selects any
@@ -1450,9 +1749,10 @@ gpufreeimage(uint64_t serial, void *context)
 		*link = image->next;
 		if (gpu.active) {
 			glXMakeCurrent(xw.dpy, xw.win, gpu.ctx);
-			glDeleteTextures(1, &image->texture);
+			gpuimagetexturedelete(image);
+		} else {
+			free(image);
 		}
-		free(image);
 		return;
 	}
 }

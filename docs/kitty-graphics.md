@@ -100,7 +100,8 @@ placements are removed, image data with no remaining placements is reclaimed.
 ### Deliberately unsupported features
 
 - Local file, temporary-file, and shared-memory transports
-- Animation frames
+- Animation frames (for moving pictures, st streams compressed video
+  instead: see [Video](video.md))
 - Relative placements
 - Kitty Unicode placeholders
 

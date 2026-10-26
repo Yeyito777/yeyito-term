@@ -86,6 +86,35 @@ jumps to zsh. Leaving block selection restores regular shell coordination.
 See [Kitty graphics architecture](docs/kitty-graphics.md) for the protocol
 subset, data flow, renderer integration, scrollback model, and safety limits.
 
+## Video, including over SSH
+
+`st` plays video with sound. The program sending it runs wherever the file
+is, a remote host included, and streams compressed H.264 and AAC through the
+terminal itself; `st` decodes it (VideoToolbox on macOS, libavcodec on Linux)
+and plays the sound on the machine you are sitting at. Nothing but the
+terminal connection is needed, so it works unchanged in an SSH session:
+
+```sh
+st-play movie.mkv              # fullscreen, on the alternate screen
+st-play --inline 20 clip.mp4   # 20 rows at the cursor, in the scrollback
+yt-dlp -o - URL | st-play -    # anything libavformat reads, stdin too
+```
+
+Keys: space pauses, left/right seek 5 s, down/up 60 s, `m` mutes, `9`/`0`
+change the volume, `q` quits. `st-play` measures the connection while it
+plays and fits resolution and bitrate to it, and limits how much it sends
+ahead so pausing, seeking and quitting answer within a fraction of a second
+even on a slow link. Build it with `make st-play` (it needs the ffmpeg
+libraries, on Linux and from Homebrew on macOS) on the machine holding the
+media.
+
+Players that send raw frames as Kitty images, such as `mpv --vo=kitty`,
+work too, but need a fast connection: a 720p frame is megabytes of base64.
+
+Videos are images, so they scroll with the text, crop, stack and get
+covered by menus like any image. See [Video](docs/video.md) for the
+protocol (`a=v`), flow control and limits.
+
 ## AeroSpace launch integration
 
 To open `st` on the currently focused AeroSpace workspace, bind a key to the
