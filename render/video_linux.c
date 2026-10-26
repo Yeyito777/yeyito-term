@@ -35,10 +35,14 @@
 #define VL_MIN(a, b) ((a) < (b) ? (a) : (b))
 #define VL_MAX(a, b) ((a) > (b) ? (a) : (b))
 
-/* Decoded frames queued ahead of the clock: 4..16, about 64 MiB at most. */
+/* Decoded frames queued ahead of the clock: at most 16, and past 2 at most
+ * 64 MiB of them, whatever size the stream codes them at. */
 #define VL_FRAMES_MAX       16
-#define VL_FRAMES_MIN       4
-#define VL_FRAMES_BYTES     (64U * 1024U * 1024U)
+#define VL_FRAMES_MIN       2
+#define VL_FRAMES_BYTES     ((size_t)64 * 1024 * 1024)
+/* Coded frames are bounded like declared ones: libavcodec would otherwise
+ * allocate whatever an SPS asks for (about 16k x 16k). */
+#define VL_MAX_PIXELS       ((int64_t)VIDEO_DIMENSION_MAX * VIDEO_DIMENSION_MAX)
 #define VL_AUDIO_SECONDS    2
 #define VL_MARKERS          1024
 #define VL_PULSE_TLENGTH_MS 100
@@ -47,9 +51,9 @@
 #define VL_CHECK_US         100000
 /* With the display's vblank timing, each frame is picked for the vblank a
  * draw starting now reaches (one starting at least VL_VBLANK_DRAW_US
- * before it), and the loop wakes VL_VBLANK_WAKE_US before the vblank a new
- * frame is due at: the boundary sits halfway between draws that follow a
- * swap and draws on that timer. */
+ * before it), and the loop wakes VL_VBLANK_WAKE_US (at most VL_VBLANK_DRAW_US
+ * plus half a period) before the vblank a new frame is due at: the boundary
+ * sits halfway between draws that follow a swap and draws on that timer. */
 #define VL_VBLANK_DRAW_US   5000
 #define VL_VBLANK_WAKE_US   10000
 /* Audio starting later than video by more than this waits for the host
@@ -119,7 +123,9 @@ struct VideoPlayer {
 	int eos, vdrained, adrained;
 	int64_t start;
 	AVFrame *frames[VL_FRAMES_MAX];
-	int nframes, frame_cap;
+	int nframes;
+	size_t frames_bytes;	/* buffers of the queued frames */
+	size_t vroom;		/* bytes of a frame waiting for room, or 0 */
 	uint64_t decode_dropped;
 	const char *decode_error;
 	AVCodecContext *vctx, *actx;
@@ -636,16 +642,38 @@ vl_planar_yuv(int format)
 
 /* Queue a decoded frame (taking it), waiting while the queue is full.
  * Returns 0 when a flush or close discarded it. */
+static size_t
+vl_frame_bytes(const AVFrame *frame)
+{
+	size_t bytes = 0;
+	int i;
+
+	for (i = 0; i < AV_NUM_DATA_POINTERS && frame->buf[i]; i++)
+		bytes += frame->buf[i]->size;
+	return bytes;
+}
+
+/* The decoded queue has no room for a frame of bytes (locked). */
+static int
+vl_frames_full(VideoPlayer *p, size_t bytes)
+{
+	return p->nframes >= VL_FRAMES_MAX || (p->nframes >= VL_FRAMES_MIN &&
+	    p->frames_bytes + bytes > VL_FRAMES_BYTES);
+}
+
 static int
 vl_push_frame(VideoPlayer *p, AVFrame *frame, uint64_t gen)
 {
+	size_t bytes = vl_frame_bytes(frame);
 	int i, wake;
 
 	pthread_mutex_lock(&p->lock);
-	while (!p->quit && p->generation == gen && p->nframes >= p->frame_cap) {
+	while (!p->quit && p->generation == gen && vl_frames_full(p, bytes)) {
 		__atomic_store_n(&p->vbusy, 0, __ATOMIC_RELAXED);
+		p->vroom = bytes;
 		pthread_cond_wait(&p->vcond, &p->lock);
 	}
+	p->vroom = 0;
 	__atomic_store_n(&p->vbusy, 1, __ATOMIC_RELAXED);
 	if (p->quit || p->generation != gen) {
 		pthread_mutex_unlock(&p->lock);
@@ -655,6 +683,7 @@ vl_push_frame(VideoPlayer *p, AVFrame *frame, uint64_t gen)
 	for (i = p->nframes; i > 0 && p->frames[i - 1]->pts > frame->pts; i--)
 		p->frames[i] = p->frames[i - 1];
 	p->frames[i] = frame;
+	p->frames_bytes += bytes;
 	wake = p->nframes++ == 0;
 	pthread_mutex_unlock(&p->lock);
 	if (wake)
@@ -778,6 +807,14 @@ vl_deliver_audio(VideoPlayer *p, AVFrame *frame, uint64_t gen, int64_t start,
 	return ok;
 }
 
+/* The stream asked for frames past VL_MAX_PIXELS (and was refused). */
+static int
+vl_oversized(const AVCodecContext *ctx)
+{
+	return (int64_t)ctx->coded_width * ctx->coded_height > VL_MAX_PIXELS ||
+	    (int64_t)ctx->width * ctx->height > VL_MAX_PIXELS;
+}
+
 /* One decoder thread per stream: pop a packet, decode, deliver every frame
  * it yields; at end of stream drain the decoder.  A flush bumps the
  * generation, which discards in-flight output and resets the decoder. */
@@ -836,7 +873,8 @@ vl_decode_thread(VideoPlayer *p, int video)
 		} else {
 			ret = avcodec_send_packet(ctx, NULL);
 		}
-		if (ret < 0 && ret != AVERROR(EAGAIN) && ret != AVERROR_EOF)
+		if (ret < 0 && ret != AVERROR(EAGAIN) && ret != AVERROR_EOF &&
+		    !(video && vl_oversized(ctx)))
 			vl_set_decode_error(p, gen, video ?
 			    "EBADMSG:undecodable video" : "EBADMSG:undecodable audio");
 		while (live && avcodec_receive_frame(ctx, frame) == 0) {
@@ -846,6 +884,11 @@ vl_decode_thread(VideoPlayer *p, int video)
 			    &last);
 			av_frame_unref(frame);
 		}
+		/* Oversized frames are refused without an error code (the
+		 * size shows once the decoder has taken the frame's SPS). */
+		if (video && vl_oversized(ctx))
+			vl_set_decode_error(p, gen,
+			    "E2BIG:video frames larger than 4096x4096");
 		free(q);
 		pthread_mutex_lock(&p->lock);
 		if (drain && p->generation == gen) {
@@ -1024,6 +1067,8 @@ vl_select(VideoPlayer *p, int64_t pos)
 		due = 0;
 	}
 	if (due >= 0) {
+		for (i = 0; i <= due; i++)
+			p->frames_bytes -= vl_frame_bytes(p->frames[i]);
 		for (i = 0; i < due; i++)
 			av_frame_free(&p->frames[i]);
 		p->dropped += (uint64_t)due;
@@ -1231,9 +1276,14 @@ vl_next_due(VideoPlayer *p, int64_t now)
 	if (p->nframes) {
 		/* Wake before the vblank the frame is due at. */
 		int64_t at = now + p->frames[0]->pts - pos;
+		/* A draw reaches vblank V if it starts by V - DRAW, and picks
+		 * this frame for it once V - period - DRAW is past: wake
+		 * between, no earlier than half a period before the last
+		 * moment (fast displays would otherwise spin). */
 		if (vl_vblank_period > 0 && vl_vblank != VIDEO_TIME_NONE)
 			at = vl_vblank_after(at - vl_vblank_period / 2, 0) -
-			    VL_VBLANK_WAKE_US;
+			    VL_MIN(VL_VBLANK_WAKE_US, VL_VBLANK_DRAW_US +
+			    vl_vblank_period / 2);
 		due = VL_MIN(due, VL_MAX(0, at - now));
 	}
 	pthread_mutex_unlock(&p->lock);
@@ -1263,6 +1313,7 @@ vl_open_decoder(VideoPlayer *p, int video)
 		 * covers a few. */
 		ctx->thread_count = (int)VL_MAX(1, VL_MIN(cpus, limit));
 		ctx->thread_type = FF_THREAD_FRAME;
+		ctx->max_pixels = VL_MAX_PIXELS;
 	} else {
 		ctx->sample_rate = p->config.sample_rate;
 		av_channel_layout_default(&ctx->ch_layout, p->config.channels);
@@ -1287,14 +1338,17 @@ static VideoPlayer *
 vl_create(const VideoConfig *config, const char **error)
 {
 	VideoPlayer *p = calloc(1, sizeof(*p));
-	size_t frame_bytes;
 
 	if (!p) {
 		*error = "ENOMEM:video player allocation failed";
 		return NULL;
 	}
-	if (vl_fd < 0)
+	if (vl_fd < 0) {
 		vl_fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+		/* Packets come from whatever the terminal is sent: undecodable
+		 * ones are reported by k=q, not logged to st's stderr. */
+		av_log_set_level(AV_LOG_QUIET);
+	}
 	p->config = *config;
 	p->has_video = config->video_codec == VIDEO_CODEC_H264;
 	p->has_audio = config->audio_codec == AUDIO_CODEC_AAC;
@@ -1306,9 +1360,6 @@ vl_create(const VideoConfig *config, const char **error)
 	p->state = VIDEO_STATE_BUFFERING;
 	p->audio_clock = p->has_audio;
 	p->audio_floor = VIDEO_TIME_NONE;
-	frame_bytes = (size_t)config->width * config->height * 3 / 2 + 1;
-	p->frame_cap = (int)VL_MAX(VL_FRAMES_MIN,
-	    VL_MIN(VL_FRAMES_MAX, VL_FRAMES_BYTES / frame_bytes));
 	pthread_mutex_init(&p->lock, NULL);
 	pthread_cond_init(&p->vcond, NULL);
 	pthread_cond_init(&p->acond, NULL);
@@ -1465,6 +1516,7 @@ vl_flush(VideoPlayer *p, int64_t start)
 	for (i = 0; i < p->nframes; i++)
 		av_frame_free(&p->frames[i]);
 	p->nframes = 0;
+	p->frames_bytes = 0;
 	p->eos = p->vdrained = p->adrained = 0;
 	p->start = start;
 	p->decode_dropped = 0;
