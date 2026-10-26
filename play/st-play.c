@@ -657,6 +657,7 @@ setup_adapt(App *a, double now)
 	adapt_init(&a->adapt, now, rungs, count, a->fps, a->flow.rate, audio,
 	    a->max_kbps);
 	a->adapt.ahead_target = 0.6 * a->ahead_cap;
+	a->adapt.ahead_cap = a->ahead_cap;
 	if (a->fixed_kbps > 0) {
 		a->adapt.fixed = 1;
 		a->adapt.kbps = a->fixed_kbps;
@@ -1148,7 +1149,8 @@ adapt_tick(App *a, double now)
 
 	if (!a->info.has_video)
 		return;
-	if (a->paused || a->state == ST_PAUSED)
+	a->adapt.paused = a->paused || a->state == ST_PAUSED;
+	if (a->adapt.paused)
 		ahead = a->ahead_cap;
 	if (adapt_update(&a->adapt, &a->flow, now, ahead, app_limited) ||
 	    old_rung != a->adapt.rung || old_kbps != a->adapt.kbps)

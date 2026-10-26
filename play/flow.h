@@ -110,6 +110,9 @@ typedef struct {
 	double probe_until, next_probe;
 	double probe_start_rate;
 	double ahead_target;	/* seconds of lead at which the margin is smallest */
+	double ahead_cap;	/* the most media sent ahead (a full buffer) */
+	int paused;
+	double last_update;
 	double panic_since;
 	int fixed;		/* --bitrate: no adaptation */
 	/* Diagnostics */

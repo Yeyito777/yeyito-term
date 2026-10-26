@@ -421,6 +421,14 @@ clamp_kbps(const Adapt *adapt, double kbps)
 	return kbps;
 }
 
+/* The most the top rung would ever get. */
+static double
+top_kbps(const Adapt *adapt)
+{
+	double top = rung_kbps(adapt, adapt->count - 1, ADAPT_BPP_MAX);
+	return adapt->max_kbps < top ? adapt->max_kbps : top;
+}
+
 void
 adapt_init(Adapt *adapt, double now, const Rung *rungs, int count,
 		double fps, double rate, double audio_kbps, double max_kbps)
@@ -468,12 +476,24 @@ adapt_update(Adapt *adapt, Flow *flow, double now, double ahead,
 	}
 	if (adapt->fixed)
 		return 0;
+	/* A full buffer and nothing to send: the link carries more than we
+	 * send, by how much we can't tell.  Presume a little more each
+	 * second; once the encoder outruns the link, window-limited acks
+	 * bring the estimate back. */
+	if (app_limited && !adapt->paused && adapt->ahead_cap > 0 &&
+	    ahead >= 0.9 * adapt->ahead_cap && adapt->last_update > 0 &&
+	    clamp_kbps(adapt, adapt_video_kbps(adapt, flow->rate, ahead)) <
+	    0.95 * top_kbps(adapt)) {
+		double dt = now - adapt->last_update;
+		if (dt > 0.5)
+			dt = 0.5;
+		flow->rate *= 1 + 0.2 * dt;
+	}
+	adapt->last_update = now;
 	target = adapt_video_kbps(adapt, flow->rate, ahead);
 	adapt->usable_kbps = target;
 	if (!adapt->probe_until && app_limited && now >= adapt->next_probe &&
-	    clamp_kbps(adapt, target) < 0.95 * (adapt->max_kbps <
-	    rung_kbps(adapt, adapt->count - 1, ADAPT_BPP_MAX) ? adapt->max_kbps :
-	    rung_kbps(adapt, adapt->count - 1, ADAPT_BPP_MAX))) {
+	    clamp_kbps(adapt, target) < 0.95 * top_kbps(adapt)) {
 		adapt->probe_until = now + 1.0;
 		adapt->probe_start_rate = flow->rate;
 		flow->window_gain = 1.5;

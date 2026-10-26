@@ -705,6 +705,36 @@ TEST(adapt_steps_down_fast_and_up_slowly)
 	ASSERT(r[a.rung].height >= 540);
 }
 
+TEST(adapt_presumes_more_when_the_buffer_is_full)
+{
+	/* App-limited with a full lead: the presumed rate grows until the
+	 * encoder can outrun the link; not while paused, not at the top. */
+	Adapt a;
+	Flow f;
+	Rung r[ADAPT_RUNGS];
+	int n = adapt_ladder(r, ADAPT_RUNGS, 1920, 1080);
+	double t, start;
+	flow_init(&f, 0, 0.15, 125e3);
+	adapt_init(&a, 0, r, n, 30, f.rate, 96, 0);
+	a.ahead_target = 3;
+	a.ahead_cap = 5;
+	start = a.kbps;
+	for (t = 0; t < 5; t += 0.1)
+		adapt_update(&a, &f, t, 5, 1);
+	ASSERT(f.rate > 2 * 125e3);
+	ASSERT(a.kbps > 1.5 * start);
+	f.rate = 125e3;
+	a.paused = 1;
+	for (t = 5; t < 10; t += 0.1)
+		adapt_update(&a, &f, t, 5, 1);
+	ASSERT(f.rate < 1.01 * 125e3);
+	/* Lead not full: no presuming. */
+	a.paused = 0;
+	for (t = 10; t < 15; t += 0.1)
+		adapt_update(&a, &f, t, 3, 1);
+	ASSERT(f.rate < 1.01 * 125e3);
+}
+
 TEST(adapt_probes_when_app_limited)
 {
 	Adapt a;
@@ -762,6 +792,7 @@ main(void)
 	RUN_TEST(adapt_ladder_never_upscales);
 	RUN_TEST(adapt_video_kbps_counts_overhead);
 	RUN_TEST(adapt_steps_down_fast_and_up_slowly);
+	RUN_TEST(adapt_presumes_more_when_the_buffer_is_full);
 	RUN_TEST(adapt_probes_when_app_limited);
 	return test_summary();
 }
