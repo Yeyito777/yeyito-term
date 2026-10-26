@@ -12,6 +12,7 @@ st-*.tar.gz
 st-play
 tests/test_play
 tests/fake_video_term
+tests/pty_throttle
 tests/.play-e2e.*
 tests/test_vimnav
 tests/test_sshind

@@ -51,6 +51,7 @@
 
 #include "../graphics.h"
 #include "../video.h"
+#include "../play/selectpoll.h"
 
 #ifdef FAKE_DECODE
 #include <libavcodec/avcodec.h>
@@ -912,9 +913,9 @@ main(int argc, char **argv)
 			if (timeout < 0)
 				timeout = 0;
 			if (fd.events)
-				poll(&fd, 1, timeout);
+				select_poll(&fd, 1, timeout);
 			else if (timeout > 0)
-				poll(NULL, 0, timeout);
+				select_poll(NULL, 0, timeout);
 		}
 		if (fd.revents & POLLIN) {
 			unsigned char buf[65536];

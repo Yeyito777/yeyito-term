@@ -32,7 +32,7 @@ PLAY_CFLAGS = -O2 -g -Wall -Wextra `$(PKG_CONFIG) --cflags $(FFMPEG_PKGS)`
 PLAY_LIBS = `$(PKG_CONFIG) --libs $(FFMPEG_PKGS)` -lpthread -lm
 PLAY_OBJ = play/st-play.o play/media.o play/flow.o play/out.o play/input.o
 
-play/st-play.o: play/st-play.c play/flow.h play/input.h play/media.h play/out.h
+play/st-play.o: play/st-play.c play/flow.h play/input.h play/media.h play/out.h play/selectpoll.h
 	$(CC) $(PLAY_CFLAGS) -c play/st-play.c -o $@
 play/media.o: play/media.c play/media.h
 	$(CC) $(PLAY_CFLAGS) -c play/media.c -o $@
@@ -318,10 +318,15 @@ test_play: tests/test_play.o tests/play_flow.o tests/play_input.o tests/play_out
 # Fake terminal for st-play end-to-end runs: st's graphics.c/video.c, a
 # timing-model video backend and a throttled PTY link (decodes with
 # libavcodec to validate the stream).
-tests/fake_video_term: tests/fake_video_term.c graphics.o video.o graphics.h video.h
+tests/fake_video_term: tests/fake_video_term.c graphics.o video.o graphics.h video.h play/selectpoll.h
 	$(CC) $(TESTFLAGS) -O2 -DFAKE_DECODE `$(PKG_CONFIG) --cflags libavcodec libavutil` \
 		tests/fake_video_term.c graphics.o video.o -o $@ -lz -lm \
 		`$(PKG_CONFIG) --libs libavcodec libavutil`
+
+# A PTY relay with a slow link, for st-play in a real terminal:
+#   st -e tests/pty_throttle --bw 3000 --rtt 150 -- ./st-play clip.mp4
+tests/pty_throttle: tests/pty_throttle.c play/selectpoll.h
+	$(CC) $(TESTFLAGS) -O2 tests/pty_throttle.c -o $@
 
 # End-to-end st-play runs through the fake terminal (skipped without ffmpeg).
 test_play_e2e:
@@ -519,7 +524,7 @@ endif
 
 clean-tests:
 	rm -f tests/test_macos_symbol_input tests/test_macos_symbol_input.o tests/macos_symbol_sender
-	rm -f tests/*.o tests/macos_headless tests/test_macos_image_occlusion tests/test_macos_video tests/test_macos_mouse_cursor tests/test_image_occlusion tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search tests/test_cmdline_layout tests/test_mode_reset tests/test_sync tests/test_clipboard5522 tests/test_graphics tests/test_video tests/test_video_linux tests/test_play tests/fake_video_term tests/test_smoothscroll tests/test_macos_pty tests/test_macos_reveal tests/test_macos_spare tests/test_macos_launchlog tests/test_macos_aerospace tests/test_macos_control tests/test_macos_text_input tests/test_macos_locale tests/test_macos_glyph_layout tests/test_macos_emoji tests/test_macos_pasteboard5522
+	rm -f tests/*.o tests/macos_headless tests/test_macos_image_occlusion tests/test_macos_video tests/test_macos_mouse_cursor tests/test_image_occlusion tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search tests/test_cmdline_layout tests/test_mode_reset tests/test_sync tests/test_clipboard5522 tests/test_graphics tests/test_video tests/test_video_linux tests/test_play tests/fake_video_term tests/pty_throttle tests/test_smoothscroll tests/test_macos_pty tests/test_macos_reveal tests/test_macos_spare tests/test_macos_launchlog tests/test_macos_aerospace tests/test_macos_control tests/test_macos_text_input tests/test_macos_locale tests/test_macos_glyph_layout tests/test_macos_emoji tests/test_macos_pasteboard5522
 
 .PHONY: all app install-app uninstall-app install-hint clean dist install uninstall test test_image_occlusion test_smoothscroll test_macos_image_occlusion test_macos_video test_macos_mouse_cursor test_gpu_regressions test_aerospace_launcher test_mode_reset test_sync test_graphics test_video test_video_linux test_macos_pty test_macos_reveal test_macos_spare test_macos_launchlog test_macos_aerospace test_macos_control test_macos_text_input test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522 clean-tests
 .PHONY: test_macos_symbol_input macos_headless test_play test_play_e2e

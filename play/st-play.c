@@ -27,6 +27,7 @@
 #include "input.h"
 #include "media.h"
 #include "out.h"
+#include "selectpoll.h"
 
 #define TAG_STATUS 1
 #define STATE_UNKNOWN (-1)
@@ -244,7 +245,7 @@ write_all(App *a, const char *data, size_t length, double deadline)
 			double left = deadline - now_s();
 			if (left <= 0)
 				return -1;
-			poll(&p, 1, (int)(left * 1000) + 1);
+			select_poll(&p, 1, (int)(left * 1000) + 1);
 		}
 	}
 	return 0;
@@ -841,6 +842,10 @@ set_volume(App *a)
 static void
 handle_key(App *a, int key, double now)
 {
+	int paused = a->paused, flushes = (int)a->valid_seq;
+
+	if (a->stats)
+		fprintf(a->stats, "key %d t=%.3f\n", key, now - a->start_time);
 	switch (key) {
 	case 'q': case 'Q': case 3: case KEY_ESCAPE: case 4:
 		a->quit = 1;
@@ -881,6 +886,9 @@ handle_key(App *a, int key, double now)
 		a->resize_at = now;
 		break;
 	}
+	/* Ask right behind a command, for prompt feedback. */
+	if (a->paused != paused || (int)a->valid_seq != flushes)
+		queue_ping(a);
 	a->next_status = 0;
 }
 
@@ -893,6 +901,9 @@ handle_reply(App *a, const Reply *r, double now)
 		flow_ack(&a->flow, (uint32_t)r->seq, now);
 		if (r->seq < a->valid_seq)
 			return;	/* about the stream before the last seek */
+		if (r->state >= 0 && r->state != a->state && a->stats)
+			fprintf(a->stats, "state %d t=%.3f\n", r->state,
+			    now - a->start_time);
 		if (r->state >= 0)
 			a->state = r->state;
 		if (r->pos >= 0) {
@@ -1009,7 +1020,7 @@ probe_wait(App *a, Probe *p, double deadline)
 
 		if (left <= 0)
 			break;
-		if (poll(&fd, 1, (int)(left * 1000) + 1) <= 0)
+		if (select_poll(&fd, 1, (int)(left * 1000) + 1) <= 0)
 			continue;
 		while ((n = read(a->tty, buf, sizeof(buf))) > 0)
 			input_feed(&a->in, buf, (size_t)n, probe_event, p);
@@ -1374,7 +1385,7 @@ main(int argc, char **argv)
 			probe_wait(a, &again, t1 + 3);
 			rtt = again.got_da1 ? again.da1_time - t1 : 0.2;
 		}
-		a->local = rtt < 0.01 && !getenv("SSH_CONNECTION");
+		a->local = rtt < 0.01;
 		now = now_s();
 		flow_init(&a->flow, now, rtt, a->local ? 40e6 : 250e3);
 	}
@@ -1497,7 +1508,7 @@ main(int argc, char **argv)
 		now = now_s();
 		timeout = producing ? 0 : next <= now ? 0 :
 		    (int)((next - now) * 1000) + 1;
-		if (poll(fds, (nfds_t)nfds, timeout) < 0 && errno != EINTR)
+		if (select_poll(fds, nfds, timeout) < 0 && errno != EINTR)
 			break;
 		if (fds[1].revents & POLLIN) {
 			char buf[64];
