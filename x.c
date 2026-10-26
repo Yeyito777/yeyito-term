@@ -242,6 +242,7 @@ static void clip5522_tick(const struct timespec *);
 static void run(void);
 static int xsmoothscrolltimeout(double *);
 static double xframewait(void);
+static void xvideoswapped(const struct timespec *, const struct timespec *);
 static void xupdaterefresh(void);
 /* When the last frame started drawing (smooth-scroll frame pacing). */
 static struct timespec xlastframe;
@@ -2797,9 +2798,14 @@ xfinishdraw(void)
 		glDisableClientState(GL_COLOR_ARRAY);
 		glDisableClientState(GL_TEXTURE_COORD_ARRAY);
 		glDisable(GL_TEXTURE_2D);
-		if (gpu.doublebuf)
+		if (gpu.doublebuf) {
+			struct timespec t0, t1;
+			clock_gettime(CLOCK_MONOTONIC, &t0);
 			glXSwapBuffers(xw.dpy, xw.win);
-		else
+			clock_gettime(CLOCK_MONOTONIC, &t1);
+			if (graphics_video_count())
+				xvideoswapped(&t0, &t1);
+		} else
 			glFlush();
 		return;
 	}
@@ -3617,6 +3623,19 @@ run(void)
 		XFlush(xw.dpy);
 		drawing = 0;
 		videodirty = 0;
+		if (graphics_video_count()) {
+			int changed = 0;
+			/* The swap may have waited for the display: pick the
+			 * frame for the next vblank now, not on the timer set
+			 * before the draw. */
+			videowait = video_linux_tick(&changed);
+			if (changed && IS_SET(MODE_VISIBLE) && IS_SET(MODE_ONSCREEN))
+				videodirty = 1;
+			if (videodirty)
+				timeout = 0;
+			else if (videowait >= 0 && (timeout < 0 || videowait < timeout))
+				timeout = videowait;
+		}
 		/* draw() is where a new scroll is noticed: arm its next frame. */
 		xsmoothscrolltimeout(&timeout);
 	}
@@ -3625,6 +3644,33 @@ run(void)
 /* Refresh period (ms) of the monitor under the window's centre, from
  * XRandR; 0 when unknown.  Updated when the window maps and moves. */
 static double xrefreshms;
+
+/* A swap that waited for the display returned right after a vblank: it
+ * is the display's timing that videos pick their frames for.  Swap returns
+ * jitter by a millisecond or two, so the phase follows them slowly. */
+static void
+xvideoswapped(const struct timespec *start, const struct timespec *end)
+{
+	static int64_t phase;
+	int64_t period = (int64_t)(1000 * (xrefreshms > 0 ? xrefreshms :
+	    1000.0 / 60.0));
+	int64_t at = (int64_t)end->tv_sec * 1000000 + end->tv_nsec / 1000, err;
+
+	if (!gpuvsync || TIMEDIFF((*end), (*start)) < 2)
+		return;
+	if (phase) {
+		err = (at - phase) % period;
+		if (err > period / 2)
+			err -= period;
+		else if (err < -period / 2)
+			err += period;
+		phase = err > period / 4 || err < -period / 4 ? at :
+		    at - err + err / 8;
+	} else {
+		phase = at;
+	}
+	video_linux_set_vblank(period, phase);
+}
 
 static void
 xupdaterefresh(void)
