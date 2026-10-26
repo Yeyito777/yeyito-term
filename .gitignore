@@ -9,6 +9,11 @@ st-*.tar.gz
 .home/
 .runtime/
 
+st-play
+tests/test_play
+tests/fake_video_term
+tests/pty_throttle
+tests/.play-e2e.*
 tests/test_vimnav
 tests/test_sshind
 tests/test_scrollback
@@ -19,6 +24,8 @@ tests/test_search
 tests/test_cmdline_layout
 tests/test_image_occlusion
 tests/test_macos_image_occlusion
+tests/test_macos_video
+tests/macos_headless
 tests/test_macos_mouse_cursor
 tests/test_macos_symbol_input
 tests/macos_symbol_sender
@@ -30,3 +37,6 @@ tests/test_macos_spare
 tests/test_macos_control
 /st-aerospace-launch
 tests/test_macos_aerospace
+tests/test_graphics
+tests/test_video
+tests/test_video_linux

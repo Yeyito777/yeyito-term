@@ -39,6 +39,7 @@ char *argv0;
 #include "sync.h"
 #include "xstate.h"
 #include "render/smoothscroll.h"
+#include "render/video_linux.h"
 
 /* types used in config.h */
 typedef struct {
@@ -241,6 +242,7 @@ static void clip5522_tick(const struct timespec *);
 static void run(void);
 static int xsmoothscrolltimeout(double *);
 static double xframewait(void);
+static void xvideoswapped(const struct timespec *, const struct timespec *);
 static void xupdaterefresh(void);
 /* When the last frame started drawing (smooth-scroll frame pacing). */
 static struct timespec xlastframe;
@@ -2613,6 +2615,7 @@ xstartdraw(void)
 			return 0;
 		}
 		glXMakeCurrent(xw.dpy, xw.win, gpu.ctx);
+		video_linux_begin_frame();
 		if (++gpu.frame == 0) {
 			GpuImageTexture *image;
 			gpu.frame = 1;
@@ -2795,9 +2798,14 @@ xfinishdraw(void)
 		glDisableClientState(GL_COLOR_ARRAY);
 		glDisableClientState(GL_TEXTURE_COORD_ARRAY);
 		glDisable(GL_TEXTURE_2D);
-		if (gpu.doublebuf)
+		if (gpu.doublebuf) {
+			struct timespec t0, t1;
+			clock_gettime(CLOCK_MONOTONIC, &t0);
 			glXSwapBuffers(xw.dpy, xw.win);
-		else
+			clock_gettime(CLOCK_MONOTONIC, &t1);
+			if (graphics_video_count())
+				xvideoswapped(&t0, &t1);
+		} else
 			glFlush();
 		return;
 	}
@@ -3379,11 +3387,11 @@ run(void)
 {
 	XEvent ev;
 	int w = win.w, h = win.h;
-	fd_set rfd;
-	int xfd = XConnectionNumber(xw.dpy), ttyfd, xev, drawing;
-	int selret, ttyready, redraw;
+	fd_set rfd, wfd;
+	int xfd = XConnectionNumber(xw.dpy), ttyfd, xev, drawing, videofd, maxfd;
+	int selret, ttyready, redraw, videodirty = 0;
 	struct timespec seltv, *tv, now, lastblink, trigger;
-	double timeout;
+	double timeout, videowait;
 
 	/* Waiting for window mapping */
 	do {
@@ -3430,8 +3438,19 @@ run(void)
 	struct timespec lastpersist = {0};
 	for (timeout = -1, drawing = 0, lastblink = (struct timespec){0};;) {
 		FD_ZERO(&rfd);
+		FD_ZERO(&wfd);
 		FD_SET(ttyfd, &rfd);
+		/* Input and replies the child hasn't taken yet (ttywriteraw). */
+		if (ttyflush())
+			FD_SET(ttyfd, &wfd);
 		FD_SET(xfd, &rfd);
+		maxfd = MAX(xfd, ttyfd);
+		/* Video decoders wake the loop when a frame arrives after their
+		 * queue ran empty; due frames are timed below. */
+		if ((videofd = video_linux_fd()) >= 0) {
+			FD_SET(videofd, &rfd);
+			maxfd = MAX(maxfd, videofd);
+		}
 
 		if (XPending(xw.dpy))
 			timeout = 0;  /* existing events might not set xfd */
@@ -3440,7 +3459,7 @@ run(void)
 		seltv.tv_nsec = 1E6 * (timeout - 1E3 * seltv.tv_sec);
 		tv = timeout >= 0 ? &seltv : NULL;
 
-		if ((selret = pselect(MAX(xfd, ttyfd)+1, &rfd, NULL, NULL, tv, NULL)) < 0) {
+		if ((selret = pselect(maxfd+1, &rfd, &wfd, NULL, tv, NULL)) < 0) {
 			if (errno == EINTR) {
 				if (childready())
 					reapchild();
@@ -3451,9 +3470,16 @@ run(void)
 
 		if (childready())
 			reapchild();
+		if (videofd >= 0 && selret > 0 && FD_ISSET(videofd, &rfd)) {
+			uint64_t wakes;
+			if (read(videofd, &wakes, sizeof(wakes)) < 0)
+				wakes = 0;
+		}
 		clock_gettime(CLOCK_MONOTONIC, &now);
 		clip5522_tick(&now);
 
+		if (selret > 0 && FD_ISSET(ttyfd, &wfd))
+			ttyflush();
 		ttyready = FD_ISSET(ttyfd, &rfd);
 		if (ttyready)
 			ttyread();
@@ -3470,6 +3496,19 @@ run(void)
 				continue;
 			if (handler[ev.type])
 				(handler[ev.type])(&ev);
+		}
+
+		/* Videos: pick the frames due now and wake for the next one.
+		 * Their decoding and sound go on while the window is hidden;
+		 * a visible frame change redraws without waiting for input
+		 * to go idle, so frames keep their timing while packets
+		 * stream in. */
+		videowait = -1;
+		if (graphics_video_count()) {
+			int changed = 0;
+			videowait = video_linux_tick(&changed);
+			if (changed && IS_SET(MODE_VISIBLE) && IS_SET(MODE_ONSCREEN))
+				videodirty = 1;
 		}
 
 		/*
@@ -3490,18 +3529,24 @@ run(void)
 			}
 			timeout = (maxlatency - TIMEDIFF(now, trigger)) \
 			          / maxlatency * minlatency;
-			if (timeout > 0)
+			if (timeout > 0 && !videodirty) {
+				if (videowait >= 0 && videowait < timeout)
+					timeout = videowait;
 				continue;  /* we have time, try to find idle */
+			}
 		}
 
 		/* The X fd can become readable due to internal GLX/DRI traffic without
 		 * yielding any X events.  Do not let that cut short the draw latency timer
 		 * or create an idle redraw/swap loop. */
-		if (drawing && !ttyready && !xev && selret > 0) {
+		if (drawing && !ttyready && !xev && selret > 0 && !videodirty) {
 			timeout = (maxlatency - TIMEDIFF(now, trigger)) \
 			          / maxlatency * minlatency;
-			if (timeout > 0)
+			if (timeout > 0) {
+				if (videowait >= 0 && videowait < timeout)
+					timeout = videowait;
 				continue;
+			}
 		}
 
 		/* DEC mode 2026 mutates the live grid normally but withholds all
@@ -3566,12 +3611,31 @@ run(void)
 		if (xsmoothscrolltimeout(&timeout))
 			redraw = 1;
 
+		if (videodirty)
+			redraw = 1;
+		if (videowait >= 0 && (timeout < 0 || videowait < timeout))
+			timeout = videowait;
+
 		if (!redraw)
 			continue;
 		clock_gettime(CLOCK_MONOTONIC, &xlastframe);
 		draw();
 		XFlush(xw.dpy);
 		drawing = 0;
+		videodirty = 0;
+		if (graphics_video_count()) {
+			int changed = 0;
+			/* The swap may have waited for the display: pick the
+			 * frame for the next vblank now, not on the timer set
+			 * before the draw. */
+			videowait = video_linux_tick(&changed);
+			if (changed && IS_SET(MODE_VISIBLE) && IS_SET(MODE_ONSCREEN))
+				videodirty = 1;
+			if (videodirty)
+				timeout = 0;
+			else if (videowait >= 0 && (timeout < 0 || videowait < timeout))
+				timeout = videowait;
+		}
 		/* draw() is where a new scroll is noticed: arm its next frame. */
 		xsmoothscrolltimeout(&timeout);
 	}
@@ -3580,6 +3644,33 @@ run(void)
 /* Refresh period (ms) of the monitor under the window's centre, from
  * XRandR; 0 when unknown.  Updated when the window maps and moves. */
 static double xrefreshms;
+
+/* A swap that waited for the display returned right after a vblank: it
+ * is the display's timing that videos pick their frames for.  Swap returns
+ * jitter by a millisecond or two, so the phase follows them slowly. */
+static void
+xvideoswapped(const struct timespec *start, const struct timespec *end)
+{
+	static int64_t phase;
+	int64_t period = (int64_t)(1000 * (xrefreshms > 0 ? xrefreshms :
+	    1000.0 / 60.0));
+	int64_t at = (int64_t)end->tv_sec * 1000000 + end->tv_nsec / 1000, err;
+
+	if (!gpuvsync || TIMEDIFF((*end), (*start)) < 2)
+		return;
+	if (phase) {
+		err = (at - phase) % period;
+		if (err > period / 2)
+			err -= period;
+		else if (err < -period / 2)
+			err += period;
+		phase = err > period / 4 || err < -period / 4 ? at :
+		    at - err + err / 8;
+	} else {
+		phase = at;
+	}
+	video_linux_set_vblank(period, phase);
+}
 
 static void
 xupdaterefresh(void)

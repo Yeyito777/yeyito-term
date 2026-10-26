@@ -4,15 +4,15 @@
 
 include config.mk
 
-DIST_SRC = st.c x.c graphics.c graphics.h clipboard5522.c clipboard5522.h vimnav.c sshind.c notif.c persist.c cmdline.c search.c
+DIST_SRC = st.c x.c graphics.c graphics.h video.c video.h clipboard5522.c clipboard5522.h vimnav.c sshind.c notif.c persist.c cmdline.c search.c
 
 ifeq ($(UNAME_S),Darwin)
-SRC = st.c graphics.c clipboard5522.c vimnav.c persist.c cmdline.c search.c macos/locale.c macos/emoji.c macos/spare.c macos/control.c macos/launchlog.c
-OBJC_SRC = macos/backend.m macos/renderer.m macos/pty.m macos/pasteboard5522.m
+SRC = st.c graphics.c video.c clipboard5522.c vimnav.c persist.c cmdline.c search.c macos/locale.c macos/emoji.c macos/spare.c macos/control.c macos/launchlog.c
+OBJC_SRC = macos/backend.m macos/renderer.m macos/pty.m macos/pasteboard5522.m macos/videoplayer.m
 OBJ = $(SRC:.c=.o) $(OBJC_SRC:.m=.o)
 else
-SRC = st.c x.c graphics.c clipboard5522.c vimnav.c sshind.c notif.c persist.c cmdline.c search.c
-OBJ = $(SRC:.c=.o)
+SRC = st.c x.c graphics.c video.c clipboard5522.c vimnav.c sshind.c notif.c persist.c cmdline.c search.c
+OBJ = $(SRC:.c=.o) render/video_linux.o
 endif
 OBJ += render/image_occlusion.o render/smoothscroll.o render/smoothscroll_term.o
 APP = .build/st.app
@@ -25,6 +25,27 @@ endif
 
 all: st $(LAUNCHER) install-hint
 
+# st-play: the video player (play/, docs/video.md).  Built separately
+# (make st-play) because it needs the ffmpeg libraries.
+FFMPEG_PKGS = libavformat libavcodec libswscale libswresample libavutil
+PLAY_CFLAGS = -O2 -g -Wall -Wextra `$(PKG_CONFIG) --cflags $(FFMPEG_PKGS)`
+PLAY_LIBS = `$(PKG_CONFIG) --libs $(FFMPEG_PKGS)` -lpthread -lm
+PLAY_OBJ = play/st-play.o play/media.o play/flow.o play/out.o play/input.o
+
+play/st-play.o: play/st-play.c play/flow.h play/input.h play/media.h play/out.h play/selectpoll.h
+	$(CC) $(PLAY_CFLAGS) -c play/st-play.c -o $@
+play/media.o: play/media.c play/media.h
+	$(CC) $(PLAY_CFLAGS) -c play/media.c -o $@
+play/flow.o: play/flow.c play/flow.h
+	$(CC) $(PLAY_CFLAGS) -c play/flow.c -o $@
+play/out.o: play/out.c play/out.h
+	$(CC) $(PLAY_CFLAGS) -c play/out.c -o $@
+play/input.o: play/input.c play/input.h
+	$(CC) $(PLAY_CFLAGS) -c play/input.c -o $@
+
+st-play: $(PLAY_OBJ)
+	$(CC) -o $@ $(PLAY_OBJ) $(PLAY_LIBS)
+
 config.h:
 	cp config.def.h config.h
 
@@ -34,11 +55,14 @@ config.h:
 .m.o:
 	$(CC) $(STOBJCFLAGS) -c $< -o $@
 
-st.o: config.h st.h win.h graphics.h vimnav.h persist.h macos/emoji.h
-x.o: arg.h config.h st.h win.h xstate.h graphics.h sync.h clipboard5522.h sshind.h notif.h persist.h cmdline.h search.h render/gpu.c
-graphics.o: graphics.c graphics.h st.h vendor/stb_image.h
+st.o: config.h st.h win.h graphics.h video.h vimnav.h persist.h macos/emoji.h
+x.o: arg.h config.h st.h win.h xstate.h graphics.h sync.h clipboard5522.h sshind.h notif.h persist.h cmdline.h search.h render/gpu.c render/video_linux.h
+graphics.o: graphics.c graphics.h video.h st.h vendor/stb_image.h
+video.o: video.c video.h
 render/image_occlusion.o: render/image_occlusion.c render/image_occlusion.h graphics.h st.h
 	$(CC) $(STCFLAGS) -c render/image_occlusion.c -o $@
+render/video_linux.o: render/video_linux.c render/video_linux.h video.h
+	$(CC) $(STCFLAGS) -c render/video_linux.c -o $@
 render/smoothscroll.o: render/smoothscroll.c render/smoothscroll.h
 	$(CC) $(STCFLAGS) -c render/smoothscroll.c -o $@
 render/smoothscroll_term.o: render/smoothscroll_term.c render/smoothscroll.h st.h win.h
@@ -46,7 +70,7 @@ render/smoothscroll_term.o: render/smoothscroll_term.c render/smoothscroll.h st.
 st.o x.o macos/backend.o: render/smoothscroll.h
 x.o macos/backend.o: render/image_occlusion.h
 clipboard5522.o: clipboard5522.c clipboard5522.h
-macos/backend.o: macos/backend.m macos/native.h macos/renderer.h macos/glyph_layout.h macos/pty.h macos/pasteboard5522.h macos/keysyms.h macos/reveal.h macos/spare.h macos/control.h macos/launchlog.h macos/text_input.h config.h st.h win.h graphics.h sync.h
+macos/backend.o: macos/backend.m macos/videoplayer.h macos/native.h macos/renderer.h macos/glyph_layout.h macos/pty.h macos/pasteboard5522.h macos/keysyms.h macos/reveal.h macos/spare.h macos/control.h macos/launchlog.h macos/text_input.h config.h st.h win.h graphics.h sync.h
 macos/pasteboard5522.o: macos/pasteboard5522.m macos/pasteboard5522.h clipboard5522.h
 macos/locale.o: macos/locale.c macos/locale.h
 	$(CC) $(STCFLAGS) -c macos/locale.c -o macos/locale.o
@@ -63,6 +87,7 @@ macos/control.o: macos/control.c macos/control.h
 macos/emoji.o: macos/emoji.c macos/emoji.h st.h
 	$(CC) $(STCFLAGS) -c macos/emoji.c -o macos/emoji.o
 macos/renderer.o: macos/renderer.m macos/renderer.h macos/glyph_layout.h
+macos/videoplayer.o: macos/videoplayer.m macos/videoplayer.h macos/renderer.h graphics.h video.h
 macos/pty.o: macos/pty.m macos/pty.h
 vimnav.o: st.h vimnav.h
 sshind.o: sshind.h xstate.h
@@ -116,9 +141,10 @@ install-hint:
 
 clean:
 	rm -f st $(OBJ) st-$(VERSION).tar.gz
-	rm -f x.o sshind.o notif.o macos/backend.o macos/renderer.o macos/pasteboard5522.o
+	rm -f x.o sshind.o notif.o macos/backend.o macos/renderer.o macos/pasteboard5522.o macos/videoplayer.o
 	rm -f st-aerospace-launch macos/aerospace_launch.o macos/aerospace.o
 	rm -f a.out
+	rm -f st-play $(PLAY_OBJ)
 	$(MAKE) clean-tests
 	rm -rf .build
 
@@ -129,11 +155,11 @@ dist: clean
 	cp -R CLAUDE.md Makefile README.md TODO.md config.mk\
 		config.def.h st.info st.1 arg.h st.h win.h xstate.h sync.h vimnav.h sshind.h notif.h persist.h cmdline.h cmdline_layout.h search.h $(DIST_SRC)\
 		st-$(VERSION)
-	cp -R render/gpu.c render/image_occlusion.c render/image_occlusion.h render/smoothscroll.c render/smoothscroll.h render/smoothscroll_term.c render/README.md st-$(VERSION)/render
-	cp -R docs/kitty-graphics.md st-$(VERSION)/docs
+	cp -R render/gpu.c render/image_occlusion.c render/image_occlusion.h render/smoothscroll.c render/smoothscroll.h render/smoothscroll_term.c render/video_linux.c render/video_linux.h render/README.md st-$(VERSION)/render
+	cp -R docs/kitty-graphics.md docs/video.md st-$(VERSION)/docs
 	mkdir -p st-$(VERSION)/vendor
 	cp -R vendor/stb_image.h st-$(VERSION)/vendor
-	cp -R macos/README.md macos/Info.plist macos/backend.m macos/pasteboard5522.h macos/pasteboard5522.m macos/keysyms.h macos/native.h macos/reveal.h macos/text_input.h\
+	cp -R macos/README.md macos/Info.plist macos/backend.m macos/videoplayer.m macos/videoplayer.h macos/pasteboard5522.h macos/pasteboard5522.m macos/keysyms.h macos/native.h macos/reveal.h macos/text_input.h\
 		macos/renderer.h macos/renderer.m macos/glyph_layout.h macos/emoji.h macos/emoji.c\
 		macos/pty.h macos/pty.m macos/locale.h macos/locale.c macos/spare.h macos/spare.c macos/control.h macos/control.c macos/launchlog.h macos/launchlog.c\
 		macos/aerospace.h macos/aerospace.c macos/aerospace_launch.c\
@@ -155,12 +181,19 @@ install: st
 	chmod 755 $(DESTDIR)$(PREFIX)/bin/st-notify
 	cp -f scripts/st-save-cmd $(DESTDIR)$(PREFIX)/bin/st-save-cmd
 	chmod 755 $(DESTDIR)$(PREFIX)/bin/st-save-cmd
+	@if $(PKG_CONFIG) --exists $(FFMPEG_PKGS); then \
+		$(MAKE) st-play && cp -f st-play $(DESTDIR)$(PREFIX)/bin/st-play && \
+		chmod 755 $(DESTDIR)$(PREFIX)/bin/st-play; \
+	else \
+		echo "st-play not installed: ffmpeg development libraries not found"; \
+	fi
 	@echo Please see the README file regarding the terminfo entry of st.
 
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/st
 	rm -f $(DESTDIR)$(PREFIX)/bin/st-notify
 	rm -f $(DESTDIR)$(PREFIX)/bin/st-save-cmd
+	rm -f $(DESTDIR)$(PREFIX)/bin/st-play
 	rm -f $(DESTDIR)$(MANPREFIX)/man1/st.1
 
 # Testing
@@ -259,8 +292,58 @@ test_clipboard5522: tests/test_clipboard5522.o clipboard5522.o
 tests/test_graphics.o: tests/test_graphics.c tests/test.h graphics.h st.h
 	$(CC) $(TESTFLAGS) -c tests/test_graphics.c -o tests/test_graphics.o
 
-test_graphics: tests/test_graphics.o graphics.o
-	$(CC) -o tests/test_graphics tests/test_graphics.o graphics.o -lz
+test_graphics: tests/test_graphics.o graphics.o video.o
+	$(CC) -o tests/test_graphics tests/test_graphics.o graphics.o video.o -lz
+
+tests/test_video.o: tests/test_video.c tests/test.h graphics.h video.h st.h
+	$(CC) $(TESTFLAGS) -c tests/test_video.c -o tests/test_video.o
+
+test_video: tests/test_video.o graphics.o video.o
+	$(CC) -o tests/test_video tests/test_video.o graphics.o video.o -lz
+
+# st-play: parser, framing and flow-control unit tests (no ffmpeg needed)
+tests/test_play.o: tests/test_play.c tests/test.h play/flow.h play/input.h play/out.h
+	$(CC) $(TESTFLAGS) -c tests/test_play.c -o tests/test_play.o
+
+tests/play_flow.o: play/flow.c play/flow.h
+	$(CC) $(TESTFLAGS) -c play/flow.c -o $@
+tests/play_input.o: play/input.c play/input.h
+	$(CC) $(TESTFLAGS) -c play/input.c -o $@
+tests/play_out.o: play/out.c play/out.h
+	$(CC) $(TESTFLAGS) -c play/out.c -o $@
+
+test_play: tests/test_play.o tests/play_flow.o tests/play_input.o tests/play_out.o
+	$(CC) -o tests/test_play tests/test_play.o tests/play_flow.o tests/play_input.o tests/play_out.o -lm
+
+# Fake terminal for st-play end-to-end runs: st's graphics.c/video.c, a
+# timing-model video backend and a throttled PTY link (decodes with
+# libavcodec to validate the stream).
+tests/fake_video_term: tests/fake_video_term.c graphics.o video.o graphics.h video.h play/selectpoll.h
+	$(CC) $(TESTFLAGS) -O2 -DFAKE_DECODE `$(PKG_CONFIG) --cflags libavcodec libavutil` \
+		tests/fake_video_term.c graphics.o video.o -o $@ -lz -lm \
+		`$(PKG_CONFIG) --libs libavcodec libavutil`
+
+# A PTY relay with a slow link, for st-play in a real terminal:
+#   st -e tests/pty_throttle --bw 3000 --rtt 150 -- ./st-play clip.mp4
+tests/pty_throttle: tests/pty_throttle.c play/selectpoll.h
+	$(CC) $(TESTFLAGS) -O2 tests/pty_throttle.c -o $@
+
+# End-to-end st-play runs through the fake terminal (skipped without ffmpeg).
+test_play_e2e:
+	@if $(PKG_CONFIG) --exists $(FFMPEG_PKGS) && command -v ffmpeg >/dev/null; then \
+		$(MAKE) -s st-play tests/fake_video_term && ./tests/test_play_e2e.sh; \
+	else \
+		echo "test_play_e2e: skipped (no ffmpeg)"; \
+	fi
+
+# Linux video backend (includes render/video_linux.c; real decoders, fake
+# clock, null audio output)
+VIDEO_LINUX_PKGS = libavcodec libavutil libswscale libpulse
+tests/test_video_linux.o: tests/test_video_linux.c tests/test.h render/video_linux.c render/video_linux.h video.h
+	$(CC) $(TESTFLAGS) `$(PKG_CONFIG) --cflags $(VIDEO_LINUX_PKGS)` -c tests/test_video_linux.c -o $@
+
+test_video_linux: tests/test_video_linux.o video.o
+	$(CC) -o tests/test_video_linux tests/test_video_linux.o video.o `$(PKG_CONFIG) --libs $(VIDEO_LINUX_PKGS)` -lpthread -lm
 
 # smooth scrolling engine + terminal glue (includes both .c files, fake terminal)
 tests/test_smoothscroll.o: tests/test_smoothscroll.c tests/test.h render/smoothscroll.c render/smoothscroll_term.c render/smoothscroll.h st.h win.h
@@ -278,6 +361,19 @@ tests/test_macos_image_occlusion.o: tests/test_macos_image_occlusion.m tests/tes
 
 test_macos_image_occlusion: tests/test_macos_image_occlusion.o $(MAC_IMAGE_TEST_OBJ)
 	$(CC) -o tests/test_macos_image_occlusion tests/test_macos_image_occlusion.o $(MAC_IMAGE_TEST_OBJ) $(STLDFLAGS)
+
+tests/test_macos_video.o: tests/test_macos_video.m tests/test.h macos/backend.o macos/renderer.o macos/videoplayer.o
+	$(CC) $(STOBJCFLAGS) -c tests/test_macos_video.m -o $@
+
+test_macos_video: tests/test_macos_video.o $(MAC_IMAGE_TEST_OBJ)
+	$(CC) -o tests/test_macos_video tests/test_macos_video.o $(MAC_IMAGE_TEST_OBJ) $(STLDFLAGS)
+
+# A windowless st for end-to-end runs (not part of make test).
+tests/macos_headless.o: tests/macos_headless.m macos/backend.o macos/renderer.o macos/videoplayer.o
+	$(CC) $(STOBJCFLAGS) -c tests/macos_headless.m -o $@
+
+macos_headless: tests/macos_headless.o $(MAC_IMAGE_TEST_OBJ)
+	$(CC) -o tests/macos_headless tests/macos_headless.o $(MAC_IMAGE_TEST_OBJ) $(STLDFLAGS)
 
 tests/test_macos_mouse_cursor.o: tests/test_macos_mouse_cursor.m tests/test.h macos/backend.o macos/renderer.o
 	$(CC) $(STOBJCFLAGS) -c tests/test_macos_mouse_cursor.m -o $@
@@ -365,9 +461,13 @@ test_macos_pasteboard5522: tests/test_macos_pasteboard5522.o macos/pasteboard552
 endif
 
 test_gpu_regressions: st
+	@./tests/test_tty_replies.sh
 	@./tests/test_gpu_regressions.sh
 	@./tests/test_cursor_rendering.sh
 	@./tests/test_image_occlusion.sh
+ifneq ($(UNAME_S),Darwin)
+	@./tests/test_video_e2e.sh
+endif
 
 test_aerospace_launcher: $(LAUNCHER)
 	@./tests/test_aerospace_launcher.sh
@@ -375,9 +475,12 @@ ifeq ($(UNAME_S),Darwin)
 	@zsh -f ./tests/test_shell_context.zsh
 endif
 
-test: test_image_occlusion test_smoothscroll test_vimnav test_sshind test_scrollback test_cwd test_notif test_persist test_search test_cmdline_layout test_mode_reset test_sync test_clipboard5522 test_graphics test_aerospace_launcher
+test: test_image_occlusion test_smoothscroll test_vimnav test_sshind test_scrollback test_cwd test_notif test_persist test_search test_cmdline_layout test_mode_reset test_sync test_clipboard5522 test_graphics test_video test_play test_aerospace_launcher
+ifneq ($(UNAME_S),Darwin)
+test: test_video_linux
+endif
 ifeq ($(UNAME_S),Darwin)
-test: test_macos_image_occlusion test_macos_mouse_cursor test_macos_pty test_macos_reveal test_macos_spare test_macos_launchlog test_macos_aerospace test_macos_control test_macos_text_input test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522
+test: test_macos_image_occlusion test_macos_video test_macos_mouse_cursor test_macos_pty test_macos_reveal test_macos_spare test_macos_launchlog test_macos_aerospace test_macos_control test_macos_text_input test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522
 test: test_macos_symbol_input
 endif
 	@echo "Running tests..."
@@ -393,10 +496,17 @@ endif
 	@./tests/test_sync
 	@./tests/test_clipboard5522
 	@./tests/test_graphics
+	@./tests/test_video
+	@./tests/test_play
+	@$(MAKE) -s test_play_e2e
+ifneq ($(UNAME_S),Darwin)
+	@./tests/test_video_linux
+endif
 	@./tests/test_image_occlusion
 	@./tests/test_smoothscroll
 ifeq ($(UNAME_S),Darwin)
 	@./tests/test_macos_image_occlusion
+	@./tests/test_macos_video
 	@./tests/test_macos_mouse_cursor
 	@./tests/test_macos_pty
 	@./tests/test_macos_reveal
@@ -414,7 +524,7 @@ endif
 
 clean-tests:
 	rm -f tests/test_macos_symbol_input tests/test_macos_symbol_input.o tests/macos_symbol_sender
-	rm -f tests/*.o tests/test_macos_image_occlusion tests/test_macos_mouse_cursor tests/test_image_occlusion tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search tests/test_cmdline_layout tests/test_mode_reset tests/test_sync tests/test_clipboard5522 tests/test_graphics tests/test_smoothscroll tests/test_macos_pty tests/test_macos_reveal tests/test_macos_spare tests/test_macos_launchlog tests/test_macos_aerospace tests/test_macos_control tests/test_macos_text_input tests/test_macos_locale tests/test_macos_glyph_layout tests/test_macos_emoji tests/test_macos_pasteboard5522
+	rm -f tests/*.o tests/macos_headless tests/test_macos_image_occlusion tests/test_macos_video tests/test_macos_mouse_cursor tests/test_image_occlusion tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search tests/test_cmdline_layout tests/test_mode_reset tests/test_sync tests/test_clipboard5522 tests/test_graphics tests/test_video tests/test_video_linux tests/test_play tests/fake_video_term tests/pty_throttle tests/test_smoothscroll tests/test_macos_pty tests/test_macos_reveal tests/test_macos_spare tests/test_macos_launchlog tests/test_macos_aerospace tests/test_macos_control tests/test_macos_text_input tests/test_macos_locale tests/test_macos_glyph_layout tests/test_macos_emoji tests/test_macos_pasteboard5522
 
-.PHONY: all app install-app uninstall-app install-hint clean dist install uninstall test test_image_occlusion test_smoothscroll test_macos_image_occlusion test_macos_mouse_cursor test_gpu_regressions test_aerospace_launcher test_mode_reset test_sync test_graphics test_macos_pty test_macos_reveal test_macos_spare test_macos_launchlog test_macos_aerospace test_macos_control test_macos_text_input test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522 clean-tests
-.PHONY: test_macos_symbol_input
+.PHONY: all app install-app uninstall-app install-hint clean dist install uninstall test test_image_occlusion test_smoothscroll test_macos_image_occlusion test_macos_video test_macos_mouse_cursor test_gpu_regressions test_aerospace_launcher test_mode_reset test_sync test_graphics test_video test_video_linux test_macos_pty test_macos_reveal test_macos_spare test_macos_launchlog test_macos_aerospace test_macos_control test_macos_text_input test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522 clean-tests
+.PHONY: test_macos_symbol_input macos_headless test_play test_play_e2e

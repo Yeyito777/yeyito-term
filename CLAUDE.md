@@ -16,6 +16,8 @@ Make sure to modify the required zsh config in README.md if you make a change th
 | **cwd**, `_ST_CWD`, OSC 779, working directory, spawntermhere | `reference/cwd-property.md` |
 | **smooth scroll**, pixel scrolling, trackpad momentum, scroll animation, scroll regions, DECSCLM | `reference/smooth-scroll.md` |
 | **app-driven smooth scrolling**, mode 2032, OSC 2032, TUI scroll animation protocol | `docs/app-smooth-scroll.md` |
+| **video**, st-play, a=v, VideoToolbox, video playback, mpv --vo=kitty | `docs/video.md` |
+| **images**, Kitty graphics, placements, image occlusion | `docs/kitty-graphics.md` |
 | **warm spare**, `--spare`, instant launch, st-aerospace-launch, spawn request | `reference/warm-spare.md` |
 
 ## CODE ORGANIZATION

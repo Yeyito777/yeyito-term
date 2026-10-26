@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "st.h"
+#include "video.h"
 
 #define GRAPHICS_STAGE_BELOW_BACKGROUND 0
 #define GRAPHICS_STAGE_BELOW_TEXT       1
@@ -56,6 +57,9 @@ typedef struct {
 	int selected;
 	/** The image's PNG "selection-text", or NULL: an atomic text object. */
 	const char *text;
+	/** st video (a=v): the player whose current frame this shows, with
+	 * rgba NULL; source and image sizes are in its declared units. */
+	VideoPlayer *video;
 } GraphicsPlacementView;
 
 /** A placed image that copies as text (see graphics_text_objects). */
@@ -102,6 +106,9 @@ void graphics_clear_buffer(int alt);
 void graphics_reset(void);
 void graphics_set_image_free_callback(GraphicsImageFreeCallback callback,
 		void *context);
+/* Register the platform's video player (NULL: videos unavailable). */
+void graphics_set_video_backend(const VideoBackend *backend);
+size_t graphics_video_count(void);
 size_t graphics_image_bytes(void);
 size_t graphics_image_count(void);
 size_t graphics_placement_count(void);

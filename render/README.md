@@ -16,3 +16,12 @@ The GL renderer shifts and clips each row's quads in `gpubatchquad()`
 Kitty graphics images use individual RGBA OpenGL textures rather than the glyph
 atlases. Placements are emitted in three compositing stages: below cell
 backgrounds, between backgrounds and text, and above text.
+
+`video_linux.c` is the Linux backend for st video (`a=v`, see
+`../docs/video.md`): libavcodec decoder threads, PulseAudio output and the
+playback clock.  A video placement goes through the same `gpudrawimage()`
+path as an image (z stages, clips, glides, occlusion); `gpuvideotexture()`
+uploads the current frame's Y, U and V planes only when the frame changes,
+and a small shader converts them to RGB.  `run()` in `x.c` sleeps until the
+next frame is due or a decoder signals its eventfd, and redraws only for
+videos that were drawn in the last frame.

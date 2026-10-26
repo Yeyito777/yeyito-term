@@ -5,6 +5,7 @@
  * the terminal emulator's local filesystem to programs on a remote host.
  */
 #include "graphics.h"
+#include "video.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -59,6 +60,7 @@
 #define FIELD_OFFSET    (1ULL << 24)
 #define FIELD_TRANSIENT (1ULL << 25)
 #define FIELD_SELECTED  (1ULL << 26)
+#define FIELD_KIND      (1ULL << 27)
 
 #define CONTINUATION_FIELDS (FIELD_MORE | FIELD_QUIET)
 
@@ -67,6 +69,7 @@ typedef struct {
 	char medium;
 	char compression;
 	char delete_action;
+	char kind;	/* st video command (a=v,k=...) */
 	int format;
 	int more;
 	int quiet;
@@ -113,6 +116,12 @@ struct GraphicsImage {
 	int delete_candidate;
 	/* PNG "selection-text" chunk: what selecting this image copies. */
 	char *text;
+	/* -1 unknown, else whether every pixel is opaque (computed lazily). */
+	int opaque;
+	/* st video (a=v): frames come from the platform player, rgba is NULL. */
+	VideoPlayer *video;
+	uint64_t video_received;
+	const char *video_error;
 };
 
 struct GraphicsPlacement {
@@ -156,6 +165,8 @@ static uint32_t next_image_id = 1;
 static size_t total_image_bytes;
 static size_t image_count;
 static size_t placement_count;
+static const VideoBackend *video_backend;
+static size_t video_count;
 
 static int
 mul_overflow_size(size_t a, size_t b, size_t *result)
@@ -387,6 +398,12 @@ parse_command(const char *data, size_t length, GraphicsCommand *command,
 			if (!command_value_uint(value, value_length, &number)) goto invalid_value;
 			command->fields |= FIELD_TRANSIENT;
 			break;
+		case 'k':
+			/* st extension: the st video command (docs/video.md). */
+			if (value_length != 1) goto invalid_value;
+			command->kind = *value;
+			command->fields |= FIELD_KIND;
+			break;
 		case 'V':
 			/* st extension: applications with semantic selections can request
 			 * the same atomic full-placement tint as a terminal selection. */
@@ -592,6 +609,11 @@ delete_image(GraphicsImage *image)
 			*link = image->next;
 			if (image_free_callback)
 				image_free_callback(image->serial, image_free_context);
+			if (image->video) {
+				if (video_backend)
+					video_backend->destroy(image->video);
+				video_count--;
+			}
 			total_image_bytes -= image->bytes;
 			free(image->rgba);
 			free(image->encoded);
@@ -619,7 +641,7 @@ evict_unplaced(GraphicsImage *exclude)
 {
 	GraphicsImage *image, *oldest = NULL;
 	for (image = images; image; image = image->next)
-		if (image != exclude && !image->placements &&
+		if (image != exclude && !image->placements && !image->video &&
 		    (!oldest || image->access < oldest->access))
 			oldest = image;
 	if (!oldest)
@@ -999,6 +1021,7 @@ store_image(const GraphicsCommand *command, unsigned char *rgba, int width,
 	image->rgba = rgba;
 	image->encoded_bytes = encoded_bytes;
 	image->encoded = encoded_copy;
+	image->opaque = command->format == 24 ? 1 : -1;
 	image->next = images;
 	images = image;
 	total_image_bytes += bytes;
@@ -1016,6 +1039,74 @@ find_placement(GraphicsImage *image, uint32_t id)
 		if (placement->image == image && placement->id == id)
 			return placement;
 	return NULL;
+}
+
+static int
+image_is_opaque(GraphicsImage *image)
+{
+	size_t i, count;
+
+	if (image->video)
+		return 1;
+	if (image->opaque >= 0)
+		return image->opaque;
+	if (!image->rgba)
+		return 0;	/* compacted PNG: not worth decoding to find out */
+	count = (size_t)image->width * (size_t)image->height;
+	for (i = 0; i < count && image->rgba[4 * i + 3] == 255; i++)
+		;
+	image->opaque = i == count;
+	return image->opaque;
+}
+
+/* A placement's pixel rectangle relative to its anchor line's origin. */
+static void
+placement_rect(const GraphicsPlacement *placement, int cell_width,
+		int cell_height, long long rect[4])
+{
+	rect[0] = (long long)placement->column * cell_width + placement->pixel_x;
+	rect[1] = placement->pixel_y;
+	rect[2] = rect[0] + (placement->natural_size ? placement->source_width :
+	    (long long)placement->columns * cell_width);
+	rect[3] = rect[1] + (placement->natural_size ? placement->source_height :
+	    (long long)placement->rows * cell_height);
+}
+
+/* Raw-frame video players (mpv --vo=kitty, timg) send every frame as a new
+ * anonymous image placed over the previous one.  Nothing can place an
+ * anonymous image again, so once an opaque placement drawn above it covers
+ * it completely it is invisible for good: drop it, instead of keeping every
+ * frame until the memory quota or the placement limit stops the video. */
+static void
+remove_covered_placements(GraphicsPlacement *top, int cell_width,
+		int cell_height)
+{
+	GraphicsPlacement *placement, *next;
+	long long outer[4], inner[4];
+	int opaque = -1, removed = 0;
+
+	placement_rect(top, cell_width, cell_height, outer);
+	for (placement = placements; placement; placement = next) {
+		next = placement->next;
+		/* Equal z draws by image id, then age: an anonymous image (id 0)
+		 * placed earlier is always below. */
+		if (placement == top || placement->image->id ||
+		    placement->anchor != top->anchor ||
+		    placement->alt != top->alt || placement->z > top->z)
+			continue;
+		placement_rect(placement, cell_width, cell_height, inner);
+		if (inner[0] < outer[0] || inner[1] < outer[1] ||
+		    inner[2] > outer[2] || inner[3] > outer[3])
+			continue;
+		if (opaque < 0)
+			opaque = image_is_opaque(top->image);
+		if (!opaque)
+			return;
+		unlink_placement(placement);
+		removed = 1;
+	}
+	if (removed)
+		collect_anonymous_images();
 }
 
 static GraphicsPlacement *
@@ -1099,6 +1190,7 @@ place_image(GraphicsImage *image, const GraphicsCommand *command, Line anchor,
 	placement_count++;
 	image->placements++;
 	image->access = access_clock++;
+	remove_covered_placements(placement, cell_width, cell_height);
 	result->redraw = 1;
 	if (!command->no_cursor_move) {
 		result->move_cursor = 1;
@@ -1269,6 +1361,180 @@ failed:
 	return 0;
 }
 
+/* Replies to a=v commands.  A status or capability query is suppressed only
+ * by q=2; other successes by q>=1, like Kitty's acknowledgements. */
+static void
+video_reply(GraphicsCommandResult *result, const GraphicsCommand *command,
+		int query, int success, const char *message)
+{
+	int length;
+
+	if (!command->has_id || command->quiet >= 2 ||
+	    (success && !query && command->quiet >= 1))
+		return;
+	length = snprintf(result->response, sizeof(result->response),
+	    "\033_Gi=%u;%s\033\\", command->id, message);
+	if (length > 0 && (size_t)length < sizeof(result->response))
+		result->response_len = (size_t)length;
+}
+
+static GraphicsImage *
+find_video(uint32_t id)
+{
+	GraphicsImage *image = find_image_id(id);
+	return image && image->video ? image : NULL;
+}
+
+static int
+open_video(const GraphicsCommand *command, const unsigned char *data,
+		size_t length, GraphicsCommandResult *result, const char **error)
+{
+	GraphicsImage *image, *old;
+	VideoConfig config;
+	VideoPlayer *player;
+
+	if (!video_parse_config(data, length, &config, error))
+		return 0;
+	old = find_image_id(command->id);
+	if (video_count - (old && old->video) >= VIDEO_MAX_OPEN) {
+		*error = "ENOSPC:too many open videos";
+		return 0;
+	}
+	while (image_count >= GR_IMAGE_COUNT_MAX && !old)
+		if (!evict_unplaced(NULL)) {
+			*error = "ENOMEM:too many images";
+			return 0;
+		}
+	image = calloc(1, sizeof(*image));
+	if (!image) {
+		*error = "ENOMEM:image allocation failed";
+		return 0;
+	}
+	player = video_backend->create(&config, error);
+	if (!player) {
+		free(image);
+		if (!*error)
+			*error = "EIO:video player failed";
+		return 0;
+	}
+	if (old) {
+		if (old->placements)
+			result->redraw = 1;
+		delete_image(old);
+	}
+	image->serial = next_serial++;
+	image->access = access_clock++;
+	image->id = command->id;
+	image->width = config.width;
+	image->height = config.height;
+	image->opaque = 1;
+	image->video = player;
+	image->next = images;
+	images = image;
+	image_count++;
+	video_count++;
+	return 1;
+}
+
+static int
+process_video(const GraphicsCommand *command, const unsigned char *data,
+		size_t length, int available, GraphicsCommandResult *result)
+{
+	GraphicsImage *image = NULL;
+	const char *error = NULL;
+	char message[256];
+
+	if (!command->has_id || command->has_number) {
+		/* Without an id there is nowhere to send a reply. */
+		return 0;
+	}
+	if (!available || !video_backend) {
+		video_reply(result, command, command->kind == 'c' ||
+		    command->kind == 'q', 0, "ENOSYS:video unavailable");
+		return 0;
+	}
+	if (command->kind == 'c') {
+		snprintf(message, sizeof(message), "OK %s",
+		    video_backend->capabilities ? video_backend->capabilities : "");
+		video_reply(result, command, 1, 1, message);
+		return 1;
+	}
+	if (command->kind == 'o') {
+		if (!open_video(command, data, length, result, &error)) {
+			video_reply(result, command, 0, 0, error);
+			return 0;
+		}
+		video_reply(result, command, 0, 1, "OK");
+		return 1;
+	}
+	image = find_video(command->id);
+	if (!image) {
+		if (command->kind != 'd')
+			video_reply(result, command, command->kind == 'q', 0,
+			    "ENOENT:video not found");
+		return 0;
+	}
+	image->access = access_clock++;
+	switch (command->kind) {
+	case 'd': {
+		VideoPacket packet;
+		/* Packets never reply; the first problem waits for k=q. */
+		image->video_received += length;
+		if (!video_parse_packet(data, length, &packet, &error) ||
+		    !video_backend->packet(image->video, &packet, &error)) {
+			if (!image->video_error)
+				image->video_error = error ? error :
+				    "EIO:video packet failed";
+			return 0;
+		}
+		return 1;
+	}
+	case 'f': {
+		int64_t start = VIDEO_TIME_NONE;
+		if (data && !video_text_int(data, length, "start", &start))
+			start = VIDEO_TIME_NONE;
+		video_backend->flush(image->video, start);
+		image->video_error = NULL;
+		break;
+	}
+	case 's': {
+		VideoSettings settings;
+		if (!video_parse_settings(data, length, &settings, &error)) {
+			video_reply(result, command, 0, 0, error);
+			return 0;
+		}
+		if (settings.pause >= 0)
+			video_backend->pause(image->video, settings.pause);
+		if (settings.volume >= 0)
+			video_backend->volume(image->video, settings.volume);
+		break;
+	}
+	case 'e':
+		video_backend->end(image->video);
+		break;
+	case 'q': {
+		VideoStatus status;
+		int64_t seq = 0;
+		int has_seq = data && video_text_int(data, length, "seq", &seq);
+		memset(&status, 0, sizeof(status));
+		status.position = status.video_end = status.audio_end =
+		    VIDEO_TIME_NONE;
+		video_backend->status(image->video, &status);
+		if (image->video_error)
+			status.error = image->video_error;
+		video_format_status(message, sizeof(message), &status, has_seq,
+		    seq, image->video_received);
+		video_reply(result, command, 1, 1, message);
+		return 1;
+	}
+	default:
+		video_reply(result, command, 0, 0, "EINVAL:unknown video command");
+		return 0;
+	}
+	video_reply(result, command, 0, 1, "OK");
+	return 1;
+}
+
 static int
 process_command(const GraphicsCommand *command, const unsigned char *data,
 		size_t length, Line anchor, int column, int alt, int cell_width,
@@ -1310,6 +1576,8 @@ process_command(const GraphicsCommand *command, const unsigned char *data,
 		handle_delete(command, anchor, column, alt, viewport_rows,
 		    line_to_row, result);
 		return 1;
+	case 'v':
+		return process_video(command, data, length, available, result);
 	default:
 		error = "ENOSYS:graphics action is not supported";
 		break;
@@ -1386,6 +1654,12 @@ graphics_handle_apc(const char *data, size_t length, Line anchor,
 			    "EINVAL:placement has a payload", 0);
 			return 1;
 		}
+		process_command(&command, NULL, 0, anchor, column, alt,
+		    cell_width, cell_height, viewport_rows, line_to_row, available,
+		    result);
+		return 1;
+	}
+	if (command.action == 'v' && !payload_length && !command.more) {
 		process_command(&command, NULL, 0, anchor, column, alt,
 		    cell_width, cell_height, viewport_rows, line_to_row, available,
 		    result);
@@ -1512,6 +1786,7 @@ graphics_draw_rows(int alt, int stage, int cell_width, int cell_height,
 		view.z = placement->z;
 		view.selected = placement->selected;
 		view.text = placement->image->text;
+		view.video = placement->image->video;
 		draw(&view, context);
 		placement->access = placement->image->access = access_clock++;
 	}
@@ -1825,8 +2100,16 @@ graphics_reset(void)
 	while ((image = images))
 		delete_image(image);
 	placements = NULL;
-	total_image_bytes = image_count = placement_count = 0;
+	total_image_bytes = image_count = placement_count = video_count = 0;
 }
+
+void
+graphics_set_video_backend(const VideoBackend *backend)
+{
+	video_backend = backend;
+}
+
+size_t graphics_video_count(void) { return video_count; }
 
 void
 graphics_set_image_free_callback(GraphicsImageFreeCallback callback,

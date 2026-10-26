@@ -48,6 +48,7 @@ char *argv0;
 #include "pty.h"
 #include "reveal.h"
 #include "spare.h"
+#include "videoplayer.h"
 #include "launchlog.h"
 #include "control.h"
 #include "text_input.h"
@@ -727,6 +728,12 @@ drawGraphicsPlacement(const GraphicsPlacementView *placement, void *context)
 		endCell();
 		return;
 	}
+	/* A video draws its current frame; before its first, nothing. */
+	if (placement->video &&
+	    !mac_video_bind(placement->video, placement->serial)) {
+		endCell();
+		return;
+	}
 	/* An image below text that copies as text selects as one unit: its whole
 	 * cell rectangle takes the selection background, under the image, after
 	 * every cell background (the background layer is encoded before it). */
@@ -776,6 +783,15 @@ freeGraphicsImage(uint64_t serial, void *context)
 {
 	(void)context;
 	mac_renderer_remove_image(serial);
+}
+
+/* A video's shown frame changed: draw now (the display link already timed
+ * it for the next refresh), not after the output-batching delay. */
+static void
+videoRedraw(void)
+{
+	if (nativeView && !IS_SET(MODE_SYNC))
+		[nativeView setNeedsDisplay:YES];
 }
 
 void
@@ -2290,6 +2306,8 @@ initializeNativeWindow(int columns, int rows)
 	if (!mac_renderer_init((__bridge void *)nativeView, usedfont, usedfontsize))
 		die("st: could not initialize Metal renderer\n");
 	graphics_set_image_free_callback(freeGraphicsImage, NULL);
+	mac_video_init((__bridge void *)device, (__bridge void *)nativeView,
+	    videoRedraw);
 	smoothscroll_configure(smoothscroll, smoothscroll_ms, smoothscroll_regions);
 	/* Smooth-scroll glides run at the display's refresh; updateDisplayRate()
 	 * sets it from the window's screen once the window exists. */
@@ -2401,7 +2419,18 @@ setupSources(void)
 	ttySource = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, ttyfd, 0,
 	    dispatch_get_main_queue());
 	dispatch_source_set_event_handler(ttySource, ^{
-		if (ttyread() && launchStats.active && !launchStats.output)
+		/* A macOS PTY hands over at most 1 KiB per read.  Drain what is
+		 * there, for a few milliseconds at most, in one event so that bulk
+		 * output (raw video frames, big files) isn't paced by main-queue
+		 * round trips; the descriptor is nonblocking. */
+		double deadline = CACurrentMediaTime() + 0.004;
+		size_t total = 0, n;
+		while ((n = ttyread()) > 0) {
+			total += n;
+			if (CACurrentMediaTime() >= deadline)
+				break;
+		}
+		if (total && launchStats.active && !launchStats.output)
 			launchStats.output = CACurrentMediaTime();
 		macos_request_redraw();
 	});
