@@ -39,6 +39,7 @@ char *argv0;
 #include "sync.h"
 #include "xstate.h"
 #include "render/smoothscroll.h"
+#include "render/video_linux.h"
 
 /* types used in config.h */
 typedef struct {
@@ -2613,6 +2614,7 @@ xstartdraw(void)
 			return 0;
 		}
 		glXMakeCurrent(xw.dpy, xw.win, gpu.ctx);
+		video_linux_begin_frame();
 		if (++gpu.frame == 0) {
 			GpuImageTexture *image;
 			gpu.frame = 1;
@@ -3380,10 +3382,10 @@ run(void)
 	XEvent ev;
 	int w = win.w, h = win.h;
 	fd_set rfd;
-	int xfd = XConnectionNumber(xw.dpy), ttyfd, xev, drawing;
-	int selret, ttyready, redraw;
+	int xfd = XConnectionNumber(xw.dpy), ttyfd, xev, drawing, videofd, maxfd;
+	int selret, ttyready, redraw, videodirty = 0;
 	struct timespec seltv, *tv, now, lastblink, trigger;
-	double timeout;
+	double timeout, videowait;
 
 	/* Waiting for window mapping */
 	do {
@@ -3432,6 +3434,13 @@ run(void)
 		FD_ZERO(&rfd);
 		FD_SET(ttyfd, &rfd);
 		FD_SET(xfd, &rfd);
+		maxfd = MAX(xfd, ttyfd);
+		/* Video decoders wake the loop when a frame arrives after their
+		 * queue ran empty; due frames are timed below. */
+		if ((videofd = video_linux_fd()) >= 0) {
+			FD_SET(videofd, &rfd);
+			maxfd = MAX(maxfd, videofd);
+		}
 
 		if (XPending(xw.dpy))
 			timeout = 0;  /* existing events might not set xfd */
@@ -3440,7 +3449,7 @@ run(void)
 		seltv.tv_nsec = 1E6 * (timeout - 1E3 * seltv.tv_sec);
 		tv = timeout >= 0 ? &seltv : NULL;
 
-		if ((selret = pselect(MAX(xfd, ttyfd)+1, &rfd, NULL, NULL, tv, NULL)) < 0) {
+		if ((selret = pselect(maxfd+1, &rfd, NULL, NULL, tv, NULL)) < 0) {
 			if (errno == EINTR) {
 				if (childready())
 					reapchild();
@@ -3451,6 +3460,11 @@ run(void)
 
 		if (childready())
 			reapchild();
+		if (videofd >= 0 && selret > 0 && FD_ISSET(videofd, &rfd)) {
+			uint64_t wakes;
+			if (read(videofd, &wakes, sizeof(wakes)) < 0)
+				wakes = 0;
+		}
 		clock_gettime(CLOCK_MONOTONIC, &now);
 		clip5522_tick(&now);
 
@@ -3472,6 +3486,19 @@ run(void)
 				(handler[ev.type])(&ev);
 		}
 
+		/* Videos: pick the frames due now and wake for the next one.
+		 * Their decoding and sound go on while the window is hidden;
+		 * a visible frame change redraws without waiting for input
+		 * to go idle, so frames keep their timing while packets
+		 * stream in. */
+		videowait = -1;
+		if (graphics_video_count()) {
+			int changed = 0;
+			videowait = video_linux_tick(&changed);
+			if (changed && IS_SET(MODE_VISIBLE) && IS_SET(MODE_ONSCREEN))
+				videodirty = 1;
+		}
+
 		/*
 		 * To reduce flicker and tearing, when new content or event
 		 * triggers drawing, we first wait a bit to ensure we got
@@ -3490,18 +3517,24 @@ run(void)
 			}
 			timeout = (maxlatency - TIMEDIFF(now, trigger)) \
 			          / maxlatency * minlatency;
-			if (timeout > 0)
+			if (timeout > 0 && !videodirty) {
+				if (videowait >= 0 && videowait < timeout)
+					timeout = videowait;
 				continue;  /* we have time, try to find idle */
+			}
 		}
 
 		/* The X fd can become readable due to internal GLX/DRI traffic without
 		 * yielding any X events.  Do not let that cut short the draw latency timer
 		 * or create an idle redraw/swap loop. */
-		if (drawing && !ttyready && !xev && selret > 0) {
+		if (drawing && !ttyready && !xev && selret > 0 && !videodirty) {
 			timeout = (maxlatency - TIMEDIFF(now, trigger)) \
 			          / maxlatency * minlatency;
-			if (timeout > 0)
+			if (timeout > 0) {
+				if (videowait >= 0 && videowait < timeout)
+					timeout = videowait;
 				continue;
+			}
 		}
 
 		/* DEC mode 2026 mutates the live grid normally but withholds all
@@ -3566,12 +3599,18 @@ run(void)
 		if (xsmoothscrolltimeout(&timeout))
 			redraw = 1;
 
+		if (videodirty)
+			redraw = 1;
+		if (videowait >= 0 && (timeout < 0 || videowait < timeout))
+			timeout = videowait;
+
 		if (!redraw)
 			continue;
 		clock_gettime(CLOCK_MONOTONIC, &xlastframe);
 		draw();
 		XFlush(xw.dpy);
 		drawing = 0;
+		videodirty = 0;
 		/* draw() is where a new scroll is noticed: arm its next frame. */
 		xsmoothscrolltimeout(&timeout);
 	}

@@ -14,12 +14,16 @@ PKG_CONFIG = pkg-config
 # Linux and other X11 systems
 X11INC = /usr/X11R6/include
 X11LIB = /usr/X11R6/lib
+# st video (render/video_linux.c): libavcodec decode, PulseAudio output
+VIDEOPKGS = libavcodec libavutil libswscale libpulse
 INCS = -I$(X11INC) \
        `$(PKG_CONFIG) --cflags fontconfig` \
-       `$(PKG_CONFIG) --cflags freetype2`
-LIBS = -L$(X11LIB) -lm -lrt -lz -lX11 -lXrandr -lutil -lXft -lGL \
+       `$(PKG_CONFIG) --cflags freetype2` \
+       `$(PKG_CONFIG) --cflags $(VIDEOPKGS)`
+LIBS = -L$(X11LIB) -lm -lrt -lz -lX11 -lXrandr -lutil -lXft -lGL -lpthread \
        `$(PKG_CONFIG) --libs fontconfig` \
-       `$(PKG_CONFIG) --libs freetype2`
+       `$(PKG_CONFIG) --libs freetype2` \
+       `$(PKG_CONFIG) --libs $(VIDEOPKGS)`
 
 STCPPFLAGS = -DVERSION=\"$(VERSION)\" -D_XOPEN_SOURCE=600
 CFLAGS = -O3 -march=native -flto -frename-registers
