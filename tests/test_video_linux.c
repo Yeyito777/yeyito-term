@@ -687,6 +687,143 @@ TEST(audio_and_video_share_the_audio_clock)
 	stream_free(&audio);
 }
 
+TEST(frames_are_picked_for_the_next_vblank)
+{
+	VideoConfig config = config_for(1, 0, 64, 48, 100);
+	const char *error = NULL;
+	VideoPlayer *p;
+	int64_t t0;
+	double wait;
+
+	if (!have_x264)
+		return;
+	fake_now = 7000000;
+	p = vl_backend.create(&config, &error);
+	ASSERT_NOT_NULL(p);
+	ASSERT(send_packets(p, &clip, VIDEO_STREAM_VIDEO, 0, 30));
+	WAIT_FOR(status_of(p).state == VIDEO_STATE_PLAYING &&
+	    decoded_count(p) >= 4);
+	t0 = fake_now;	/* the clock is 0 here */
+	/* 60 Hz with vblanks at 10, 26.7, 43.3, 60 ms of the clock. */
+	video_linux_set_vblank(16667, t0 + 10000);
+	fake_now = t0 + 5000;
+	wait = video_linux_tick(NULL);
+	ASSERT_EQ(0, current_index(p, 60));
+	/* Frame 1 (33.3 ms) is nearest the vblank at 26.7 ms: wake 10 ms
+	 * before it. */
+	ASSERT(wait > 11.6 && wait < 12.7);
+	/* A draw at 17 ms reaches that vblank, so frame 1 is picked before
+	 * its timestamp; frame 2 (66.7 ms) waits for the one at 60 ms. */
+	fake_now = t0 + 17000;
+	video_linux_tick(NULL);
+	ASSERT_EQ(1, current_index(p, 60));
+	ASSERT(status_of(p).position == 17000);
+	fake_now = t0 + 36000;	/* still reaches 43.3 ms */
+	video_linux_tick(NULL);
+	ASSERT_EQ(1, current_index(p, 60));
+	fake_now = t0 + 51000;
+	video_linux_tick(NULL);
+	ASSERT_EQ(2, current_index(p, 60));
+	ASSERT(status_of(p).dropped == 0);
+	/* Without display timing frames wait for their timestamp. */
+	video_linux_set_vblank(0, VIDEO_TIME_NONE);
+	fake_now = t0 + 99000;
+	video_linux_tick(NULL);
+	ASSERT_EQ(2, current_index(p, 60));
+	fake_now = t0 + 100100;
+	video_linux_tick(NULL);
+	ASSERT_EQ(3, current_index(p, 60));
+	vl_backend.destroy(p);
+}
+
+TEST(audio_clock_steps_are_slewed)
+{
+	VideoPlayer p;
+	int64_t pos, last;
+	int i;
+
+	memset(&p, 0, sizeof(p));
+	p.running = 1;
+	ASSERT(vl_slew(&p, 1000000, 0) == 1000000);
+	/* The latency estimate updates: the audio clock steps 20 ms ahead.
+	 * The clock speeds up a little instead of jumping a frame. */
+	pos = vl_slew(&p, 1000000 + 16667 + 20000, 16667);
+	ASSERT(pos > 1016667 && pos < 1016667 + 1000);
+	last = pos;
+	for (i = 2; i <= 120; i++) {
+		pos = vl_slew(&p, 1020000 + i * 16667, i * 16667);
+		ASSERT(pos > last && pos - last < 16667 + 1000);
+		last = pos;
+	}
+	/* After two seconds it has caught up. */
+	ASSERT(llabs(pos - (1020000 + 120 * 16667)) < 3000);
+	/* A seek-sized difference jumps. */
+	ASSERT(vl_slew(&p, 5000000, 121 * 16667) == 5000000);
+	/* Stopped, it restarts from the audio clock. */
+	p.running = 0;
+	ASSERT(vl_slew(&p, 6000000, 122 * 16667) == 6000000);
+}
+
+TEST(late_audio_holds_video_on_the_host_clock)
+{
+	VideoConfig config = config_for(1, 1, 64, 48, 200);
+	const char *error = NULL;
+	VideoPlayer *p;
+	Stream audio = {0};
+	int64_t t0, astart;
+	int i, v = 0, a = 0;
+
+	if (!have_x264)
+		return;
+	video_linux_set_vblank(0, VIDEO_TIME_NONE);
+	ASSERT(encode_audio(1.5, &audio));
+	/* The sound starts half a second after the picture. */
+	for (i = 0; i < audio.count; i++)
+		audio.packets[i].pts += 500000;
+	astart = audio.packets[0].pts;
+	fake_now = 0;
+	p = vl_backend.create(&config, &error);
+	ASSERT_NOT_NULL(p);
+	while (v < clip.count || a < audio.count) {
+		if (a >= audio.count || (v < clip.count &&
+		    clip.packets[v].pts <= audio.packets[a].pts)) {
+			ASSERT(send_packets(p, &clip, VIDEO_STREAM_VIDEO, v, v + 1));
+			v++;
+		} else {
+			ASSERT(send_packets(p, &audio, VIDEO_STREAM_AUDIO, a, a + 1));
+			a++;
+		}
+	}
+	WAIT_FOR(status_of(p).state == VIDEO_STATE_PLAYING);
+	SETTLE(p);
+	t0 = fake_now;
+	/* Before the sound, the first frames play on the host clock. */
+	for (i = 1; i <= 9; i++) {
+		fake_now = t0 + i * FRAME_US + 1000;
+		SETTLE(p);
+		video_linux_tick(NULL);
+		ASSERT_EQ(i, current_index(p, 60));
+	}
+	ASSERT(status_of(p).dropped == 0);
+	/* Nothing was played yet. */
+	ASSERT(p->audio_wait && !p->sink.running);
+	/* The sound starts when the host clock reaches it ... */
+	fake_now = t0 + astart + 1;
+	video_linux_tick(NULL);
+	ASSERT(!p->audio_wait);
+	/* ... and the clock follows it from there. */
+	fake_now += 100000;
+	SETTLE(p);
+	ASSERT(llabs(status_of(p).position - (astart + 100000)) <= 1000);
+	ASSERT(ring_frames(p) > 0);
+	fake_now += 100000;
+	SETTLE(p);
+	video_linux_tick(NULL);
+	ASSERT_EQ((int)((astart + 200000) / FRAME_US), current_index(p, 60));
+	vl_backend.destroy(p);
+	stream_free(&audio);
+}
+
 TEST(packets_for_missing_streams_are_refused)
 {
 	VideoConfig config = config_for(0, 1, 1, 1, 100);
@@ -718,6 +855,9 @@ TEST_SUITE(video_linux)
 	RUN_TEST(queues_are_bounded);
 	RUN_TEST(audio_clock_and_start_trim);
 	RUN_TEST(audio_and_video_share_the_audio_clock);
+	RUN_TEST(frames_are_picked_for_the_next_vblank);
+	RUN_TEST(audio_clock_steps_are_slewed);
+	RUN_TEST(late_audio_holds_video_on_the_host_clock);
 	RUN_TEST(packets_for_missing_streams_are_refused);
 	stream_free(&clip);
 }

@@ -45,6 +45,21 @@
 /* While playing, state changes (a stream running dry, the end) are checked
  * at least this often even when no frame is due. */
 #define VL_CHECK_US         100000
+/* With the display's vblank timing, each frame is picked for the vblank a
+ * draw starting now reaches (one starting at least VL_VBLANK_DRAW_US
+ * before it), and the loop wakes VL_VBLANK_WAKE_US before the vblank a new
+ * frame is due at: the boundary sits halfway between draws that follow a
+ * swap and draws on that timer. */
+#define VL_VBLANK_DRAW_US   5000
+#define VL_VBLANK_WAKE_US   10000
+/* Audio starting later than video by more than this waits for the host
+ * clock to reach it instead of skipping the first frames. */
+#define VL_AUDIO_LATE_US    20000
+/* The audio clock steps by several milliseconds whenever the output's
+ * latency estimate updates; the clock follows it through a slew with this
+ * time constant, and jumps only for errors past VL_SLEW_SNAP_US. */
+#define VL_SLEW_US          1000000
+#define VL_SLEW_SNAP_US     80000
 
 typedef struct QPacket {
 	struct QPacket *next;
@@ -123,6 +138,14 @@ struct VideoPlayer {
 	int running;
 	int clock_known;
 	int audio_clock;
+	/* Running on the host clock until it reaches the first audio sample,
+	 * which starts later than the video (audio_wait); then the audio clock,
+	 * held at audio_floor until it catches up. */
+	int audio_wait;
+	int64_t audio_floor;
+	/* The slewed audio clock: slew_pts at slew_time (valid if slewing). */
+	int slewing;
+	int64_t slew_pts, slew_time;
 	int64_t base_pts, base_time;
 	int64_t video_first, video_end, audio_first, audio_end;
 	AVFrame *current;
@@ -152,6 +175,7 @@ static int64_t (*vl_clock)(void) = vl_monotonic;
 static int vl_null_audio;
 
 static VideoPlayer *vl_players;
+static int64_t vl_vblank_period, vl_vblank = VIDEO_TIME_NONE;
 static int vl_fd = -1;
 static uint64_t vl_epoch = 1;
 
@@ -565,6 +589,24 @@ vl_sink_pending(VideoPlayer *p, int64_t now)
 	return pending;
 }
 
+/* How long after uncorking the first buffered sample is heard. */
+static int64_t
+vl_sink_latency(VideoPlayer *p)
+{
+	const pa_timing_info *timing;
+	int64_t latency = 0;
+
+	if (!p->sink.pulse)
+		return 0;
+	pa_threaded_mainloop_lock(vl_pa.ml);
+	if (p->sink.stream &&
+	    pa_stream_get_state(p->sink.stream) == PA_STREAM_READY &&
+	    (timing = pa_stream_get_timing_info(p->sink.stream)))
+		latency = (int64_t)(timing->sink_usec + timing->transport_usec);
+	pa_threaded_mainloop_unlock(vl_pa.ml);
+	return VL_MIN(latency, 500000);
+}
+
 /* The output failed (server gone): keep the timeline with the null sink. */
 static void
 vl_sink_fallback(VideoPlayer *p, int64_t now)
@@ -881,6 +923,8 @@ vl_audio_heard(VideoPlayer *p, int64_t now)
 	return done;
 }
 
+static int64_t vl_slew(VideoPlayer *p, int64_t a, int64_t now);
+
 static int64_t
 vl_position(VideoPlayer *p, int64_t now)
 {
@@ -888,11 +932,69 @@ vl_position(VideoPlayer *p, int64_t now)
 
 	if (!p->clock_known)
 		return VIDEO_TIME_NONE;
-	if (p->audio_clock) {
+	if (p->audio_clock && !p->audio_wait) {
 		pts = vl_audio_position(p, now);
-		return pts == VIDEO_TIME_NONE ? p->base_pts : pts;
+		if (pts == VIDEO_TIME_NONE)
+			pts = p->base_pts;
+		pts = vl_slew(p, pts, now);
+		if (p->audio_floor != VIDEO_TIME_NONE) {
+			if (pts < p->audio_floor)
+				return p->audio_floor;
+			p->audio_floor = VIDEO_TIME_NONE;
+		}
+		return pts;
 	}
 	return p->running ? p->base_pts + (now - p->base_time) : p->base_pts;
+}
+
+/* Follow the audio clock smoothly: run on the host clock, corrected
+ * toward the audio over VL_SLEW_US.  A stopped clock starts it over. */
+static int64_t
+vl_slew(VideoPlayer *p, int64_t a, int64_t now)
+{
+	int64_t pts, err, dt;
+
+	if (!p->slewing || !p->running) {
+		p->slewing = p->running;
+		p->slew_pts = a;
+		p->slew_time = now;
+		return a;
+	}
+	dt = now - p->slew_time;
+	pts = p->slew_pts + dt;
+	err = a - pts;
+	if (err > VL_SLEW_SNAP_US || err < -VL_SLEW_SNAP_US) {
+		pts = a;
+	} else if (dt > 0) {
+		pts += err * VL_MIN(dt, VL_SLEW_US) / VL_SLEW_US;
+	}
+	p->slew_pts = pts;
+	p->slew_time = now;
+	return pts;
+}
+
+/* The first audio sample of the segment. */
+static int64_t
+vl_audio_start(VideoPlayer *p)
+{
+	if (p->audio_first == VIDEO_TIME_NONE)
+		return VIDEO_TIME_NONE;
+	return p->start != VIDEO_TIME_NONE ? VL_MAX(p->start, p->audio_first) :
+	    p->audio_first;
+}
+
+/* The vblank a draw starting at t is presented at (t without timing). */
+static int64_t
+vl_vblank_after(int64_t t, int64_t margin)
+{
+	int64_t k, d;
+
+	if (vl_vblank_period <= 0 || vl_vblank == VIDEO_TIME_NONE)
+		return t;
+	d = t + margin - vl_vblank;
+	k = d >= 0 ? (d + vl_vblank_period - 1) / vl_vblank_period :
+	    -(-d / vl_vblank_period);
+	return vl_vblank + k * vl_vblank_period;
 }
 
 static void
@@ -965,11 +1067,17 @@ vl_run(VideoPlayer *p, int64_t now, int running)
 		return;
 	if (running) {
 		if (!p->clock_known) {
+			int64_t astart = vl_audio_start(p);
 			p->base_pts = vl_initial_pts(p);
 			p->clock_known = 1;
+			p->audio_wait = p->has_audio && p->audio_clock &&
+			    astart != VIDEO_TIME_NONE &&
+			    astart > p->base_pts + VL_AUDIO_LATE_US;
 		}
 		p->base_time = now;
 		p->running = 1;
+		if (p->audio_wait)
+			return;	/* the sound starts later (vl_update) */
 	} else {
 		int64_t pos = vl_position(p, now);
 		if (pos != VIDEO_TIME_NONE)
@@ -1024,11 +1132,25 @@ vl_dry(VideoPlayer *p, int64_t pos, int nframes)
 	if (p->has_video && !nframes &&
 	    (p->video_end == VIDEO_TIME_NONE || pos >= p->video_end))
 		return 1;
-	if (p->has_audio && p->audio_clock &&
+	if (p->has_audio && p->audio_clock && !p->audio_wait &&
 	    (p->audio_end == VIDEO_TIME_NONE ||
 	    pos + 10000 >= p->audio_end + p->audio_frame_us))
 		return 1;
 	return 0;
+}
+
+/* The clock at the vblank a draw starting now is presented at. */
+static int64_t
+vl_select_pos(VideoPlayer *p, int64_t pos, int64_t now)
+{
+	if (!p->running || pos == VIDEO_TIME_NONE)
+		return pos;
+	if (vl_vblank_period <= 0 || vl_vblank == VIDEO_TIME_NONE)
+		return pos;
+	/* The frame nearest that vblank: timestamps close to a vblank
+	 * would otherwise flip between two with jitter. */
+	return pos + vl_vblank_after(now, VL_VBLANK_DRAW_US) - now +
+	    vl_vblank_period / 2;
 }
 
 static void
@@ -1052,7 +1174,14 @@ vl_update(VideoPlayer *p, int64_t now)
 		return;
 
 	pos = vl_position(p, now);
-	vl_select(p, pos);
+	if (p->audio_wait && p->running &&
+	    pos >= vl_audio_start(p) - vl_sink_latency(p)) {
+		/* The host clock reached the sound: hand over to it. */
+		p->audio_wait = 0;
+		p->audio_floor = pos;
+		vl_sink_run(p, 1, now);
+	}
+	vl_select(p, vl_select_pos(p, pos, now));
 	audio_done = !p->has_audio ||
 	    (eos && adrained && vl_audio_heard(p, now));
 	if (p->has_audio && p->audio_clock && audio_done && p->clock_known) {
@@ -1069,7 +1198,7 @@ vl_update(VideoPlayer *p, int64_t now)
 		vl_run(p, now, 1);
 		p->state = VIDEO_STATE_PLAYING;
 		pos = vl_position(p, now);
-		vl_select(p, pos);
+		vl_select(p, vl_select_pos(p, pos, now));
 		pthread_mutex_lock(&p->lock);
 		nframes = p->nframes;
 		pthread_mutex_unlock(&p->lock);
@@ -1096,10 +1225,21 @@ vl_next_due(VideoPlayer *p, int64_t now)
 	if (p->state != VIDEO_STATE_PLAYING || !p->running)
 		return -1;
 	pos = vl_position(p, now);
+	if (pos == VIDEO_TIME_NONE)
+		return due;
 	pthread_mutex_lock(&p->lock);
-	if (p->nframes && pos != VIDEO_TIME_NONE)
-		due = VL_MIN(due, VL_MAX(0, p->frames[0]->pts - pos));
+	if (p->nframes) {
+		/* Wake before the vblank the frame is due at. */
+		int64_t at = now + p->frames[0]->pts - pos;
+		if (vl_vblank_period > 0 && vl_vblank != VIDEO_TIME_NONE)
+			at = vl_vblank_after(at - vl_vblank_period / 2, 0) -
+			    VL_VBLANK_WAKE_US;
+		due = VL_MIN(due, VL_MAX(0, at - now));
+	}
 	pthread_mutex_unlock(&p->lock);
+	if (p->audio_wait)
+		due = VL_MIN(due, VL_MAX(0, vl_audio_start(p) -
+		    vl_sink_latency(p) - pos));
 	return due;
 }
 
@@ -1165,6 +1305,7 @@ vl_create(const VideoConfig *config, const char **error)
 	p->audio_first = p->audio_end = VIDEO_TIME_NONE;
 	p->state = VIDEO_STATE_BUFFERING;
 	p->audio_clock = p->has_audio;
+	p->audio_floor = VIDEO_TIME_NONE;
 	frame_bytes = (size_t)config->width * config->height * 3 / 2 + 1;
 	p->frame_cap = (int)VL_MAX(VL_FRAMES_MIN,
 	    VL_MIN(VL_FRAMES_MAX, VL_FRAMES_BYTES / frame_bytes));
@@ -1342,6 +1483,8 @@ vl_flush(VideoPlayer *p, int64_t start)
 	p->state = VIDEO_STATE_BUFFERING;
 	p->clock_known = 0;
 	p->audio_clock = p->has_audio;
+	p->audio_wait = 0;
+	p->audio_floor = VIDEO_TIME_NONE;
 	p->stale = p->current != NULL;
 	p->video_first = p->video_end = VIDEO_TIME_NONE;
 	p->audio_first = p->audio_end = VIDEO_TIME_NONE;
@@ -1439,6 +1582,13 @@ video_linux_tick(int *changed)
 	}
 	/* Round up so the frame is due when the wait ends. */
 	return next < 0 ? -1 : (double)(next + 999) / 1000.0;
+}
+
+void
+video_linux_set_vblank(int64_t period, int64_t vblank)
+{
+	vl_vblank_period = period;
+	vl_vblank = period > 0 ? vblank : VIDEO_TIME_NONE;
 }
 
 void

@@ -35,6 +35,10 @@ int video_linux_fd(void);
  * last frame (video_linux_drawn) changed.  Returns milliseconds until the
  * next frame or state check is due, or -1 when nothing is scheduled. */
 double video_linux_tick(int *changed);
+/* Display timing: the refresh period and the time of a recent vblank in
+ * microseconds of CLOCK_MONOTONIC (VIDEO_TIME_NONE: unknown).  Frames are
+ * then picked for the vblank a draw reaches instead of for now. */
+void video_linux_set_vblank(int64_t period, int64_t vblank);
 /* Bracket a presented frame: placements drawn in it mark their videos as
  * visible, so only their frame changes ask for redraws. */
 void video_linux_begin_frame(void);
