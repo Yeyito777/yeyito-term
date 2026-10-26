@@ -743,20 +743,24 @@ mac_video_tick(double target)
 
 - (void)timerTick:(NSTimer *)timer
 {
-	(void)timer;
-	mac_video_tick(CACurrentMediaTime() + 1.0 / 120);
+	mac_video_tick(CACurrentMediaTime() + MIN(timer.timeInterval, 1.0 / 60));
 	updateTicking();
 }
 @end
 
 static STVideoTicker *ticker;
 
-/* The display link runs only while a video plays or waits for data, so an
- * idle terminal (or a paused or finished video) does no work. */
+/* Ticks run only while a video plays or waits for data, so an idle
+ * terminal (or a paused or finished video) does no work.  The display link
+ * paces frames; a slow timer beside it keeps buffering, end of stream and
+ * the decoder going when the link stops firing (the window hidden or on
+ * another space).  Without a display link (before macOS 14) the timer runs
+ * at frame rate. */
 static void
 updateTicking(void)
 {
-	int active = mac_video_active();
+	int active = mac_video_active(), linked = 0;
+	double interval;
 
 	if (!ticker)
 		return;
@@ -771,18 +775,20 @@ updateTicking(void)
 			}
 			if (displayLink)
 				((CADisplayLink *)displayLink).paused = !active;
-			return;
+			linked = displayLink != nil;
 		}
 	}
+	interval = linked ? 0.1 : 1.0 / 120;
+	if (fallbackTimer && (!active || fallbackTimer.timeInterval != interval)) {
+		[fallbackTimer invalidate];
+		fallbackTimer = nil;
+	}
 	if (active && !fallbackTimer) {
-		fallbackTimer = [NSTimer timerWithTimeInterval:1.0 / 120
+		fallbackTimer = [NSTimer timerWithTimeInterval:interval
 		    target:ticker selector:@selector(timerTick:) userInfo:nil
 		    repeats:YES];
 		[NSRunLoop.mainRunLoop addTimer:fallbackTimer
 		    forMode:NSRunLoopCommonModes];
-	} else if (!active && fallbackTimer) {
-		[fallbackTimer invalidate];
-		fallbackTimer = nil;
 	}
 }
 
