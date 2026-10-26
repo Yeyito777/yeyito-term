@@ -224,8 +224,8 @@ frame_clipped(const ImageOcclusionClip *clip)
 
 /* An image clipped to a region (a chat pane, OSC 2032 ; k) placed whole
  * past it: only the cells it draws over count.  A prompt row below the
- * pane changing never hides the image, and a different clip (the image
- * placed elsewhere, the pane resized) remembers its cells afresh. */
+ * pane changing never hides the image, and when the clip grows the cells
+ * newly in reach are remembered as they are then. */
 TEST(clip_region_limits_snapshot_and_refreshes)
 {
 	ImageOcclusionClip pane = { .top = 0, .end = 2, .left = 0, .right = 8 };
@@ -250,8 +250,37 @@ TEST(clip_region_limits_snapshot_and_refreshes)
 	frame_clipped(&taller);
 	ASSERT_EQ(1, count);
 	ASSERT_EQ(1, drawn[2][3]);
-	/* Unclipped drawing keeps its own baseline, as before. */
+	/* Unclipped, the cells remembered under the clip still count: the 'x'
+	 * written over the image keeps hiding it. */
 	frame(0);
+	ASSERT_EQ(1, count);
+	ASSERT_EQ(1, drawn[2][3]);
+}
+
+/* The clip changes in the frame an overlay opens (Record drops its pane's
+ * clip while its image viewer is open): the cells both clips cover keep the
+ * image's own cells, so the overlay's title written over the image in that
+ * same frame still hides it; only cells newly in reach are taken as they are. */
+TEST(clip_change_keeps_cells_both_clips_cover)
+{
+	ImageOcclusionClip pane = { .top = 0, .end = 2, .left = 0, .right = 8 };
+
+	setup();	/* the image covers rows 1-2, columns 1-4 */
+	grid[2][2].u = '>';	/* the prompt below the pane */
+	frame_clipped(&pane);
+	ASSERT_EQ(0, count);
+	grid[1][2].u = 't';	/* the overlay's title, over the image */
+	frame(0);	/* ... and the clip is gone */
+	ASSERT_EQ(1, count);
+	ASSERT_EQ(1, drawn[1][2]);
+	ASSERT_EQ(0, drawn[2][2]);	/* newly in reach: as it is now */
+	ASSERT_EQ(8, state.cells);
+	/* And back: the title still covers it, now clipped again. */
+	frame_clipped(&pane);
+	ASSERT_EQ(1, count);
+	ASSERT_EQ(1, drawn[1][2]);
+	grid[1][2].u = ' ';	/* the overlay closes */
+	frame_clipped(&pane);
 	ASSERT_EQ(0, count);
 }
 
@@ -299,6 +328,7 @@ main(void)
 	RUN_TEST(wide_dummy_redraws_leading_cell);
 	RUN_TEST(clipping_and_missing_lines);
 	RUN_TEST(clip_region_limits_snapshot_and_refreshes);
+	RUN_TEST(clip_change_keeps_cells_both_clips_cover);
 	RUN_TEST(deletion_prunes_baselines);
 	RUN_TEST(cache_limit_does_not_prevent_existing_cell_occlusion);
 	image_occlusion_clear(&state);
