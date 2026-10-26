@@ -15,11 +15,23 @@ flow_init(Flow *flow, double now, double rtt, double rate)
 	flow->last_ping_time = now;
 }
 
+/* The rate the window may plan for: never more than twice what actually
+ * got through lately.  The estimate can be a guess or stale (app-limited
+ * for long), and a window sized for it would bury a link that just got
+ * slow under seconds of queue.  Sending window-limited doubles it each
+ * round trip. */
+static double
+window_rate(const Flow *flow)
+{
+	return flow->rate < 2 * flow->throughput ? flow->rate :
+	    2 * flow->throughput;
+}
+
 /* Bytes between pings: an acknowledgement covers this much at once. */
 static double
 ping_bytes(const Flow *flow)
 {
-	double bytes = flow->rate * 0.025;
+	double bytes = window_rate(flow) * 0.025;
 	return bytes > FLOW_PING_BYTES ? bytes : FLOW_PING_BYTES;
 }
 
@@ -34,7 +46,7 @@ flow_window(const Flow *flow)
 
 	if (span < 0.2)
 		span = 0.2;
-	window = flow->rate * span + (flow->ack_burst > ping_bytes(flow) ?
+	window = window_rate(flow) * span + (flow->ack_burst > ping_bytes(flow) ?
 	    flow->ack_burst : ping_bytes(flow));
 	if (window < FLOW_MIN_WINDOW)
 		window = FLOW_MIN_WINDOW;
@@ -157,8 +169,16 @@ average_rate(const Flow *flow, double now, double since)
 	return time >= 0.3 ? bytes / time : -1;
 }
 
+/* A window this big holds a link of `rate` with its acknowledgement lag:
+ * acks this slow are the link's doing, not the window's. */
+static int
+window_holds(const Flow *flow, double window, double rate)
+{
+	return window >= 1.2 * rate * flow->min_rtt + flow->ack_burst;
+}
+
 static void
-estimate(Flow *flow, double now, int window_full)
+estimate(Flow *flow, double now, double window, int window_full)
 {
 	/* min_rtt: srtt grows with the queue exactly when the link slows. */
 	double hold = 2 * flow->min_rtt, average, recent, longer;
@@ -167,10 +187,14 @@ estimate(Flow *flow, double now, int window_full)
 	if (hold < 0.5)
 		hold = 0.5;
 	recent = span_rate(flow, 0.5, &recent_valid);
+	flow->throughput = recent > 0 ? recent : 0;
 	/* With the window full right now, slow acks mean a slow link even if
 	 * the bytes went out after an app-limited pause. */
 	if (window_full && recent > 0 && recent < 0.7 * flow->rate)
 		recent_valid = 1;
+	if (recent > 0 && recent < 0.7 * flow->rate &&
+	    !window_holds(flow, window, recent))
+		recent_valid = 0;
 	flow->last_sample = recent;
 	flow->last_sample_valid = recent_valid;
 	if (recent > 0 && recent_valid) {
@@ -204,7 +228,10 @@ estimate(Flow *flow, double now, int window_full)
 	}
 	average = average_rate(flow, now, flow->average_since);
 	if (average > 0) {
-		flow->rate = average;
+		/* A small window (the start, after a pause) holds the rate
+		 * down by itself; that is no reason to lower the estimate. */
+		if (average >= flow->rate || window_holds(flow, window, average))
+			flow->rate = average;
 		return;
 	}
 	/* App-limited for long: a long span faster than the estimate still
@@ -221,7 +248,8 @@ flow_ack(Flow *flow, uint32_t seq, double now)
 	FlowPing ping;
 	FlowAck *ack;
 	double rtt;
-	int window_full = (double)flow_inflight(flow) >= 0.8 * flow_window(flow);
+	double window = flow_window(flow);
+	int window_full = (double)flow_inflight(flow) >= 0.8 * window;
 
 	for (i = 0; i < flow->ping_count; i++)
 		if (flow->pings[(flow->ping_first + i) % FLOW_PINGS].seq == seq) {
@@ -250,8 +278,10 @@ flow_ack(Flow *flow, uint32_t seq, double now)
 		else
 			flow->ack_burst = 0.97 * flow->ack_burst +
 			    0.03 * flow->burst_bytes;
-		if (flow->ack_burst > flow->rate * 0.5)
-			flow->ack_burst = flow->rate * 0.5;
+		if (flow->ack_burst > window_rate(flow) * 0.5 &&
+		    flow->ack_burst > FLOW_MIN_WINDOW)
+			flow->ack_burst = window_rate(flow) * 0.5 > FLOW_MIN_WINDOW ?
+			    window_rate(flow) * 0.5 : FLOW_MIN_WINDOW;
 		flow->acked = ping.offset;
 	}
 	if (flow->app_limited_until && flow->acked >= flow->app_limited_until)
@@ -272,7 +302,7 @@ flow_ack(Flow *flow, uint32_t seq, double now)
 	flow->ack_next = (flow->ack_next + 1) % FLOW_ACKS;
 	if (flow->ack_count < FLOW_ACKS)
 		flow->ack_count++;
-	estimate(flow, now, window_full);
+	estimate(flow, now, window, window_full);
 	return 1;
 }
 

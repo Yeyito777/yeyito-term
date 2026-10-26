@@ -59,6 +59,7 @@ typedef struct {
 	double low_max, low_since;
 	double average_since;	/* the average ignores acks before (a drop) */
 	double ack_burst;	/* bytes acknowledged by one burst of replies */
+	double throughput;	/* ack rate over the last 0.5 s, limited or not */
 	double burst_bytes, last_ack_time;
 	/* Diagnostics */
 	double last_sample;

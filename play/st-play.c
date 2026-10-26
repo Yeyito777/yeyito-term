@@ -184,15 +184,19 @@ install_signals(void)
 		sigaction(fatal[i], &sa, NULL);
 }
 
+/* Raw input.  `signals`: keep Ctrl-C/Ctrl-\ as signals (while the input
+ * opens, when nothing reads keys), with suspend disabled. */
 static int
-set_raw(App *a)
+set_raw(App *a, int signals)
 {
 	struct termios t;
 
-	if (tcgetattr(a->tty, &a->saved) < 0)
-		return -1;
-	emergency_termios = a->saved;
-	emergency_have_termios = 1;
+	if (!a->raw) {
+		if (tcgetattr(a->tty, &a->saved) < 0)
+			return -1;
+		emergency_termios = a->saved;
+		emergency_have_termios = 1;
+	}
 	t = a->saved;
 	t.c_iflag &= ~(tcflag_t)(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR |
 	    IGNCR | ICRNL | IXON);
@@ -202,6 +206,10 @@ set_raw(App *a)
 	t.c_cflag |= CS8;
 	t.c_cc[VMIN] = 1;
 	t.c_cc[VTIME] = 0;
+	if (signals) {
+		t.c_lflag |= ISIG;
+		t.c_cc[VSUSP] = _POSIX_VDISABLE;
+	}
 	if (tcsetattr(a->tty, TCSANOW, &t) < 0)
 		return -1;
 	a->raw = 1;
@@ -468,12 +476,16 @@ ahead_cap(App *a, double now)
 static int
 can_produce(App *a, double now)
 {
+	/* Queue little beyond what the window lets out: queued packets keep
+	 * the old bitrate, and after a drop they wait in line. */
 	double limit = flow_window(&a->flow);
 
 	if (!a->media || a->media_done || a->media_failed || !a->opened)
 		return 0;
-	if (limit < 64 * 1024)
-		limit = 64 * 1024;
+	if (limit > a->flow.rate * 0.2)
+		limit = a->flow.rate * 0.2;
+	if (limit < 32 * 1024)
+		limit = 32 * 1024;
 	if ((double)a->out.media_bytes >= limit)
 		return 0;
 	return media_ahead(a, now) < ahead_cap(a, now);
@@ -1298,7 +1310,7 @@ main(int argc, char **argv)
 		return 1;
 	}
 	install_signals();
-	if (set_raw(a) < 0) {
+	if (set_raw(a, 1) < 0) {
 		fprintf(stderr, "st-play: cannot set up the terminal: %s\n",
 		    strerror(errno));
 		return 1;
@@ -1316,14 +1328,17 @@ main(int argc, char **argv)
 	    a->id);
 	t0 = now_s();
 	write_all(a, query, (size_t)n, t0 + 2);
-	a->media = media_open(a->input, !a->no_audio, &a->info, error,
-	    sizeof(error));
+	a->media = media_open(a->input, !a->no_audio, &got_quit, &a->info,
+	    error, sizeof(error));
+	set_raw(a, 0);
 	opened_at = now_s();
 	memset(&probe, 0, sizeof(probe));
 	probe.app = a;
 	probe_wait(a, &probe, now_s() + 3.0);
 	if (!a->media) {
 		restore_tty(a);
+		if (got_quit)
+			return 130;
 		fprintf(stderr, "st-play: %s\n", error);
 		return 1;
 	}

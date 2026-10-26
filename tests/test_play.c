@@ -471,12 +471,15 @@ TEST(flow_window_bounds)
 	flow_init(&f, 0, 0.15, 1e3);
 	ASSERT(fabs(flow_window(&f) - FLOW_MIN_WINDOW) < 1);
 	/* 1 MB/s, 150 ms: one RTT + 80 ms of the link, and a ping's worth. */
-	f.rate = 1e6;
+	f.rate = f.throughput = 1e6;
 	ASSERT(fabs(flow_window(&f) - (230e3 + FLOW_PING_BYTES)) < 1);
 	f.min_rtt = 0.01;	/* local: at least 200 ms */
 	ASSERT(fabs(flow_window(&f) - (200e3 + FLOW_PING_BYTES)) < 1);
 	f.min_rtt = 0.4;	/* long RTT: the window covers it */
 	ASSERT(flow_window(&f) > 480e3);
+	/* A stale or guessed rate: no more than twice what got through. */
+	f.throughput = 100e3;
+	ASSERT(flow_window(&f) < 200e3 * 0.48 + FLOW_PING_BYTES + 1);
 }
 
 TEST(flow_acks_bound_inflight)
@@ -545,6 +548,25 @@ TEST(flow_follows_a_drop_and_recovery)
 	s.capacity = 375e3;	/* back up: found again within seconds */
 	sim_run(&s, &f, 12.0, 99);
 	ASSERT(f.rate > 0.85 * 375e3);
+}
+
+TEST(flow_guess_too_high_and_fast_link_turning_slow)
+{
+	/* Local start: a 40 MB/s guess, sending 1 MB/s (app-limited) over a
+	 * fast link, which then turns into 3 Mbit/s. */
+	Sim s;
+	Flow f;
+	sim_init(&s, 50e6, 0.002);
+	flow_init(&f, 0, 0.002, 40e6);
+	s.app_rate = 1e6;
+	sim_run(&s, &f, 3.0, 99);
+	/* The window follows what got through, not the guess. */
+	ASSERT(flow_window(&f) < 2 * 1e6 * 0.2 + 64 * 1024);
+	s.capacity = 375e3;
+	s.app_rate = 0;		/* now it has a backlog */
+	sim_run(&s, &f, 5.0, 99);
+	ASSERT(f.rate < 1.5 * 375e3);
+	ASSERT(flow_inflight(&f) < 375e3 * 0.5);
 }
 
 TEST(flow_ignores_app_limited_intervals)
@@ -688,6 +710,7 @@ main(void)
 	RUN_TEST(flow_measures_window_limited_link);
 	RUN_TEST(flow_bursty_replies_do_not_inflate_the_rate);
 	RUN_TEST(flow_follows_a_drop_and_recovery);
+	RUN_TEST(flow_guess_too_high_and_fast_link_turning_slow);
 	RUN_TEST(flow_ignores_app_limited_intervals);
 	RUN_TEST(flow_survives_a_terminal_stall);
 	RUN_TEST(adapt_ladder_never_upscales);

@@ -1,5 +1,6 @@
 /* st-play media pipeline (see media.h). */
 #define _POSIX_C_SOURCE 200809L
+#define _DARWIN_C_SOURCE
 #include "media.h"
 
 #include <errno.h>
@@ -24,6 +25,7 @@
 
 #define QUEUE_BYTES   (48 * 1024 * 1024)
 #define QUEUE_PACKETS 2048
+#define GOP_PACKETS   1024
 #define US            ((AVRational){ 1, 1000000 })
 #define AUDIO_TB      ((AVRational){ 1, MEDIA_AUDIO_RATE })
 
@@ -53,6 +55,7 @@ struct Media {
 	unsigned eof_gen;
 	int read_error;
 	volatile int quit;
+	volatile sig_atomic_t *cancel;
 	int wake[2];
 
 	/* Decode */
@@ -77,9 +80,15 @@ struct Media {
 	int audio_kbps, want_audio_kbps;
 	AVBSFContext *bsf;
 	int copying, want_copy, copy_started;
+	/* Passthrough keeps the packets since the last keyframe, so it can
+	 * switch to transcoding at once: decode them, encode what follows. */
+	AVPacket *gop[GOP_PACKETS];
+	int gop_count;
+	int64_t copy_last_pts;
 
 	/* Segment state */
 	int64_t video_trim, audio_trim;	/* drop media before (us) */
+	int trim_skip;			/* video_trim: drop, don't hold */
 	int have_held;
 	int64_t held_pts;
 	int64_t last_out_pts;		/* decimation */
@@ -161,7 +170,8 @@ wake_main(Media *m)
 static int
 interrupt_cb(void *opaque)
 {
-	return ((Media *)opaque)->quit;
+	Media *m = opaque;
+	return m->quit || (m->cancel && *m->cancel);
 }
 
 static void
@@ -285,8 +295,8 @@ open_decoder(AVStream *st, char *error, size_t size)
 }
 
 Media *
-media_open(const char *url, int want_audio, MediaInfo *info, char *error,
-		size_t error_size)
+media_open(const char *url, int want_audio, volatile sig_atomic_t *cancel,
+		MediaInfo *info, char *error, size_t error_size)
 {
 	Media *m = calloc(1, sizeof(*m));
 	AVDictionary *opts = NULL;
@@ -298,6 +308,7 @@ media_open(const char *url, int want_audio, MediaInfo *info, char *error,
 	}
 	m->vi = m->ai = -1;
 	m->wake[0] = m->wake[1] = -1;
+	m->cancel = cancel;
 	pthread_mutex_init(&m->lock, NULL);
 	pthread_cond_init(&m->cond, NULL);
 	m->fmt = avformat_alloc_context();
@@ -396,6 +407,7 @@ media_open(const char *url, int want_audio, MediaInfo *info, char *error,
 	m->video_trim = m->audio_trim = MEDIA_TIME_NONE;
 	m->last_out_pts = m->last_enc_pts = MEDIA_TIME_NONE;
 	m->audio_base = MEDIA_TIME_NONE;
+	m->copy_last_pts = MEDIA_TIME_NONE;
 	m->audio_kbps = m->want_audio_kbps = 128;
 	m->want_fps = m->info.fps;
 	if (pipe(m->wake) < 0) {
@@ -419,6 +431,13 @@ media_open(const char *url, int want_audio, MediaInfo *info, char *error,
 
 static void free_encoders(Media *m);
 
+static void
+clear_gop(Media *m)
+{
+	while (m->gop_count)
+		av_packet_free(&m->gop[--m->gop_count]);
+}
+
 void
 media_close(Media *m)
 {
@@ -432,6 +451,7 @@ media_close(Media *m)
 		pthread_join(m->thread, NULL);
 	}
 	clear_queue(m);
+	clear_gop(m);
 	free_encoders(m);
 	avcodec_free_context(&m->vdec);
 	avcodec_free_context(&m->adec);
@@ -751,6 +771,12 @@ video_frame(Media *m, AVFrame *frame, MediaEmit emit, void *ctx)
 		t = m->last_enc_pts == MEDIA_TIME_NONE ? 0 :
 		    m->last_enc_pts + (int64_t)(1e6 / m->info.fps);
 	}
+	if (m->video_trim != MEDIA_TIME_NONE && m->trim_skip) {
+		if (t < m->video_trim)
+			return 0;
+		m->video_trim = MEDIA_TIME_NONE;
+		m->trim_skip = 0;
+	}
 	if (m->video_trim != MEDIA_TIME_NONE) {
 		if (t < m->video_trim) {
 			av_frame_unref(m->held);
@@ -962,17 +988,50 @@ copy_packet(Media *m, AVPacket *packet, MediaEmit emit, void *ctx)
 			return 0;
 		m->copy_started = 1;
 	}
+	if (packet->flags & AV_PKT_FLAG_KEY)
+		clear_gop(m);
+	if (m->gop_count < GOP_PACKETS)
+		m->gop[m->gop_count++] = av_packet_clone(packet);
 	if ((r = av_bsf_send_packet(m->bsf, packet)) < 0)
 		return 0;
 	while (av_bsf_receive_packet(m->bsf, m->out) >= 0) {
 		if (m->out->pts != AV_NOPTS_VALUE) {
 			int64_t pts = av_rescale_q(m->out->pts, st->time_base, US) -
 			    m->start_time;
+			if (m->copy_last_pts == MEDIA_TIME_NONE || pts > m->copy_last_pts)
+				m->copy_last_pts = pts;
 			emit(ctx, 0, !!(m->out->flags & AV_PKT_FLAG_KEY), pts,
 			    m->out->data, (size_t)m->out->size);
 		}
 		av_packet_unref(m->out);
 	}
+	return 0;
+}
+
+/* Leave passthrough before a non-keyframe: decode the GOP so far without
+ * encoding it (the terminal has those frames), then transcode on. */
+static int
+copy_to_transcode(Media *m, MediaEmit emit, void *ctx)
+{
+	int i;
+
+	avcodec_flush_buffers(m->vdec);
+	m->video_trim = m->copy_last_pts == MEDIA_TIME_NONE ? MEDIA_TIME_NONE :
+	    m->copy_last_pts + 1;
+	m->trim_skip = 1;
+	m->last_out_pts = MEDIA_TIME_NONE;
+	for (i = 0; i < m->gop_count; i++) {
+		int r = avcodec_send_packet(m->vdec, m->gop[i]);
+		if (r == AVERROR(EAGAIN)) {
+			if (receive_video(m, emit, ctx) < 0)
+				return -1;
+			avcodec_send_packet(m->vdec, m->gop[i]);
+		}
+		if (receive_video(m, emit, ctx) < 0)
+			return -1;
+	}
+	clear_gop(m);
+	m->copying = 0;
 	return 0;
 }
 
@@ -991,12 +1050,17 @@ video_packet(Media *m, AVPacket *packet, MediaEmit emit, void *ctx)
 {
 	int r;
 
-	if (m->want_copy != m->copying && (packet->flags & AV_PKT_FLAG_KEY)) {
+	if (m->copying && !m->want_copy && !(packet->flags & AV_PKT_FLAG_KEY) &&
+	    m->gop_count > 0 && m->gop_count < GOP_PACKETS) {
+		if (copy_to_transcode(m, emit, ctx) < 0)
+			return -1;
+	} else if (m->want_copy != m->copying && (packet->flags & AV_PKT_FLAG_KEY)) {
 		if (m->want_copy) {
 			finish_transcode(m, emit, ctx);
 			m->copy_started = 0;
 		} else {
 			avcodec_flush_buffers(m->vdec);
+			clear_gop(m);
 		}
 		m->copying = m->want_copy;
 	}
@@ -1152,6 +1216,9 @@ media_seek(Media *m, int64_t target)
 		av_bsf_flush(m->bsf);
 	m->copying = m->want_copy;
 	m->copy_started = 0;
+	clear_gop(m);
+	m->copy_last_pts = MEDIA_TIME_NONE;
+	m->trim_skip = 0;
 	if (m->fifo)
 		av_audio_fifo_reset(m->fifo);
 	swr_free(&m->swr);

@@ -4,6 +4,7 @@
 #ifndef PLAY_MEDIA_H
 #define PLAY_MEDIA_H
 
+#include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -38,8 +39,11 @@ typedef void (*MediaEmit)(void *context, int stream, int keyframe,
 void media_log_to(const char *path);
 const char *media_last_log(void);
 
-Media *media_open(const char *url, int want_audio, MediaInfo *info,
-		char *error, size_t error_size);
+/* `cancel` (may be NULL): opening and reading give up once it is set (a
+ * signal handler's flag; a blocked read returns on the signal). */
+Media *media_open(const char *url, int want_audio,
+		volatile sig_atomic_t *cancel, MediaInfo *info, char *error,
+		size_t error_size);
 void media_close(Media *media);
 int media_wake_fd(const Media *media);
 void media_drain_wake(Media *media);
