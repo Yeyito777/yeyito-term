@@ -397,6 +397,7 @@ test_macos_pasteboard5522: tests/test_macos_pasteboard5522.o macos/pasteboard552
 endif
 
 test_gpu_regressions: st
+	@./tests/test_tty_replies.sh
 	@./tests/test_gpu_regressions.sh
 	@./tests/test_cursor_rendering.sh
 	@./tests/test_image_occlusion.sh

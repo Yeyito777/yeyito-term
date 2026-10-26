@@ -3381,7 +3381,7 @@ run(void)
 {
 	XEvent ev;
 	int w = win.w, h = win.h;
-	fd_set rfd;
+	fd_set rfd, wfd;
 	int xfd = XConnectionNumber(xw.dpy), ttyfd, xev, drawing, videofd, maxfd;
 	int selret, ttyready, redraw, videodirty = 0;
 	struct timespec seltv, *tv, now, lastblink, trigger;
@@ -3432,7 +3432,11 @@ run(void)
 	struct timespec lastpersist = {0};
 	for (timeout = -1, drawing = 0, lastblink = (struct timespec){0};;) {
 		FD_ZERO(&rfd);
+		FD_ZERO(&wfd);
 		FD_SET(ttyfd, &rfd);
+		/* Input and replies the child hasn't taken yet (ttywriteraw). */
+		if (ttyflush())
+			FD_SET(ttyfd, &wfd);
 		FD_SET(xfd, &rfd);
 		maxfd = MAX(xfd, ttyfd);
 		/* Video decoders wake the loop when a frame arrives after their
@@ -3449,7 +3453,7 @@ run(void)
 		seltv.tv_nsec = 1E6 * (timeout - 1E3 * seltv.tv_sec);
 		tv = timeout >= 0 ? &seltv : NULL;
 
-		if ((selret = pselect(maxfd+1, &rfd, NULL, NULL, tv, NULL)) < 0) {
+		if ((selret = pselect(maxfd+1, &rfd, &wfd, NULL, tv, NULL)) < 0) {
 			if (errno == EINTR) {
 				if (childready())
 					reapchild();
@@ -3468,6 +3472,8 @@ run(void)
 		clock_gettime(CLOCK_MONOTONIC, &now);
 		clip5522_tick(&now);
 
+		if (selret > 0 && FD_ISSET(ttyfd, &wfd))
+			ttyflush();
 		ttyready = FD_ISSET(ttyfd, &rfd);
 		if (ttyready)
 			ttyread();

@@ -1043,6 +1043,9 @@ ttynew(const char *line, char *cmd, const char *out, char **args)
 			    line, strerror(errno));
 		dup2(cmdfd, 0);
 		stty(args);
+#ifndef ST_NATIVE_MACOS
+		fcntl(cmdfd, F_SETFL, fcntl(cmdfd, F_GETFL) | O_NONBLOCK);
+#endif
 		return cmdfd;
 	}
 
@@ -1078,6 +1081,11 @@ ttynew(const char *line, char *cmd, const char *out, char **args)
 #endif
 		close(s);
 		cmdfd = m;
+#ifndef ST_NATIVE_MACOS
+		/* ttywriteraw() queues instead of blocking (macos/pty.m sets its
+		 * own); ttyread() treats EAGAIN as nothing to read. */
+		fcntl(m, F_SETFL, fcntl(m, F_GETFL) | O_NONBLOCK);
+#endif
 		signal(SIGCHLD, sigchld);
 		break;
 	}
@@ -1152,64 +1160,73 @@ ttywrite(const char *s, size_t n, int may_echo)
 	}
 }
 
-void
+#ifndef ST_NATIVE_MACOS
+/* Bytes for the child that the PTY could not take yet, in order: run()
+ * flushes them when the PTY is writable. */
+#define TTYQUEUE_MAX (16U * 1024U * 1024U)
+static char *ttyqueue;
+static size_t ttyqueuehead, ttyqueuelen, ttyqueuecap;
+#endif
+
+/* Write queued bytes without blocking; returns 1 while some remain. */
+int
+ttyflush(void)
+{
+#ifdef ST_NATIVE_MACOS
+	return 0;	/* macos/pty.m queues and flushes on its own */
+#else
+	while (ttyqueuehead < ttyqueuelen) {
+		ssize_t r = write(cmdfd, ttyqueue + ttyqueuehead,
+		    ttyqueuelen - ttyqueuehead);
+		if (r < 0) {
+			if (errno == EINTR)
+				continue;
+			if (errno == EAGAIN || errno == EWOULDBLOCK)
+				return 1;
+			die("write error on tty: %s\n", strerror(errno));
+		}
+		ttyqueuehead += (size_t)r;
+	}
+	ttyqueuehead = ttyqueuelen = 0;
+	return 0;
+#endif
+}
+
+static void
 ttywriteraw(const char *s, size_t n)
 {
 #ifdef ST_NATIVE_MACOS
 	macos_pty_write(s, n);
 #else
-	fd_set wfd, rfd;
-	ssize_t r;
-	size_t lim = 256;
-
 	/*
-	 * Remember that we are using a pty, which might be a modem line.
-	 * Writing too much will clog the line. That's why we are doing this
-	 * dance.
-	 * FIXME: Migrate the world to Plan 9.
+	 * Never block or read here.  Upstream st waited for a full PTY by
+	 * draining the child's output with a nested ttyread(), but a reply
+	 * written while parsing output (ttyread -> twrite -> ... -> ttywrite)
+	 * then re-entered ttyread() and corrupted the buffer being parsed.
+	 * The descriptor is nonblocking; what it can't take now waits in the
+	 * queue, so st keeps reading even while the child isn't.
 	 */
-	while (n > 0) {
-		FD_ZERO(&wfd);
-		FD_ZERO(&rfd);
-		FD_SET(cmdfd, &wfd);
-		FD_SET(cmdfd, &rfd);
-
-		/* Check if we can write. */
-		if (pselect(cmdfd+1, &rfd, &wfd, NULL, NULL, NULL) < 0) {
-			if (errno == EINTR)
-				continue;
-			die("select failed: %s\n", strerror(errno));
-		}
-		if (FD_ISSET(cmdfd, &wfd)) {
-			/*
-			 * Only write the bytes written by ttywrite() or the
-			 * default of 256. This seems to be a reasonable value
-			 * for a serial line. Bigger values might clog the I/O.
-			 */
-			if ((r = write(cmdfd, s, (n < lim)? n : lim)) < 0)
-				goto write_error;
-			if (r < n) {
-				/*
-				 * We weren't able to write out everything.
-				 * This means the buffer is getting full
-				 * again. Empty it.
-				 */
-				if (n < lim)
-					lim = ttyread();
-				n -= r;
-				s += r;
-			} else {
-				/* All bytes have been written. */
-				break;
-			}
-		}
-		if (FD_ISSET(cmdfd, &rfd))
-			lim = ttyread();
+	if (ttyqueuelen - ttyqueuehead > TTYQUEUE_MAX - n) {
+		fprintf(stderr, "st: dropped %zu bytes of input the program "
+		    "isn't reading\n", n);
+		return;
 	}
-	return;
-
-write_error:
-	die("write error on tty: %s\n", strerror(errno));
+	if (ttyqueuehead && ttyqueuelen + n > ttyqueuecap) {
+		memmove(ttyqueue, ttyqueue + ttyqueuehead,
+		    ttyqueuelen - ttyqueuehead);
+		ttyqueuelen -= ttyqueuehead;
+		ttyqueuehead = 0;
+	}
+	if (ttyqueuelen + n > ttyqueuecap) {
+		size_t cap = ttyqueuecap ? ttyqueuecap : 4096;
+		while (cap < ttyqueuelen + n)
+			cap *= 2;
+		ttyqueue = xrealloc(ttyqueue, cap);
+		ttyqueuecap = cap;
+	}
+	memcpy(ttyqueue + ttyqueuelen, s, n);
+	ttyqueuelen += n;
+	ttyflush();
 #endif
 }
 
