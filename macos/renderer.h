@@ -65,6 +65,12 @@ void mac_renderer_set_image_clip(double x, double y, double width,
 void mac_renderer_set_row(double dy, int clip, double clip_left,
 		double clip_top, double clip_right, double clip_bottom);
 void mac_renderer_remove_image(uint64_t serial);
+/* st video: draw image `serial` from `texture` (a bridged id<MTLTexture>)
+ * instead of uploading pixels; mac_renderer_image then accepts NULL rgba. */
+void mac_renderer_set_image_texture(uint64_t serial, void *texture);
+/* CFRelease `object` once the GPU has finished the frame being built (or
+ * the next one committed): a texture an earlier frame may still sample. */
+void mac_renderer_release_after_frame(const void *object);
 void mac_renderer_end(void);
 /* Launch diagnostics: frames committed so far, and a one-shot callback, on
  * the main queue, with the next committed frame's presentation time

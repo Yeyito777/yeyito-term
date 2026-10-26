@@ -48,6 +48,7 @@ char *argv0;
 #include "pty.h"
 #include "reveal.h"
 #include "spare.h"
+#include "videoplayer.h"
 #include "launchlog.h"
 #include "control.h"
 #include "text_input.h"
@@ -727,6 +728,12 @@ drawGraphicsPlacement(const GraphicsPlacementView *placement, void *context)
 		endCell();
 		return;
 	}
+	/* A video draws its current frame; before its first, nothing. */
+	if (placement->video &&
+	    !mac_video_bind(placement->video, placement->serial)) {
+		endCell();
+		return;
+	}
 	/* An image below text that copies as text selects as one unit: its whole
 	 * cell rectangle takes the selection background, under the image, after
 	 * every cell background (the background layer is encoded before it). */
@@ -776,6 +783,15 @@ freeGraphicsImage(uint64_t serial, void *context)
 {
 	(void)context;
 	mac_renderer_remove_image(serial);
+}
+
+/* A video's shown frame changed: draw now (the display link already timed
+ * it for the next refresh), not after the output-batching delay. */
+static void
+videoRedraw(void)
+{
+	if (nativeView && !IS_SET(MODE_SYNC))
+		[nativeView setNeedsDisplay:YES];
 }
 
 void
@@ -2290,6 +2306,8 @@ initializeNativeWindow(int columns, int rows)
 	if (!mac_renderer_init((__bridge void *)nativeView, usedfont, usedfontsize))
 		die("st: could not initialize Metal renderer\n");
 	graphics_set_image_free_callback(freeGraphicsImage, NULL);
+	mac_video_init((__bridge void *)device, (__bridge void *)nativeView,
+	    videoRedraw);
 	smoothscroll_configure(smoothscroll, smoothscroll_ms, smoothscroll_regions);
 	/* Smooth-scroll glides run at the display's refresh; updateDisplayRate()
 	 * sets it from the window's screen once the window exists. */

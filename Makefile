@@ -8,7 +8,7 @@ DIST_SRC = st.c x.c graphics.c graphics.h video.c video.h clipboard5522.c clipbo
 
 ifeq ($(UNAME_S),Darwin)
 SRC = st.c graphics.c video.c clipboard5522.c vimnav.c persist.c cmdline.c search.c macos/locale.c macos/emoji.c macos/spare.c macos/control.c macos/launchlog.c
-OBJC_SRC = macos/backend.m macos/renderer.m macos/pty.m macos/pasteboard5522.m
+OBJC_SRC = macos/backend.m macos/renderer.m macos/pty.m macos/pasteboard5522.m macos/videoplayer.m
 OBJ = $(SRC:.c=.o) $(OBJC_SRC:.m=.o)
 else
 SRC = st.c x.c graphics.c video.c clipboard5522.c vimnav.c sshind.c notif.c persist.c cmdline.c search.c
@@ -47,7 +47,7 @@ render/smoothscroll_term.o: render/smoothscroll_term.c render/smoothscroll.h st.
 st.o x.o macos/backend.o: render/smoothscroll.h
 x.o macos/backend.o: render/image_occlusion.h
 clipboard5522.o: clipboard5522.c clipboard5522.h
-macos/backend.o: macos/backend.m macos/native.h macos/renderer.h macos/glyph_layout.h macos/pty.h macos/pasteboard5522.h macos/keysyms.h macos/reveal.h macos/spare.h macos/control.h macos/launchlog.h macos/text_input.h config.h st.h win.h graphics.h sync.h
+macos/backend.o: macos/backend.m macos/videoplayer.h macos/native.h macos/renderer.h macos/glyph_layout.h macos/pty.h macos/pasteboard5522.h macos/keysyms.h macos/reveal.h macos/spare.h macos/control.h macos/launchlog.h macos/text_input.h config.h st.h win.h graphics.h sync.h
 macos/pasteboard5522.o: macos/pasteboard5522.m macos/pasteboard5522.h clipboard5522.h
 macos/locale.o: macos/locale.c macos/locale.h
 	$(CC) $(STCFLAGS) -c macos/locale.c -o macos/locale.o
@@ -64,6 +64,7 @@ macos/control.o: macos/control.c macos/control.h
 macos/emoji.o: macos/emoji.c macos/emoji.h st.h
 	$(CC) $(STCFLAGS) -c macos/emoji.c -o macos/emoji.o
 macos/renderer.o: macos/renderer.m macos/renderer.h macos/glyph_layout.h
+macos/videoplayer.o: macos/videoplayer.m macos/videoplayer.h macos/renderer.h graphics.h video.h
 macos/pty.o: macos/pty.m macos/pty.h
 vimnav.o: st.h vimnav.h
 sshind.o: sshind.h xstate.h
@@ -117,7 +118,7 @@ install-hint:
 
 clean:
 	rm -f st $(OBJ) st-$(VERSION).tar.gz
-	rm -f x.o sshind.o notif.o macos/backend.o macos/renderer.o macos/pasteboard5522.o
+	rm -f x.o sshind.o notif.o macos/backend.o macos/renderer.o macos/pasteboard5522.o macos/videoplayer.o
 	rm -f st-aerospace-launch macos/aerospace_launch.o macos/aerospace.o
 	rm -f a.out
 	$(MAKE) clean-tests
@@ -131,10 +132,10 @@ dist: clean
 		config.def.h st.info st.1 arg.h st.h win.h xstate.h sync.h vimnav.h sshind.h notif.h persist.h cmdline.h cmdline_layout.h search.h $(DIST_SRC)\
 		st-$(VERSION)
 	cp -R render/gpu.c render/image_occlusion.c render/image_occlusion.h render/smoothscroll.c render/smoothscroll.h render/smoothscroll_term.c render/README.md st-$(VERSION)/render
-	cp -R docs/kitty-graphics.md st-$(VERSION)/docs
+	cp -R docs/kitty-graphics.md docs/video.md st-$(VERSION)/docs
 	mkdir -p st-$(VERSION)/vendor
 	cp -R vendor/stb_image.h st-$(VERSION)/vendor
-	cp -R macos/README.md macos/Info.plist macos/backend.m macos/pasteboard5522.h macos/pasteboard5522.m macos/keysyms.h macos/native.h macos/reveal.h macos/text_input.h\
+	cp -R macos/README.md macos/Info.plist macos/backend.m macos/videoplayer.m macos/videoplayer.h macos/pasteboard5522.h macos/pasteboard5522.m macos/keysyms.h macos/native.h macos/reveal.h macos/text_input.h\
 		macos/renderer.h macos/renderer.m macos/glyph_layout.h macos/emoji.h macos/emoji.c\
 		macos/pty.h macos/pty.m macos/locale.h macos/locale.c macos/spare.h macos/spare.c macos/control.h macos/control.c macos/launchlog.h macos/launchlog.c\
 		macos/aerospace.h macos/aerospace.c macos/aerospace_launch.c\
@@ -286,6 +287,12 @@ tests/test_macos_image_occlusion.o: tests/test_macos_image_occlusion.m tests/tes
 test_macos_image_occlusion: tests/test_macos_image_occlusion.o $(MAC_IMAGE_TEST_OBJ)
 	$(CC) -o tests/test_macos_image_occlusion tests/test_macos_image_occlusion.o $(MAC_IMAGE_TEST_OBJ) $(STLDFLAGS)
 
+tests/test_macos_video.o: tests/test_macos_video.m tests/test.h macos/backend.o macos/renderer.o macos/videoplayer.o
+	$(CC) $(STOBJCFLAGS) -c tests/test_macos_video.m -o $@
+
+test_macos_video: tests/test_macos_video.o $(MAC_IMAGE_TEST_OBJ)
+	$(CC) -o tests/test_macos_video tests/test_macos_video.o $(MAC_IMAGE_TEST_OBJ) $(STLDFLAGS)
+
 tests/test_macos_mouse_cursor.o: tests/test_macos_mouse_cursor.m tests/test.h macos/backend.o macos/renderer.o
 	$(CC) $(STOBJCFLAGS) -c tests/test_macos_mouse_cursor.m -o $@
 
@@ -384,7 +391,7 @@ endif
 
 test: test_image_occlusion test_smoothscroll test_vimnav test_sshind test_scrollback test_cwd test_notif test_persist test_search test_cmdline_layout test_mode_reset test_sync test_clipboard5522 test_graphics test_video test_aerospace_launcher
 ifeq ($(UNAME_S),Darwin)
-test: test_macos_image_occlusion test_macos_mouse_cursor test_macos_pty test_macos_reveal test_macos_spare test_macos_launchlog test_macos_aerospace test_macos_control test_macos_text_input test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522
+test: test_macos_image_occlusion test_macos_video test_macos_mouse_cursor test_macos_pty test_macos_reveal test_macos_spare test_macos_launchlog test_macos_aerospace test_macos_control test_macos_text_input test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522
 test: test_macos_symbol_input
 endif
 	@echo "Running tests..."
@@ -405,6 +412,7 @@ endif
 	@./tests/test_smoothscroll
 ifeq ($(UNAME_S),Darwin)
 	@./tests/test_macos_image_occlusion
+	@./tests/test_macos_video
 	@./tests/test_macos_mouse_cursor
 	@./tests/test_macos_pty
 	@./tests/test_macos_reveal
@@ -422,7 +430,7 @@ endif
 
 clean-tests:
 	rm -f tests/test_macos_symbol_input tests/test_macos_symbol_input.o tests/macos_symbol_sender
-	rm -f tests/*.o tests/test_macos_image_occlusion tests/test_macos_mouse_cursor tests/test_image_occlusion tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search tests/test_cmdline_layout tests/test_mode_reset tests/test_sync tests/test_clipboard5522 tests/test_graphics tests/test_video tests/test_smoothscroll tests/test_macos_pty tests/test_macos_reveal tests/test_macos_spare tests/test_macos_launchlog tests/test_macos_aerospace tests/test_macos_control tests/test_macos_text_input tests/test_macos_locale tests/test_macos_glyph_layout tests/test_macos_emoji tests/test_macos_pasteboard5522
+	rm -f tests/*.o tests/test_macos_image_occlusion tests/test_macos_video tests/test_macos_mouse_cursor tests/test_image_occlusion tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search tests/test_cmdline_layout tests/test_mode_reset tests/test_sync tests/test_clipboard5522 tests/test_graphics tests/test_video tests/test_smoothscroll tests/test_macos_pty tests/test_macos_reveal tests/test_macos_spare tests/test_macos_launchlog tests/test_macos_aerospace tests/test_macos_control tests/test_macos_text_input tests/test_macos_locale tests/test_macos_glyph_layout tests/test_macos_emoji tests/test_macos_pasteboard5522
 
-.PHONY: all app install-app uninstall-app install-hint clean dist install uninstall test test_image_occlusion test_smoothscroll test_macos_image_occlusion test_macos_mouse_cursor test_gpu_regressions test_aerospace_launcher test_mode_reset test_sync test_graphics test_video test_macos_pty test_macos_reveal test_macos_spare test_macos_launchlog test_macos_aerospace test_macos_control test_macos_text_input test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522 clean-tests
+.PHONY: all app install-app uninstall-app install-hint clean dist install uninstall test test_image_occlusion test_smoothscroll test_macos_image_occlusion test_macos_video test_macos_mouse_cursor test_gpu_regressions test_aerospace_launcher test_mode_reset test_sync test_graphics test_video test_macos_pty test_macos_reveal test_macos_spare test_macos_launchlog test_macos_aerospace test_macos_control test_macos_text_input test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522 clean-tests
 .PHONY: test_macos_symbol_input
