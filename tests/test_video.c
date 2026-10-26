@@ -339,6 +339,11 @@ TEST(packets_reach_the_backend)
 	ASSERT_EQ(VIDEO_STREAM_AUDIO, last_player->last.stream);
 	ASSERT(last_player->last.pts == -21333);
 
+	/* Timestamps beyond 2^62 are refused (pts + duration stays defined). */
+	result = packet_command("a=v,i=9,k=d", VIDEO_STREAM_VIDEO, 1,
+	    (INT64_C(1) << 62) + 1, "x");
+	ASSERT_EQ(2, last_player->packets);
+
 	/* A chunked packet: pts 1000000 split across two APCs. */
 	base64(packet, sizeof(packet), encoded);
 	snprintf(first, sizeof(first), "Ga=v,i=9,k=d,m=1;%.8s", encoded);

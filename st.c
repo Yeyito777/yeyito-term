@@ -183,6 +183,7 @@ static void execsh(char *, char **);
 static void stty(char **);
 static void sigchld(int);
 static void ttywriteraw(const char *, size_t);
+static int ttyroom(size_t);
 
 static void csidump(void);
 static void csihandle(void);
@@ -1140,6 +1141,8 @@ ttywrite(const char *s, size_t n, int may_echo)
 	if (may_echo && IS_SET(MODE_ECHO))
 		twrite(s, n, 1);
 
+	if (!ttyroom(IS_SET(MODE_CRLF) && n <= SIZE_MAX / 2 ? 2 * n : n))
+		return;
 	if (!IS_SET(MODE_CRLF)) {
 		ttywriteraw(s, n);
 		return;
@@ -1166,6 +1169,7 @@ ttywrite(const char *s, size_t n, int may_echo)
 #define TTYQUEUE_MAX (16U * 1024U * 1024U)
 static char *ttyqueue;
 static size_t ttyqueuehead, ttyqueuelen, ttyqueuecap;
+static int ttydropping;	/* warned about the current stall */
 #endif
 
 /* Write queued bytes without blocking; returns 1 while some remain. */
@@ -1188,6 +1192,28 @@ ttyflush(void)
 		ttyqueuehead += (size_t)r;
 	}
 	ttyqueuehead = ttyqueuelen = 0;
+	ttydropping = 0;
+	return 0;
+#endif
+}
+
+/* Whether one ttywrite() of up to n bytes fits in the queue: a write is
+ * taken or dropped whole, never in pieces (CRLF translation splits it). */
+static int
+ttyroom(size_t n)
+{
+#ifdef ST_NATIVE_MACOS
+	(void)n;
+	return 1;	/* macos/pty.m bounds its own queue */
+#else
+	size_t queued = ttyqueuelen - ttyqueuehead;
+
+	if (n <= TTYQUEUE_MAX && queued <= TTYQUEUE_MAX - n)
+		return 1;
+	if (!ttydropping)
+		fprintf(stderr, "st: dropping input: the program hasn't read "
+		    "%zu bytes written to it\n", queued);
+	ttydropping = 1;
 	return 0;
 #endif
 }
@@ -1206,11 +1232,6 @@ ttywriteraw(const char *s, size_t n)
 	 * The descriptor is nonblocking; what it can't take now waits in the
 	 * queue, so st keeps reading even while the child isn't.
 	 */
-	if (ttyqueuelen - ttyqueuehead > TTYQUEUE_MAX - n) {
-		fprintf(stderr, "st: dropped %zu bytes of input the program "
-		    "isn't reading\n", n);
-		return;
-	}
 	if (ttyqueuehead && ttyqueuelen + n > ttyqueuecap) {
 		memmove(ttyqueue, ttyqueue + ttyqueuehead,
 		    ttyqueuelen - ttyqueuehead);

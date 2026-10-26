@@ -34,9 +34,11 @@
 
 #define TIMESCALE 1000000
 /* Frames decoded (or decoding) ahead of the clock.  B-frame reordering
- * needs a few; memory needs a bound (a 1080p BGRA frame is 8 MB). */
+ * needs a few; memory needs a bound: at most FRAMES_BYTES of them (a 1080p
+ * BGRA frame is 8 MB, a 4096x4096 one 64 MB), and never fewer than 2. */
 #define FRAMES_AHEAD 8
 #define FRAMES_MAX (FRAMES_AHEAD * 2)
+#define FRAMES_BYTES (64U * 1024U * 1024U)
 #define PARAMETER_MAX 1024
 /* Audio this close to running out stalls the clock instead of glitching. */
 #define AUDIO_DRY_MARGIN 20000
@@ -71,6 +73,8 @@ typedef struct {
 	VideoQueue videoQueue;
 	int needKeyframe;
 	int64_t frameDuration;
+	int framesAhead;	/* decode-ahead bound for the coded size */
+	double lastPacket;	/* host time of the newest packet */
 	/* Shared with VideoToolbox's callback thread, under lock. */
 	pthread_mutex_t lock;
 	DecodedFrame frames[FRAMES_MAX];
@@ -105,7 +109,10 @@ typedef struct {
 @implementation STVideo
 @end
 
-static STVideo *players[VIDEO_MAX_OPEN];
+/* graphics.c bounds open videos; re-opening an id creates the new player
+ * before it destroys the old one, hence the spare slot. */
+#define PLAYER_SLOTS (VIDEO_MAX_OPEN + 1)
+static STVideo *players[PLAYER_SLOTS];
 static CVMetalTextureCacheRef textureCache;
 static id<MTLDevice> metalDevice;
 static NSView *linkView;
@@ -280,9 +287,27 @@ update_format(STVideo *player)
 	size_t sizes[2] = {player->spsLength, player->ppsLength};
 	CMVideoFormatDescriptionRef format = NULL;
 
+	CMVideoDimensions size;
+
 	if (CMVideoFormatDescriptionCreateFromH264ParameterSets(kCFAllocatorDefault,
 	    2, sets, sizes, 4, &format) != noErr || !format)
 		return 0;
+	/* The declared size bounds nothing here: the SPS decides what is
+	 * decoded.  Refuse frames past the protocol's limit outright. */
+	size = CMVideoFormatDescriptionGetDimensions(format);
+	if (size.width <= 0 || size.height <= 0 ||
+	    size.width > VIDEO_DIMENSION_MAX || size.height > VIDEO_DIMENSION_MAX) {
+		CFRelease(format);
+		destroy_session(player);
+		if (player->format)
+			CFRelease(player->format);
+		player->format = NULL;
+		set_error(player, "E2BIG:video frames larger than 4096x4096");
+		return -1;
+	}
+	player->framesAhead = (int)(FRAMES_BYTES /
+	    ((size_t)size.width * (size_t)size.height * 4));
+	player->framesAhead = MAX(2, MIN(FRAMES_AHEAD, player->framesAhead));
 	if (player->session &&
 	    !VTDecompressionSessionCanAcceptFormatDescription(player->session,
 	    format))
@@ -374,6 +399,7 @@ decode_packet(STVideo *player, VideoQueued *item)
 	if (changed && player->spsLength && player->ppsLength &&
 	    !update_format(player))
 		set_error(player, "EBADMSG:invalid H.264 parameter sets");
+	/* (update_format() < 0: oversized; packets drop until new sets.) */
 	if (!player->session || !used ||
 	    (player->needKeyframe && !item->keyframe)) {
 		free(avcc);
@@ -427,7 +453,8 @@ feed_decoder(STVideo *player)
 		pthread_mutex_lock(&player->lock);
 		int ahead = player->frameCount + player->inflight;
 		pthread_mutex_unlock(&player->lock);
-		if (ahead >= FRAMES_AHEAD || !(item = queue_pop(&player->videoQueue)))
+		if (ahead >= player->framesAhead ||
+		    !(item = queue_pop(&player->videoQueue)))
 			return;
 		decode_packet(player, item);
 		free(item);
@@ -609,6 +636,15 @@ advance_state(STVideo *player)
 
 	if (player->paused || player->finished)
 		return;
+	/* End of stream with nothing (left) to play ends at once. */
+	if (player->ended && !player->started &&
+	    player->firstPts == VIDEO_TIME_NONE && !player->videoQueue.head &&
+	    !player->audioQueue.head) {
+		player->finished = 1;
+		player->lastPosition = VIDEO_TIME_NONE;
+		debug("ended without media");
+		return;
+	}
 	if (!player->running) {
 		int64_t from = player->started ? clock_now(player) :
 		    player->firstPts;
@@ -726,6 +762,24 @@ needs_ticks(STVideo *player)
 	return player && !player->finished && !player->paused;
 }
 
+/* Frame-rate ticks: while playing, while data arrives, or with a first
+ * frame to show.  A video left buffering with nothing arriving (its sender
+ * killed) only gets the slow timer. */
+static int
+needs_frame_ticks(STVideo *player)
+{
+	int pending;
+
+	if (!needs_ticks(player))
+		return 0;
+	if (player->running || CACurrentMediaTime() - player->lastPacket < 1.0)
+		return 1;
+	pthread_mutex_lock(&player->lock);
+	pending = !player->segmentShown && player->frameCount > 0;
+	pthread_mutex_unlock(&player->lock);
+	return pending;
+}
+
 size_t
 mac_video_describe(char *out, size_t size)
 {
@@ -733,7 +787,7 @@ mac_video_describe(char *out, size_t size)
 
 	if (size)
 		out[0] = '\0';
-	for (int i = 0; i < VIDEO_MAX_OPEN && used < size; i++) {
+	for (int i = 0; i < PLAYER_SLOTS && used < size; i++) {
 		VideoStatus status;
 		if (!players[i])
 			continue;
@@ -757,8 +811,17 @@ mac_video_describe(char *out, size_t size)
 int
 mac_video_active(void)
 {
-	for (int i = 0; i < VIDEO_MAX_OPEN; i++)
+	for (int i = 0; i < PLAYER_SLOTS; i++)
 		if (needs_ticks(players[i]))
+			return 1;
+	return 0;
+}
+
+static int
+frame_ticks_wanted(void)
+{
+	for (int i = 0; i < PLAYER_SLOTS; i++)
+		if (needs_frame_ticks(players[i]))
 			return 1;
 	return 0;
 }
@@ -768,7 +831,7 @@ mac_video_tick(double target)
 {
 	int changed = 0;
 
-	for (int i = 0; i < VIDEO_MAX_OPEN; i++)
+	for (int i = 0; i < PLAYER_SLOTS; i++)
 		if (players[i])
 			changed |= tick_player(players[i], target);
 	if (textureCache)
@@ -809,14 +872,15 @@ static STVideoTicker *ticker;
 static void
 updateTicking(void)
 {
-	int active = mac_video_active(), linked = 0;
+	int active = mac_video_active(), fast = active && frame_ticks_wanted();
+	int linked = 0;
 	double interval;
 
 	if (!ticker)
 		return;
 	if (linkView) {
 		if (@available(macOS 14.0, *)) {
-			if (!displayLink && active) {
+			if (!displayLink && fast) {
 				CADisplayLink *link = [linkView displayLinkWithTarget:ticker
 				    selector:@selector(displayLinkTick:)];
 				[link addToRunLoop:NSRunLoop.mainRunLoop
@@ -824,11 +888,11 @@ updateTicking(void)
 				displayLink = link;
 			}
 			if (displayLink)
-				((CADisplayLink *)displayLink).paused = !active;
+				((CADisplayLink *)displayLink).paused = !fast;
 			linked = displayLink != nil;
 		}
 	}
-	interval = linked ? 0.1 : 1.0 / 120;
+	interval = linked || !fast ? 0.1 : 1.0 / 120;
 	if (fallbackTimer && (!active || fallbackTimer.timeInterval != interval)) {
 		[fallbackTimer invalidate];
 		fallbackTimer = nil;
@@ -887,9 +951,9 @@ backend_create(const VideoConfig *config, const char **error)
 {
 	int slot;
 
-	for (slot = 0; slot < VIDEO_MAX_OPEN && players[slot]; slot++)
+	for (slot = 0; slot < PLAYER_SLOTS && players[slot]; slot++)
 		;
-	if (slot == VIDEO_MAX_OPEN) {
+	if (slot == PLAYER_SLOTS) {
 		*error = "ENOSPC:too many open videos";
 		return NULL;
 	}
@@ -899,6 +963,7 @@ backend_create(const VideoConfig *config, const char **error)
 	player->dropBefore = VIDEO_TIME_NONE;
 	player->needKeyframe = 1;
 	player->frameDuration = 1000000 / 30;
+	player->framesAhead = FRAMES_AHEAD;
 	player->paused = config->paused;
 	player->volume = config->volume;
 	reset_timeline(player);
@@ -918,7 +983,7 @@ backend_destroy(VideoPlayer *handle)
 {
 	STVideo *player = (__bridge_transfer STVideo *)(void *)handle;
 
-	for (int i = 0; i < VIDEO_MAX_OPEN; i++)
+	for (int i = 0; i < PLAYER_SLOTS; i++)
 		if (players[i] == player)
 			players[i] = nil;
 	set_rate(player, 0);
@@ -975,6 +1040,7 @@ backend_packet(VideoPlayer *handle, const VideoPacket *packet,
 		*error = "ENOMEM:video packet allocation failed";
 		return 0;
 	}
+	player->lastPacket = CACurrentMediaTime();
 	item->pts = packet->pts;
 	item->keyframe = packet->keyframe;
 	item->length = packet->length;

@@ -288,7 +288,8 @@ video_parse_packet(const unsigned char *data, size_t length,
 	packet->stream = data[0];
 	packet->keyframe = data[1] & 1;
 	packet->pts = (int64_t)pts;
-	if (packet->pts == VIDEO_TIME_NONE) {
+	/* Far beyond any media; keeps pts + duration arithmetic defined. */
+	if (packet->pts > VIDEO_PTS_MAX || packet->pts < -VIDEO_PTS_MAX) {
 		*error = "EINVAL:invalid video packet";
 		return 0;
 	}

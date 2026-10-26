@@ -99,7 +99,7 @@ The decoded payload is a 10-byte header followed by codec data:
 | --- | --- | --- |
 | 0 | 1 | Stream: `0` video, `1` audio |
 | 1 | 1 | Flags: bit 0 = keyframe (an IDR access unit) |
-| 2 | 8 | Presentation time in microseconds, signed 64-bit big-endian |
+| 2 | 8 | Presentation time in microseconds, signed 64-bit big-endian, within ±2^62 |
 | 10 | n | Codec data |
 
 - Video data is one H.264 access unit in Annex B form (start codes). The

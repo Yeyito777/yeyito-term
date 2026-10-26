@@ -16,6 +16,7 @@
 #define VIDEO_PREBUFFER_DEFAULT 300
 #define VIDEO_PREBUFFER_MAX     10000
 #define VIDEO_TIME_NONE         INT64_MIN
+#define VIDEO_PTS_MAX           (INT64_C(1) << 62)
 
 enum {
 	VIDEO_CODEC_NONE = 0,

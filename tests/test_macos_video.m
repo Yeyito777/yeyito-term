@@ -496,6 +496,121 @@ TEST(flush_seeks_backwards)
 	ASSERT_EQ('r', shownColor());
 }
 
+/* ---- limits ------------------------------------------------------------- */
+
+typedef struct {
+	unsigned char bytes[64];
+	int bits;
+} BitWriter;
+
+static void
+putBits(BitWriter *w, unsigned value, int count)
+{
+	while (count--) {
+		if (value >> count & 1)
+			w->bytes[w->bits / 8] |= (unsigned char)(0x80 >> (w->bits % 8));
+		w->bits++;
+	}
+}
+
+static void
+putUE(BitWriter *w, unsigned value)
+{
+	int length = 0;
+	while ((value + 1) >> (length + 1))
+		length++;
+	putBits(w, 0, length);
+	putBits(w, value + 1, length + 1);
+}
+
+/* An IDR access unit whose SPS declares width x height macroblocks. */
+static size_t
+oversizedFrame(unsigned char *out, unsigned widthMBs, unsigned heightMBs)
+{
+	BitWriter sps = {{0}, 0}, pps = {{0}, 0};
+	size_t used = 0;
+
+	putBits(&sps, 66, 8);		/* profile_idc: baseline */
+	putBits(&sps, 0xc0, 8);		/* constraint flags */
+	putBits(&sps, 51, 8);		/* level_idc */
+	putUE(&sps, 0);			/* seq_parameter_set_id */
+	putUE(&sps, 0);			/* log2_max_frame_num_minus4 */
+	putUE(&sps, 2);			/* pic_order_cnt_type */
+	putUE(&sps, 1);			/* max_num_ref_frames */
+	putBits(&sps, 0, 1);		/* gaps_in_frame_num_value_allowed */
+	putUE(&sps, widthMBs - 1);
+	putUE(&sps, heightMBs - 1);
+	putBits(&sps, 1, 1);		/* frame_mbs_only_flag */
+	putBits(&sps, 1, 1);		/* direct_8x8_inference_flag */
+	putBits(&sps, 0, 1);		/* frame_cropping_flag */
+	putBits(&sps, 0, 1);		/* vui_parameters_present_flag */
+	putBits(&sps, 1, 1);		/* rbsp_stop_one_bit */
+	putUE(&pps, 0);			/* pic_parameter_set_id */
+	putUE(&pps, 0);			/* seq_parameter_set_id */
+	putBits(&pps, 0, 2);		/* entropy, bottom_field_pic_order */
+	putUE(&pps, 0);			/* num_slice_groups_minus1 */
+	putUE(&pps, 0);
+	putUE(&pps, 0);			/* num_ref_idx_l0/l1_default_minus1 */
+	putBits(&pps, 0, 3);		/* weighted_pred, weighted_bipred_idc */
+	putUE(&pps, 0); putUE(&pps, 0); putUE(&pps, 0);	/* qp, qs, chroma (se 0) */
+	putBits(&pps, 4, 3);		/* deblocking control present */
+	putBits(&pps, 1, 1);		/* rbsp_stop_one_bit */
+	memcpy(out + used, "\0\0\0\1\x67", 5); used += 5;
+	memcpy(out + used, sps.bytes, (size_t)(sps.bits + 7) / 8);
+	used += (size_t)(sps.bits + 7) / 8;
+	memcpy(out + used, "\0\0\0\1\x68", 5); used += 5;
+	memcpy(out + used, pps.bytes, (size_t)(pps.bits + 7) / 8);
+	used += (size_t)(pps.bits + 7) / 8;
+	memcpy(out + used, "\0\0\0\1\x65\x88\x84\x00\x33\xff", 10); used += 10;
+	return used;
+}
+
+TEST(frames_beyond_4096_are_refused)
+{
+	unsigned char frame[256];
+	Encoded big = {frame, 0, 0, 1};
+
+	openVideo(0, 100);	/* declared 160x96: the SPS decides */
+	big.length = oversizedFrame(frame, 301, 2);	/* 4816 x 32 */
+	sendPacket(VIDEO_STREAM_VIDEO, &big, 0);
+	statusField("pos");
+	ASSERT(strstr(response, " error=E2BIG") != NULL);
+	/* Valid parameter sets afterwards decode again. */
+	text("a=v,i=77,k=f,q=1", "");
+	sendMedia(0, 0);
+	text("a=v,i=77,k=e,q=1", "");
+	ASSERT(waitState("playing", 2));
+	spin(0.1);
+	ASSERT_EQ('r', shownColor());
+	ASSERT(strstr(response, "error=") == NULL);
+}
+
+TEST(reopen_with_every_video_open)
+{
+	char controls[64];
+	graphics_reset();
+	for (int id = 1; id <= VIDEO_MAX_OPEN; id++) {
+		snprintf(controls, sizeof(controls), "a=v,i=%d,k=o", id);
+		text(controls, "video=h264 width=16 height=16 volume=0");
+		ASSERT(strstr(response, ";OK") != NULL);
+	}
+	text("a=v,i=2,k=o", "video=h264 width=32 height=32 volume=0");
+	ASSERT(strstr(response, "i=2;OK") != NULL);
+	text("a=v,i=9,k=o", "video=h264 width=32 height=32 volume=0");
+	ASSERT(strstr(response, "ENOSPC") != NULL);
+	ASSERT_EQ(VIDEO_MAX_OPEN, (int)graphics_video_count());
+	graphics_reset();
+}
+
+TEST(end_without_media_ends)
+{
+	openVideo(1, 100);
+	text("a=v,i=77,k=e,q=1", "");
+	ASSERT(waitState("ended", 1));
+	ASSERT(statusField("pos") == -1);
+	ASSERT(!mac_video_active());
+}
+
 /* ---- through the terminal parser ------------------------------------ */
 
 /* Feed bytes to st's real input path: a PTY whose slave is st's tty line,
@@ -704,6 +819,9 @@ main(void)
 		RUN_TEST(audio_clock_pause_and_resume);
 		RUN_TEST(flush_seeks_exactly);
 		RUN_TEST(flush_seeks_backwards);
+		RUN_TEST(frames_beyond_4096_are_refused);
+		RUN_TEST(reopen_with_every_video_open);
+		RUN_TEST(end_without_media_ends);
 		RUN_TEST(stream_through_the_terminal_parser);
 		RUN_TEST(errors_are_reported_and_delete_stops);
 		graphics_reset();
