@@ -804,6 +804,12 @@ main(int argc, char **argv)
 		if (slave > 2)
 			close(slave);
 		close(master);
+		/* A slow link stands for SSH; say so, as sshd would. */
+		if (bw_kbit > 0 || rtt_ms > 0 || nbw)
+			setenv("SSH_CONNECTION", "192.0.2.1 50000 192.0.2.2 22", 1);
+		else
+			unsetenv("SSH_CONNECTION");
+		unsetenv("SSH_TTY");
 		execvp(argv[i], argv + i);
 		_exit(127);
 	}

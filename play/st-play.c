@@ -1385,7 +1385,10 @@ main(int argc, char **argv)
 			probe_wait(a, &again, t1 + 3);
 			rtt = again.got_da1 ? again.da1_time - t1 : 0.2;
 		}
-		a->local = rtt < 0.01;
+		/* A terminal answers its first query a frame or two late, so
+		 * outside SSH anything short of a remote round trip is local. */
+		a->local = getenv("SSH_CONNECTION") || getenv("SSH_TTY") ?
+		    rtt < 0.01 : rtt < 0.25;
 		now = now_s();
 		flow_init(&a->flow, now, rtt, a->local ? 40e6 : 250e3);
 	}

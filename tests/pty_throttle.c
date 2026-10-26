@@ -151,6 +151,8 @@ main(int argc, char **argv)
 		if (s > 2)
 			close(s);
 		close(master);
+		/* The link stands for SSH; say so, as sshd would. */
+		setenv("SSH_CONNECTION", "192.0.2.1 50000 192.0.2.2 22", 1);
 		execvp(argv[i], argv + i);
 		_exit(127);
 	}
