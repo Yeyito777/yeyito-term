@@ -62,14 +62,18 @@ image_occlusion_end(ImageOcclusion *state)
 }
 
 static int
-baseline_equal(const ImageBaseline *baseline,
-		const GraphicsPlacementView *placement, const ImageOcclusionClip *clip)
+baseline_same_clip(const ImageBaseline *baseline, const ImageOcclusionClip *clip)
 {
-	if (baseline->clipped != !!clip || (clip &&
-	    (baseline->clip.top != clip->top || baseline->clip.end != clip->end ||
-	    baseline->clip.left != clip->left ||
-	    baseline->clip.right != clip->right)))
-		return 0;
+	return baseline->clipped == !!clip && (!clip ||
+	    (baseline->clip.top == clip->top && baseline->clip.end == clip->end &&
+	    baseline->clip.left == clip->left &&
+	    baseline->clip.right == clip->right));
+}
+
+static int
+baseline_same_placement(const ImageBaseline *baseline,
+		const GraphicsPlacementView *placement)
+{
 	return baseline->image_id == placement->image_id &&
 	    (placement->image_id || baseline->serial == placement->serial) &&
 	    baseline->placement_id == placement->placement_id &&
@@ -87,17 +91,25 @@ baseline_equal(const ImageBaseline *baseline,
 	    baseline->natural_size == placement->natural_size;
 }
 
+/* The placement's baseline for this clip. A new one sets `previous` to the
+ * placement's baseline under another clip, if any (the clip changed): the
+ * cells both reach keep the cells remembered there. */
 static ImageBaseline *
 baseline_get(ImageOcclusion *state, const GraphicsPlacementView *placement,
-		const ImageOcclusionClip *clip)
+		const ImageOcclusionClip *clip, ImageBaseline **previous)
 {
 	ImageBaseline *baseline;
 
-	for (baseline = state->baselines; baseline; baseline = baseline->next)
-		if (baseline_equal(baseline, placement, clip)) {
+	*previous = NULL;
+	for (baseline = state->baselines; baseline; baseline = baseline->next) {
+		if (!baseline_same_placement(baseline, placement))
+			continue;
+		if (baseline_same_clip(baseline, clip)) {
 			baseline->seen = 1;
 			return baseline;
 		}
+		*previous = baseline;
+	}
 	baseline = calloc(1, sizeof(*baseline));
 	if (!baseline)
 		return NULL;
@@ -161,21 +173,32 @@ baseline_resize(ImageBaseline *baseline, size_t capacity)
 }
 
 static ImageBaselineCell *
+baseline_find(const ImageBaseline *baseline, Line line, int column)
+{
+	ImageBaselineCell *cell;
+	size_t slot;
+
+	if (!baseline->cellcap)
+		return NULL;
+	slot = baseline_hash(line, column, baseline->cellcap);
+	while (baseline->cells[slot].line) {
+		cell = &baseline->cells[slot];
+		if (cell->line == line && cell->column == column)
+			return cell;
+		slot = (slot + 1) & (baseline->cellcap - 1);
+	}
+	return NULL;
+}
+
+static ImageBaselineCell *
 baseline_cell(ImageOcclusion *state, ImageBaseline *baseline, Line line, int column,
 		Glyph glyph)
 {
 	ImageBaselineCell *cell;
 	size_t slot;
 
-	if (baseline->cellcap) {
-		slot = baseline_hash(line, column, baseline->cellcap);
-		while (baseline->cells[slot].line) {
-			cell = &baseline->cells[slot];
-			if (cell->line == line && cell->column == column)
-				return cell;
-			slot = (slot + 1) & (baseline->cellcap - 1);
-		}
-	}
+	if ((cell = baseline_find(baseline, line, column)))
+		return cell;
 	if (state->cells >= IMAGE_OCCLUSION_CELL_MAX)
 		return NULL;
 	if (!baseline->cellcap ||
@@ -218,14 +241,14 @@ image_occlusion_draw_clipped(ImageOcclusion *state,
 		Line (*line_at)(int), ImageOcclusionDraw draw, void *context,
 		const ImageOcclusionClip *clip)
 {
-	ImageBaseline *baseline;
-	ImageBaselineCell *cell;
+	ImageBaseline *baseline, *previous;
+	ImageBaselineCell *cell, *carried;
 	Line line;
 	int x, y, firstx, lastx, firsty, lasty;
 
 	if (placement->z < 0)
 		return;
-	baseline = baseline_get(state, placement, clip);
+	baseline = baseline_get(state, placement, clip, &previous);
 	/* A selected image is drawn whole, so keep its baseline alive without
 	 * reading cells. Applications decorate the cells under a selected image
 	 * (a cursor-line highlight, for instance); snapshotting them would make
@@ -251,8 +274,13 @@ image_occlusion_draw_clipped(ImageOcclusion *state,
 			/* Snapshot every covered grid cell independently. The original
 			 * glyph/background stays below the positive-z image; only a changed
 			 * cell is composited above it. Restoring that exact cell reveals only
-			 * the corresponding part of the image again. */
-			cell = baseline_cell(state, baseline, line, x, line[x]);
+			 * the corresponding part of the image again. When the clip changed,
+			 * a cell the old clip reached keeps what was remembered there (an
+			 * overlay drawn over the image in the very frame the clip changes
+			 * still hides it); one newly in reach is taken as it is. */
+			carried = previous ? baseline_find(previous, line, x) : NULL;
+			cell = baseline_cell(state, baseline, line, x,
+			    carried ? carried->glyph : line[x]);
 			if (!cell || glyph_equal(cell->glyph, line[x]))
 				continue;
 			if ((line[x].mode & ATTR_WDUMMY) && x > 0) {
