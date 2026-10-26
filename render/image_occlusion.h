@@ -32,8 +32,10 @@ void image_occlusion_draw(ImageOcclusion *state,
 		Line (*line_at)(int), ImageOcclusionDraw draw, void *context);
 /* Like image_occlusion_draw() for an image clipped to `clip` (an image clip
  * region, OSC 2032 ; k): only the cells it can draw over are remembered and
- * composited, and a different clip starts a new baseline, so cells the image
- * never covered (a prompt below the pane it is clipped to) never hide it. */
+ * composited. When the clip changes, the cells both clips reach keep what
+ * was remembered there and the ones newly in reach are taken as they are,
+ * so cells the image never covered (a prompt below the pane it is clipped
+ * to) never hide it, and an overlay drawn over it as the clip changes does. */
 void image_occlusion_draw_clipped(ImageOcclusion *state,
 		const GraphicsPlacementView *placement, int columns, int rows,
 		Line (*line_at)(int), ImageOcclusionDraw draw, void *context,

@@ -139,9 +139,12 @@ are cleared with the rest by `CSI ? 2032 l`, RIS, `OSC 2032 ; c`, a resize
 and a screen switch (send them again with the next frame). Hiding an image
 whose cells change after it was drawn (st's image occlusion,
 [kitty-graphics.md](kitty-graphics.md)) then considers only the cells the
-image can draw over inside its clip regions, and a placement whose clip
-changes remembers its cells afresh: rows below the pane that an uncropped
-image never draws over never hide it.
+image can draw over inside its clip regions: rows below the pane that an
+uncropped image never draws over never hide it. When a placement's clip
+changes (or goes), the cells both clips reach keep what was remembered there,
+so an overlay drawn over the image in the frame its clip changes (an image
+viewer opening as the application drops its pane's clip) still hides it, and
+the cells newly in reach are taken as they are.
 
 Detect support with DECRQM `CSI ? 2033 $ p`; a reply of `3` means `k` is
 understood. Mode 2033 is not used by any terminal known to us (the nearby
