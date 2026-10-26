@@ -18,6 +18,45 @@
 static id<MTLTexture> headlessTarget;
 static int headlessFrames;
 
+/* -k SECONDS:KEY: type KEY (a character, or space/left/right/up/down/
+ * esc/enter) into the terminal at SECONDS, as if pressed. */
+typedef struct {
+	double at;
+	char bytes[8];
+	size_t length;
+	int sent;
+} HeadlessKey;
+static HeadlessKey keys[64];
+static int keyCount;
+
+static int
+parseKey(const char *spec)
+{
+	static const struct { const char *name, *bytes; } named[] = {
+		{"space", " "}, {"left", "\033[D"}, {"right", "\033[C"},
+		{"up", "\033[A"}, {"down", "\033[B"}, {"esc", "\033"},
+		{"enter", "\r"},
+	};
+	const char *colon = strchr(spec, ':');
+	HeadlessKey *key;
+
+	if (!colon || keyCount == (int)(sizeof(keys) / sizeof(keys[0])))
+		return 0;
+	key = &keys[keyCount];
+	key->at = atof(spec);
+	for (size_t i = 0; i < sizeof(named) / sizeof(named[0]); i++)
+		if (!strcmp(colon + 1, named[i].name)) {
+			key->length = strlen(named[i].bytes);
+			memcpy(key->bytes, named[i].bytes, key->length);
+		}
+	if (!key->length) {
+		key->length = MIN(strlen(colon + 1), sizeof(key->bytes));
+		memcpy(key->bytes, colon + 1, key->length);
+	}
+	keyCount++;
+	return 1;
+}
+
 static void
 headlessRedraw(void)
 {
@@ -98,7 +137,7 @@ main(int argc, char **argv)
 	double seconds = 20, every = 2, fps = 60;
 	const char *outdir = "/tmp/st-headless";
 
-	while ((opt = getopt(argc, argv, "c:r:t:s:o:f:a")) != -1) {
+	while ((opt = getopt(argc, argv, "c:r:t:s:o:f:ak:")) != -1) {
 		switch (opt) {
 		case 'c': columns = atoi(optarg); break;
 		case 'r': rows = atoi(optarg); break;
@@ -107,9 +146,16 @@ main(int argc, char **argv)
 		case 'o': outdir = optarg; break;
 		case 'f': fps = atof(optarg); break;
 		case 'a': audible = 1; break;
+		case 'k':
+			if (!parseKey(optarg)) {
+				fprintf(stderr, "bad key %s\n", optarg);
+				return 2;
+			}
+			break;
 		default:
 			fprintf(stderr, "usage: %s [-c cols] [-r rows] [-t seconds] "
-			    "[-s snapshot-every] [-f fps] [-o dir] [-a] -- command...\n",
+			    "[-s snapshot-every] [-f fps] [-o dir] [-a] [-k secs:key]... "
+			    "-- command...\n",
 			    argv[0]);
 			return 2;
 		}
@@ -161,7 +207,7 @@ main(int argc, char **argv)
 		double start = CACurrentMediaTime(), nextShot = start + every;
 		double nextFrame = start;
 		int shot = 0;
-		char status[1024], path[PATH_MAX];
+		char status[1024], path[PATH_MAX], laststate[32] = "";
 		while (CACurrentMediaTime() - start < seconds) {
 			struct pollfd readable = {ttyfd, POLLIN, 0};
 			int status_code;
@@ -181,7 +227,29 @@ main(int argc, char **argv)
 			[NSRunLoop.mainRunLoop runMode:NSDefaultRunLoopMode
 			    beforeDate:NSDate.distantPast];
 			double now = CACurrentMediaTime();
+			for (int i = 0; i < keyCount; i++)
+				if (!keys[i].sent && now - start >= keys[i].at) {
+					keys[i].sent = 1;
+					ttywrite(keys[i].bytes, keys[i].length, 1);
+					printf("%6.3fs key %s\n", now - start,
+					    keys[i].bytes[0] == '\033' ? "<esc seq>" :
+					    keys[i].bytes);
+					fflush(stdout);
+				}
 			mac_video_tick(now + 1.0 / fps);
+			/* Every change of the first video's state, timestamped. */
+			mac_video_describe(status, sizeof(status));
+			{
+				char state[32];
+				snprintf(state, sizeof(state), "%.*s",
+				    (int)strcspn(status, " ;"), status);
+				if (strcmp(state, laststate)) {
+					printf("%6.3fs state %s (%s)\n", now - start,
+					    *state ? state : "none", status);
+					fflush(stdout);
+					snprintf(laststate, sizeof(laststate), "%s", state);
+				}
+			}
 			if (now >= nextFrame) {
 				renderTerminal();
 				nextFrame = now + 1.0 / fps;

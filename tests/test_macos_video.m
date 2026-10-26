@@ -477,6 +477,25 @@ TEST(flush_seeks_exactly)
 	ASSERT(waitState("ended", 2));
 }
 
+/* Seeking back: the clock must go back too, with sound attached. */
+TEST(flush_seeks_backwards)
+{
+	openVideo(1, 100);
+	sendMedia(1, 500000);	/* the clip at 0.5 .. 1.5 s */
+	ASSERT(waitState("playing", 2));
+	spin(0.3);
+	ASSERT(statusField("pos") > 650000);
+	text("a=v,i=77,k=f,q=1", "start=0");
+	sendMedia(1, 0);
+	ASSERT(waitState("playing", 2));
+	long long pos = statusField("pos");
+	ASSERT(pos >= 0 && pos < 300000);
+	spin(0.2);
+	pos = statusField("pos");
+	ASSERT(pos > 100000 && pos < 500000);
+	ASSERT_EQ('r', shownColor());
+}
+
 /* ---- through the terminal parser ------------------------------------ */
 
 /* Feed bytes to st's real input path: a PTY whose slave is st's tty line,
@@ -684,6 +703,7 @@ main(void)
 		RUN_TEST(video_plays_on_the_host_clock_and_ends);
 		RUN_TEST(audio_clock_pause_and_resume);
 		RUN_TEST(flush_seeks_exactly);
+		RUN_TEST(flush_seeks_backwards);
 		RUN_TEST(stream_through_the_terminal_parser);
 		RUN_TEST(errors_are_reported_and_delete_stops);
 		graphics_reset();

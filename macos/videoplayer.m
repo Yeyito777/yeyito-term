@@ -15,6 +15,8 @@
 #import <VideoToolbox/VideoToolbox.h>
 
 #include <pthread.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -116,6 +118,25 @@ static double volumeScale = 1;
 
 static void updateTicking(void);
 static void backend_status(VideoPlayer *handle, VideoStatus *status);
+
+/* ST_VIDEO_DEBUG=1: timeline events on stderr. */
+static int debugging = -1;
+
+static void
+debug(const char *format, ...)
+{
+	va_list args;
+
+	if (debugging < 0)
+		debugging = getenv("ST_VIDEO_DEBUG") != NULL;
+	if (!debugging)
+		return;
+	fprintf(stderr, "[st video %.3f] ", CACurrentMediaTime());
+	va_start(args, format);
+	vfprintf(stderr, format, args);
+	va_end(args);
+	fputc('\n', stderr);
+}
 
 static int64_t
 cmtime_us(CMTime time)
@@ -458,11 +479,34 @@ make_audio(STVideo *player)
 	    sizeof(layout), &layout, cookieLength, cookie, NULL,
 	    &player->audioFormat) != noErr)
 		return 0;
-	player.audio = [AVSampleBufferAudioRenderer new];
-	player.audio.volume = (float)(player->volume * volumeScale);
-	[player.synchronizer addRenderer:player.audio];
 	player->audioFrameDuration = 1024LL * TIMESCALE / player->config.sample_rate;
 	return 1;
+}
+
+/* A fresh synchronizer (and audio renderer) for a new timeline.  With an
+ * audio renderer attached, AVSampleBufferRenderSynchronizer ignores
+ * setRate:time: back to an earlier time, even after a flush, so every
+ * seek starts over instead of moving the old clock. */
+static void
+reset_clock(STVideo *player)
+{
+	AVSampleBufferRenderSynchronizer *old = player.synchronizer;
+
+	if (old) {
+		old.rate = 0;
+		if (player.audio) {
+			[player.audio flush];
+			[old removeRenderer:player.audio atTime:kCMTimeInvalid
+			    completionHandler:nil];
+		}
+	}
+	player.synchronizer = [AVSampleBufferRenderSynchronizer new];
+	player.audio = nil;
+	if (player->audioFormat) {
+		player.audio = [AVSampleBufferAudioRenderer new];
+		player.audio.volume = (float)(player->volume * volumeScale);
+		[player.synchronizer addRenderer:player.audio];
+	}
 }
 
 static void
@@ -581,8 +625,12 @@ advance_state(STVideo *player)
 			[player.synchronizer setRate:1.0
 			    time:CMTimeMake(player->firstPts, TIMESCALE)];
 			player->started = 1;
+			debug("start at %lld (vend %lld aend %lld)",
+			    (long long)player->firstPts, (long long)player->videoEnd,
+			    (long long)player->audioEnd);
 		} else {
 			set_rate(player, 1.0);
+			debug("resume at %lld", (long long)clock_now(player));
 		}
 		player->running = 1;
 		return;
@@ -606,6 +654,8 @@ advance_state(STVideo *player)
 	    now > player->videoEnd + VIDEO_DRY_MARGIN))) {
 		set_rate(player, 0);
 		player->running = 0;
+		debug("dry at %lld (vend %lld aend %lld)", (long long)now,
+		    (long long)player->videoEnd, (long long)player->audioEnd);
 	}
 }
 
@@ -852,12 +902,12 @@ backend_create(const VideoConfig *config, const char **error)
 	player->paused = config->paused;
 	player->volume = config->volume;
 	reset_timeline(player);
-	player.synchronizer = [AVSampleBufferRenderSynchronizer new];
 	if (config->audio_codec && !make_audio(player)) {
 		pthread_mutex_destroy(&player->lock);
 		*error = "ENOTSUP:audio format not supported";
 		return NULL;
 	}
+	reset_clock(player);
 	players[slot] = player;
 	updateTicking();
 	return (__bridge_retained VideoPlayer *)player;
@@ -943,6 +993,10 @@ backend_packet(VideoPlayer *handle, const VideoPacket *packet,
 	    packet->pts > player->audioEnd) {
 		player->audioEnd = packet->pts;
 	}
+	if (player->firstPts == VIDEO_TIME_NONE)
+		debug("first %s packet after open/flush: pts %lld key %d",
+		    video ? "video" : "audio", (long long)packet->pts,
+		    packet->keyframe);
 	{
 		int64_t first = packet->pts;
 		if (player->dropBefore != VIDEO_TIME_NONE &&
@@ -964,9 +1018,9 @@ backend_flush(VideoPlayer *handle, int64_t start)
 {
 	STVideo *player = (__bridge STVideo *)(void *)handle;
 
-	set_rate(player, 0);
-	if (player.audio)
-		[player.audio flush];
+	debug("flush start=%lld at clock %lld", (long long)start,
+	    (long long)clock_now(player));
+	reset_clock(player);
 	queue_clear(&player->videoQueue);
 	queue_clear(&player->audioQueue);
 	pthread_mutex_lock(&player->lock);
@@ -1000,6 +1054,8 @@ backend_pause(VideoPlayer *handle, int paused)
 	if (player->paused == !!paused)
 		return;
 	player->paused = !!paused;
+	debug("%s at %lld", paused ? "pause" : "unpause",
+	    (long long)clock_now(player));
 	if (paused) {
 		set_rate(player, 0);
 		player->running = 0;
