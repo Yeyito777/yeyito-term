@@ -224,6 +224,13 @@ make every pause or seek wait behind it. `st-play` therefore:
 | `play/st-play.c` | Reference sender and terminal video player. |
 | `tests/test_video.c` | Protocol and lifecycle tests against a mock backend. |
 
+`ST_VIDEO_VOLUME` (0..1) scales the volume of every video, so tests and
+harnesses can play real streams silently (`ST_VIDEO_VOLUME=0`). On macOS,
+`make macos_headless` builds `tests/macos_headless`, a windowless st that
+runs a command in a PTY through the real terminal core and renderer and
+saves PNG snapshots, for end-to-end runs such as
+`tests/macos_headless -- ssh -t host st-play clip.mp4`.
+
 The platform registers a `VideoBackend` with `graphics_set_video_backend()`.
 Without one (the non-GPU X11 path, tests that don't register one), `k=c`
 answers `ENOSYS` and opens fail. All backend calls are made on the main

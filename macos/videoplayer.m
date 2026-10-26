@@ -110,8 +110,12 @@ static NSView *linkView;
 static id displayLink;
 static NSTimer *fallbackTimer;
 static void (*requestRedraw)(void);
+/* ST_VIDEO_VOLUME (0..1) scales every video's volume: tests and harnesses
+ * run real playback silently with ST_VIDEO_VOLUME=0. */
+static double volumeScale = 1;
 
 static void updateTicking(void);
+static void backend_status(VideoPlayer *handle, VideoStatus *status);
 
 static int64_t
 cmtime_us(CMTime time)
@@ -455,7 +459,7 @@ make_audio(STVideo *player)
 	    &player->audioFormat) != noErr)
 		return 0;
 	player.audio = [AVSampleBufferAudioRenderer new];
-	player.audio.volume = (float)player->volume;
+	player.audio.volume = (float)(player->volume * volumeScale);
 	[player.synchronizer addRenderer:player.audio];
 	player->audioFrameDuration = 1024LL * TIMESCALE / player->config.sample_rate;
 	return 1;
@@ -670,6 +674,34 @@ static int
 needs_ticks(STVideo *player)
 {
 	return player && !player->finished && !player->paused;
+}
+
+size_t
+mac_video_describe(char *out, size_t size)
+{
+	size_t used = 0;
+
+	if (size)
+		out[0] = '\0';
+	for (int i = 0; i < VIDEO_MAX_OPEN && used < size; i++) {
+		VideoStatus status;
+		if (!players[i])
+			continue;
+		backend_status((__bridge VideoPlayer *)players[i], &status);
+		int n = snprintf(out + used, size - used,
+		    "%s%s pos=%.2f vbuf=%.2f abuf=%.2f shown=%llu dropped=%llu%s%s",
+		    used ? "; " : "", video_state_name(status.state),
+		    status.position == VIDEO_TIME_NONE ? -1 : status.position / 1e6,
+		    status.video_end == VIDEO_TIME_NONE ? -1 : status.video_end / 1e6,
+		    status.audio_end == VIDEO_TIME_NONE ? -1 : status.audio_end / 1e6,
+		    (unsigned long long)status.shown,
+		    (unsigned long long)status.dropped,
+		    status.error ? " error=" : "", status.error ? status.error : "");
+		if (n < 0)
+			break;
+		used += (size_t)n;
+	}
+	return used < size ? used : size;
 }
 
 int
@@ -975,7 +1007,7 @@ backend_volume(VideoPlayer *handle, double volume)
 	STVideo *player = (__bridge STVideo *)(void *)handle;
 	player->volume = volume;
 	if (player.audio)
-		player.audio.volume = (float)volume;
+		player.audio.volume = (float)(volume * volumeScale);
 }
 
 static void
@@ -1010,6 +1042,10 @@ static const VideoBackend backend = {
 void
 mac_video_init(void *device, void *view, void (*redraw)(void))
 {
+	const char *scale = getenv("ST_VIDEO_VOLUME");
+
+	if (scale && *scale)
+		volumeScale = MAX(0.0, MIN(1.0, atof(scale)));
 	metalDevice = (__bridge id<MTLDevice>)device;
 	if (!textureCache && CVMetalTextureCacheCreate(kCFAllocatorDefault, NULL,
 	    metalDevice, NULL, &textureCache) != kCVReturnSuccess)

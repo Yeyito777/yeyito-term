@@ -293,6 +293,13 @@ tests/test_macos_video.o: tests/test_macos_video.m tests/test.h macos/backend.o 
 test_macos_video: tests/test_macos_video.o $(MAC_IMAGE_TEST_OBJ)
 	$(CC) -o tests/test_macos_video tests/test_macos_video.o $(MAC_IMAGE_TEST_OBJ) $(STLDFLAGS)
 
+# A windowless st for end-to-end runs (not part of make test).
+tests/macos_headless.o: tests/macos_headless.m macos/backend.o macos/renderer.o macos/videoplayer.o
+	$(CC) $(STOBJCFLAGS) -c tests/macos_headless.m -o $@
+
+macos_headless: tests/macos_headless.o $(MAC_IMAGE_TEST_OBJ)
+	$(CC) -o tests/macos_headless tests/macos_headless.o $(MAC_IMAGE_TEST_OBJ) $(STLDFLAGS)
+
 tests/test_macos_mouse_cursor.o: tests/test_macos_mouse_cursor.m tests/test.h macos/backend.o macos/renderer.o
 	$(CC) $(STOBJCFLAGS) -c tests/test_macos_mouse_cursor.m -o $@
 
@@ -430,7 +437,7 @@ endif
 
 clean-tests:
 	rm -f tests/test_macos_symbol_input tests/test_macos_symbol_input.o tests/macos_symbol_sender
-	rm -f tests/*.o tests/test_macos_image_occlusion tests/test_macos_video tests/test_macos_mouse_cursor tests/test_image_occlusion tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search tests/test_cmdline_layout tests/test_mode_reset tests/test_sync tests/test_clipboard5522 tests/test_graphics tests/test_video tests/test_smoothscroll tests/test_macos_pty tests/test_macos_reveal tests/test_macos_spare tests/test_macos_launchlog tests/test_macos_aerospace tests/test_macos_control tests/test_macos_text_input tests/test_macos_locale tests/test_macos_glyph_layout tests/test_macos_emoji tests/test_macos_pasteboard5522
+	rm -f tests/*.o tests/macos_headless tests/test_macos_image_occlusion tests/test_macos_video tests/test_macos_mouse_cursor tests/test_image_occlusion tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search tests/test_cmdline_layout tests/test_mode_reset tests/test_sync tests/test_clipboard5522 tests/test_graphics tests/test_video tests/test_smoothscroll tests/test_macos_pty tests/test_macos_reveal tests/test_macos_spare tests/test_macos_launchlog tests/test_macos_aerospace tests/test_macos_control tests/test_macos_text_input tests/test_macos_locale tests/test_macos_glyph_layout tests/test_macos_emoji tests/test_macos_pasteboard5522
 
 .PHONY: all app install-app uninstall-app install-hint clean dist install uninstall test test_image_occlusion test_smoothscroll test_macos_image_occlusion test_macos_video test_macos_mouse_cursor test_gpu_regressions test_aerospace_launcher test_mode_reset test_sync test_graphics test_video test_macos_pty test_macos_reveal test_macos_spare test_macos_launchlog test_macos_aerospace test_macos_control test_macos_text_input test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522 clean-tests
-.PHONY: test_macos_symbol_input
+.PHONY: test_macos_symbol_input macos_headless

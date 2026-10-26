@@ -20,6 +20,7 @@ tests/test_cmdline_layout
 tests/test_image_occlusion
 tests/test_macos_image_occlusion
 tests/test_macos_video
+tests/macos_headless
 tests/test_macos_mouse_cursor
 tests/test_macos_symbol_input
 tests/macos_symbol_sender
