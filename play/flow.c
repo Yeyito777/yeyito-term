@@ -77,14 +77,27 @@ flow_idle(Flow *flow)
 	flow->app_limited_until = flow->written ? flow->written : 1;
 }
 
+/* How long a ping may go unanswered before we stop waiting for it. */
+static double
+ping_patience(const Flow *flow)
+{
+	double patience = 4 * flow->srtt;
+	return patience < 1.0 ? 1.0 : patience;
+}
+
 int
 flow_ping_due(const Flow *flow, double now, int sending)
 {
 	double since = now - flow->last_ping_time;
 	uint64_t bytes = flow->written - flow->last_ping_offset;
 
-	if (flow->ping_count >= FLOW_OUTSTANDING)
-		return 0;
+	if (flow->ping_count >= FLOW_OUTSTANDING) {
+		/* A reply that never comes must not stop the stream: after a
+		 * while ask again (a later reply covers the earlier bytes). */
+		if (now - flow->pings[flow->ping_first].sent < ping_patience(flow))
+			return 0;
+		return 1;
+	}
 	if ((double)bytes >= ping_bytes(flow))
 		return 1;
 	if (sending && bytes && since >= FLOW_PING_SENDING)
@@ -103,10 +116,14 @@ flow_ping_written(Flow *flow, uint32_t seq, double now)
 {
 	FlowPing *ping;
 
-	if (flow->ping_count >= FLOW_PINGS) {
-		/* Should not happen (flow_ping_due refuses); drop the oldest. */
-		flow->ping_first = (flow->ping_first + 1) % FLOW_PINGS;
-		flow->ping_count--;
+	if (flow->ping_count >= FLOW_OUTSTANDING) {
+		/* Given up on (flow_ping_due): forget every stale one, so the
+		 * next pings keep their normal pace. */
+		do {
+			flow->ping_first = (flow->ping_first + 1) % FLOW_PINGS;
+			flow->ping_count--;
+		} while (flow->ping_count && now -
+		    flow->pings[flow->ping_first].sent >= ping_patience(flow));
 	}
 	ping = &flow->pings[(flow->ping_first + flow->ping_count) % FLOW_PINGS];
 	ping->seq = seq;

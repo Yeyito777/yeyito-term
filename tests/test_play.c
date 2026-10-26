@@ -511,7 +511,7 @@ TEST(flow_bounds_unanswered_pings)
 	double t;
 	int sent = 0;
 	flow_init(&f, 0, 0.05, 10e6);
-	for (t = 0; t < 2; t += 0.001) {
+	for (t = 0; t < 0.9; t += 0.001) {
 		flow_wrote(&f, 50000);
 		if (flow_ping_due(&f, t, 1)) {
 			flow_ping_written(&f, flow_next_seq(&f), t);
@@ -521,8 +521,31 @@ TEST(flow_bounds_unanswered_pings)
 	ASSERT_EQ(FLOW_OUTSTANDING, sent);
 	ASSERT(f.ping_count == FLOW_OUTSTANDING);
 	/* One answer frees one slot. */
-	ASSERT(flow_ack(&f, 1, 2.0));
-	ASSERT(flow_ping_due(&f, 2.0, 1));
+	ASSERT(flow_ack(&f, 1, 0.9));
+	ASSERT(flow_ping_due(&f, 0.9, 1));
+}
+
+TEST(flow_lost_replies_do_not_stall)
+{
+	/* Replies to the first 16 pings never come: after a while it asks
+	 * again, and the next reply acknowledges everything before it. */
+	Flow f;
+	double t;
+	uint32_t last = 0;
+	flow_init(&f, 0, 0.05, 1e6);
+	for (t = 0; t < 3; t += 0.001) {
+		flow_wrote(&f, 1000);
+		if (flow_ping_due(&f, t, 1)) {
+			last = flow_next_seq(&f);
+			flow_ping_written(&f, last, t);
+		}
+	}
+	ASSERT(last > FLOW_OUTSTANDING);
+	/* Not a flood once the first ones are given up. */
+	ASSERT(last < 2 * FLOW_OUTSTANDING + 3 / 0.033);
+	ASSERT(f.ping_count <= FLOW_OUTSTANDING);
+	ASSERT(flow_ack(&f, last, 3.0));
+	ASSERT(f.acked >= 1000000 && flow_inflight(&f) < 1100000);
 }
 
 TEST(flow_measures_window_limited_link)
@@ -729,6 +752,7 @@ main(void)
 	RUN_TEST(flow_window_bounds);
 	RUN_TEST(flow_acks_bound_inflight);
 	RUN_TEST(flow_bounds_unanswered_pings);
+	RUN_TEST(flow_lost_replies_do_not_stall);
 	RUN_TEST(flow_measures_window_limited_link);
 	RUN_TEST(flow_bursty_replies_do_not_inflate_the_rate);
 	RUN_TEST(flow_follows_a_drop_and_recovery);

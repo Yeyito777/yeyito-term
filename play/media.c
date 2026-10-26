@@ -71,6 +71,13 @@ struct Media {
 
 	/* Encode */
 	AVCodecContext *venc, *aenc;
+	/* A size change drains the old encoder a packet per step (its delayed
+	 * frames take up to a second to encode), then encodes the frame that
+	 * caused it with the new one. */
+	AVCodecContext *old_venc;
+	AVFrame *pending;
+	int64_t pending_pts;
+	int have_pending;
 	int enc_w, enc_h, enc_kbps;
 	double enc_fps;
 	char enc_preset[16];
@@ -457,6 +464,7 @@ media_close(Media *m)
 	avcodec_free_context(&m->adec);
 	av_frame_free(&m->frame);
 	av_frame_free(&m->held);
+	av_frame_free(&m->pending);
 	av_frame_free(&m->scaled);
 	av_frame_free(&m->aframe);
 	av_packet_free(&m->out);
@@ -539,6 +547,7 @@ static void
 free_encoders(Media *m)
 {
 	avcodec_free_context(&m->venc);
+	avcodec_free_context(&m->old_venc);
 	avcodec_free_context(&m->aenc);
 }
 
@@ -647,9 +656,50 @@ drain_packets(Media *m, AVCodecContext *c, int stream, MediaEmit emit,
 	return r == AVERROR(EAGAIN) || r == AVERROR_EOF ? 0 : r;
 }
 
+static int encode_video(Media *m, AVFrame *frame, int64_t pts,
+		MediaEmit emit, void *ctx);
+
+/* One packet of the old encoder; 0 once it is drained and freed. */
+static int
+drain_old_step(Media *m, MediaEmit emit, void *ctx)
+{
+	int r;
+
+	if (!m->old_venc)
+		return 0;
+	r = avcodec_receive_packet(m->old_venc, m->out);
+	if (r >= 0) {
+		if (m->out->pts != AV_NOPTS_VALUE)
+			emit(ctx, 0, !!(m->out->flags & AV_PKT_FLAG_KEY),
+			    av_rescale_q(m->out->pts, m->old_venc->time_base, US),
+			    m->out->data, (size_t)m->out->size);
+		av_packet_unref(m->out);
+		return 1;
+	}
+	avcodec_free_context(&m->old_venc);
+	return 0;
+}
+
+/* Finish a switch: drain the old encoder, encode the frame that waited. */
+static int
+finish_switch(Media *m, MediaEmit emit, void *ctx)
+{
+	int r = 0;
+
+	while (drain_old_step(m, emit, ctx))
+		;
+	if (m->have_pending) {
+		m->have_pending = 0;
+		r = encode_video(m, m->pending, m->pending_pts, emit, ctx);
+		av_frame_unref(m->pending);
+	}
+	return r;
+}
+
 static void
 flush_video_encoder(Media *m, MediaEmit emit, void *ctx)
 {
+	finish_switch(m, emit, ctx);
 	if (!m->venc)
 		return;
 	avcodec_send_frame(m->venc, NULL);
@@ -663,8 +713,20 @@ encode_video(Media *m, AVFrame *frame, int64_t pts, MediaEmit emit, void *ctx)
 	int r;
 
 	if (m->venc && (m->want_w != m->enc_w || m->want_h != m->enc_h ||
-	    m->want_fps != m->enc_fps || strcmp(m->want_preset, m->enc_preset)))
-		flush_video_encoder(m, emit, ctx);
+	    m->want_fps != m->enc_fps || strcmp(m->want_preset, m->enc_preset))) {
+		/* Start draining; media_step goes on with it. */
+		m->old_venc = m->venc;
+		m->venc = NULL;
+		avcodec_send_frame(m->old_venc, NULL);
+		if (!m->pending)
+			m->pending = av_frame_alloc();
+		av_frame_unref(m->pending);
+		if (av_frame_ref(m->pending, frame) < 0)
+			return -1;
+		m->pending_pts = pts;
+		m->have_pending = 1;
+		return 0;
+	}
 	if (!m->venc) {
 		if (!m->want_w || open_video_encoder(m) < 0)
 			return -1;
@@ -1145,6 +1207,15 @@ media_step(Media *m, MediaEmit emit, void *ctx)
 		return MEDIA_EOF;
 	if (m->error[0])
 		return MEDIA_ERROR;
+	if (m->old_venc || m->have_pending) {
+		/* A switch in progress: one packet per step, then the frame
+		 * that waited (opening the new encoder). */
+		if (drain_old_step(m, emit, ctx))
+			return MEDIA_MORE;
+		if (finish_switch(m, emit, ctx) < 0)
+			return MEDIA_ERROR;
+		return MEDIA_MORE;
+	}
 	pthread_mutex_lock(&m->lock);
 	while (m->head && m->head->gen != m->gen) {
 		Node *stale = m->head;
@@ -1212,6 +1283,8 @@ media_seek(Media *m, int64_t target)
 	if (m->adec)
 		avcodec_flush_buffers(m->adec);
 	free_encoders(m);
+	av_frame_unref(m->pending);
+	m->have_pending = 0;
 	if (m->bsf)
 		av_bsf_flush(m->bsf);
 	m->copying = m->want_copy;

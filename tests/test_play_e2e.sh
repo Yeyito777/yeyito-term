@@ -97,13 +97,20 @@ for n in local slow drop eof term inline; do
 	check "$n: keyframe with SPS/PPS after open/flush" "v == 0" \
 	    "$(value $n key_violations)"
 done
+reply_rate() { # name: replies per second of the run
+	awk -F'[= ]' '/^reply_blocked=/ { r = $4 } /^child_exit=/ { t = $2 }
+	    END { if (t > 0) printf "%.0f", r / t }' "$scratch/$1.out"
+}
+
 clean_exit local
+check "local: no flood of replies (per s)" "v < 80" "$(reply_rate local)"
 check "local: startup to playing (s)" "v > 0 && v < 1.5" "$(value local startup_playing)"
 check "local: pause latency (s)" "v >= 0 && v < 0.3" "$(key_latency local space effect_latency)"
 check "local: seek to playing (s)" "v >= 0 && v < 1.0" "$(key_latency local right playing_latency)"
 check "local: no rebuffering" "v == 0" "$(value local rebuffers)"
 
 clean_exit slow
+check "slow: no flood of replies (per s)" "v < 40" "$(reply_rate slow)"
 check "slow: startup to playing (s)" "v > 0 && v < 1.5" "$(value slow startup_playing)"
 check "slow: pause latency (s)" "v >= 0 && v < 0.6" "$(key_latency slow space effect_latency)"
 check "slow: seek reaches terminal (s)" "v >= 0 && v < 0.6" "$(key_latency slow right effect_latency)"

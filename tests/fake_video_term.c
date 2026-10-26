@@ -25,6 +25,9 @@
  *                        graphics, which answers only DA1)
  *     --decode           decode packets with libavcodec and count errors
  *     --trace            print one line per second
+ * FAKE_TERM_DUMP=FILE saves the video packets received (u32 length, i64
+ * pts, data; host order); st-play's STPLAY_DUMP saves those it sent.
+ * FAKE_TERM_STDERR=FILE keeps the command's stderr.
  * Prints key=value results on stdout. */
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
@@ -131,6 +134,7 @@ static double first_playing = -1, first_open = -1;
 static unsigned long long wire_bytes, payload_bytes, video_bytes;
 static unsigned long long sec_wire, sec_video;
 static int rebuffers, decode_errors, key_violations, packets_after_end;
+static int reply_blocked;
 static int flushes, opens, destroys;
 static int alt_screen, cursor_hidden;
 static double last_rate_sample_t;
@@ -364,6 +368,16 @@ mock_packet(VideoPlayer *p, const VideoPacket *packet, const char **error)
 		p->clock_set = 1;
 	}
 	if (packet->stream == VIDEO_STREAM_VIDEO) {
+		static FILE *dump;
+		if (!dump && getenv("FAKE_TERM_DUMP"))
+			dump = fopen(getenv("FAKE_TERM_DUMP"), "wb");
+		if (dump) {
+			uint32_t len = (uint32_t)packet->length;
+			int64_t pts = packet->pts;
+			fwrite(&len, 4, 1, dump);
+			fwrite(&pts, 8, 1, dump);
+			fwrite(packet->data, 1, packet->length, dump);
+		}
 		video_bytes += packet->length;
 		sec_video += packet->length;
 		if (p->need_key) {
@@ -509,9 +523,12 @@ static size_t apc_len, apc_cap;
 static char csi[64];
 static size_t csi_len;
 
+static unsigned long replies;
+
 static void
 reply(const char *data, size_t length)
 {
+	replies++;
 	fifo_push(&up, now_s() + rtt_ms / 2000.0, data, length);
 }
 
@@ -859,17 +876,29 @@ main(int argc, char **argv)
 			sec_wire += c->length;
 			free(c);
 		}
-		/* Upstream: replies and keys. */
+		/* Upstream: replies and keys.  Like st, never drop them: what
+		 * the program hasn't read waits (and is counted). */
 		while (up.head && up.head->at <= now) {
 			ssize_t w;
-			c = fifo_pop(&up);
+			c = up.head;
 			if (exited) {
 				stray_after_exit += c->length;
-			} else {
-				w = write(master, c->data, c->length);
-				(void)w;
+				free(fifo_pop(&up));
+				continue;
 			}
-			free(c);
+			w = write(master, c->data, c->length);
+			if (w < 0) {
+				reply_blocked++;
+				break;
+			}
+			if ((size_t)w < c->length) {
+				memmove(c->data, c->data + w, c->length - (size_t)w);
+				c->length -= (size_t)w;
+				up.bytes -= (size_t)w;
+				reply_blocked++;
+				break;
+			}
+			free(fifo_pop(&up));
 		}
 		if (the_player)
 			player_update(the_player);
@@ -977,6 +1006,7 @@ main(int argc, char **argv)
 	printf("cursor_left_hidden=%d\n", cursor_hidden);
 	printf("parser_ground=%d\n", pstate == G_GROUND);
 	printf("stray_reply_bytes=%llu\n", stray_after_exit);
+	printf("reply_blocked=%d replies=%lu\n", reply_blocked, replies);
 	if (have_final_termios)
 		printf("termios_cooked=%d\n", (final_termios.c_lflag & ICANON) &&
 		    (final_termios.c_lflag & ECHO) ? 1 : 0);

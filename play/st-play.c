@@ -58,6 +58,7 @@ typedef struct {
 	InputParser in;
 	double esc_time;
 	OutQueue out;
+	int ping_queued;	/* a ping waits in the queue, unwritten */
 	Flow flow;
 	Adapt adapt;
 	int local;
@@ -112,6 +113,10 @@ static struct termios emergency_termios;
 static int emergency_have_termios;
 static char emergency_text[128];
 static size_t emergency_length;
+/* A packet APC is half written: ending it needs a byte that can't be
+ * base64 first, or the terminal would decode a truncated packet. */
+static const char apc_abort[] = "!\033\\";
+static volatile sig_atomic_t apc_open;
 
 static double
 now_s(void)
@@ -146,6 +151,10 @@ on_fatal(int sig)
 {
 	ssize_t r;
 	if (emergency_tty >= 0) {
+		if (apc_open) {
+			r = write(emergency_tty, apc_abort, sizeof(apc_abort) - 1);
+			(void)r;
+		}
 		r = write(emergency_tty, emergency_text, emergency_length);
 		(void)r;
 		if (emergency_have_termios)
@@ -329,8 +338,13 @@ queue_ping(App *a)
 {
 	char controls[48], text[32];
 	OutMsg *m;
-	uint32_t seq = flow_next_seq(&a->flow);
+	uint32_t seq;
 
+	/* One at a time: while the terminal isn't reading, a ping queued on
+	 * every loop would all go out (and be answered) at once. */
+	if (a->ping_queued)
+		return;
+	seq = flow_next_seq(&a->flow);
 	snprintf(controls, sizeof(controls), "a=v,i=%u,k=q", a->id);
 	snprintf(text, sizeof(text), "seq=%u", seq);
 	m = out_msg_new(OUT_PING, apc_length(strlen(controls), strlen(text),
@@ -341,6 +355,7 @@ queue_ping(App *a)
 	m->length = apc_build((char *)m->data, controls, NULL, 0,
 	    (const unsigned char *)text, strlen(text), OUT_CHUNK);
 	out_push(&a->out, m);
+	a->ping_queued = 1;
 }
 
 static void
@@ -364,6 +379,21 @@ emit_packet(void *context, int stream, int keyframe, int64_t pts,
 	m->pts = pts;
 	m->stream = stream;
 	out_push(&a->out, m);
+	{
+		/* Debugging: STPLAY_DUMP=FILE saves the video packets sent
+		 * (u32 length, i64 pts, data; host order), the same format as
+		 * fake_video_term's FAKE_TERM_DUMP of those received. */
+		static FILE *dump;
+		if (!dump && getenv("STPLAY_DUMP"))
+			dump = fopen(getenv("STPLAY_DUMP"), "wb");
+		if (dump && stream == 0) {
+			uint32_t len = (uint32_t)length;
+			fwrite(&len, 4, 1, dump);
+			fwrite(&pts, 8, 1, dump);
+			fwrite(data, 1, length, dump);
+			fflush(dump);
+		}
+	}
 	a->media_bytes += length;
 	if (stream == 0) {
 		if (a->sent_video == MEDIA_TIME_NONE || pts > a->sent_video)
@@ -385,7 +415,8 @@ pump_output(App *a, double now)
 
 		if (!m->offset) {
 			if (m->kind == OUT_MEDIA) {
-				if (flow_ping_due(&a->flow, now, 1)) {
+				if (!a->ping_queued &&
+				    flow_ping_due(&a->flow, now, 1)) {
 					queue_ping(a);
 					continue;
 				}
@@ -394,6 +425,7 @@ pump_output(App *a, double now)
 			} else if (m->kind == OUT_PING && !m->stream) {
 				flow_ping_written(&a->flow, m->seq, now);
 				m->stream = 1;
+				a->ping_queued = 0;
 			}
 		}
 		n = write(a->tty, m->data + m->offset, m->length - m->offset);
@@ -404,6 +436,7 @@ pump_output(App *a, double now)
 			return;
 		}
 		flow_wrote(&a->flow, (size_t)n);
+		apc_open = m->kind == OUT_MEDIA && m->offset + (size_t)n < m->length;
 		out_advance(&a->out, (size_t)n);
 	}
 }
@@ -1049,7 +1082,7 @@ shutdown_terminal(App *a)
 	/* Never leave the terminal inside a half-written APC. */
 	if (head && head->offset && head->offset < head->length) {
 		if (head->kind == OUT_MEDIA)
-			write_all(a, "\033\\", 2, deadline);
+			write_all(a, apc_abort, sizeof(apc_abort) - 1, deadline);
 		else
 			write_all(a, (char *)head->data + head->offset,
 			    head->length - head->offset, deadline);
@@ -1329,7 +1362,7 @@ main(int argc, char **argv)
 	fcntl(a->tty, F_SETFL, fcntl(a->tty, F_GETFL) | O_NONBLOCK);
 	emergency_tty = a->tty;
 	emergency_length = (size_t)snprintf(emergency_text, sizeof(emergency_text),
-	    "\033\\\033_Ga=d,d=I,i=%u,q=2\033\\%s\033[?25h", a->id,
+	    "\033_Ga=d,d=I,i=%u,q=2\033\\%s\033[?25h", a->id,
 	    "\033[?1049l");
 	input_init(&a->in);
 	get_winsize(a);
@@ -1417,7 +1450,7 @@ main(int argc, char **argv)
 		write_all(a, buf, (size_t)k, now + 2);
 		emergency_length = (size_t)snprintf(emergency_text,
 		    sizeof(emergency_text),
-		    "\033\\\033_Ga=d,d=I,i=%u,q=2\033\\\0338\033[J\033[?25h", a->id);
+		    "\033_Ga=d,d=I,i=%u,q=2\033\\\0338\033[J\033[?25h", a->id);
 	} else {
 		write_all(a, "\033[?1049h\033[?25l\033[H\033[2J", 21, now + 2);
 	}
