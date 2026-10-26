@@ -275,7 +275,7 @@ idle(VideoPlayer *p)
 	pthread_mutex_unlock(&p->ring.lock);
 	pthread_mutex_lock(&p->lock);
 	video = !p->has_video || (!__atomic_load_n(&p->vbusy, __ATOMIC_RELAXED) &&
-	    (p->nframes >= p->frame_cap ||
+	    ((p->vroom && vl_frames_full(p, p->vroom)) ||
 	    (!p->vq.head && (!p->eos || p->vdrained))));
 	audio = !p->has_audio || (!__atomic_load_n(&p->abusy, __ATOMIC_RELAXED) &&
 	    (ringfull || (!p->aq.head && (!p->eos || p->adrained))));
@@ -576,11 +576,10 @@ TEST(queues_are_bounded)
 	ASSERT(send_packets(p, &clip, VIDEO_STREAM_VIDEO, 0, 60));
 	/* Paused, nothing is consumed past the first frame: the decoder
 	 * stops at the decoded-frame cap. */
-	WAIT_FOR(decoded_count(p) == p->frame_cap);
+	WAIT_FOR(decoded_count(p) == VL_FRAMES_MAX);
 	for (i = 0; i < 100; i++)
 		nap();
-	ASSERT_EQ(p->frame_cap, decoded_count(p));
-	ASSERT(p->frame_cap <= VL_FRAMES_MAX);
+	ASSERT_EQ(VL_FRAMES_MAX, decoded_count(p));
 	/* The compressed queue refuses past VIDEO_QUEUE_MAX. */
 	junk = calloc(1, 1 << 20);
 	for (i = 0; i < 80; i++) {
@@ -824,6 +823,108 @@ TEST(late_audio_holds_video_on_the_host_clock)
 	stream_free(&audio);
 }
 
+TEST(decoded_queue_is_bounded_by_coded_bytes)
+{
+	/* Declared 1x1, coded 3840x2160: the queue holds what fits in its
+	 * bytes, not 16 frames sized for a pixel. */
+	VideoConfig config = config_for(1, 0, 1, 1, 100);
+	const char *error = NULL;
+	VideoPlayer *p;
+	Stream big = {0};
+	size_t bytes;
+	int n, full;
+
+	if (!have_x264)
+		return;
+	ASSERT(encode_video(3840, 2160, 0, 12, 12, 0, &big));
+	fake_now = 0;
+	config.paused = 1;
+	p = vl_backend.create(&config, &error);
+	ASSERT_NOT_NULL(p);
+	ASSERT(send_packets(p, &big, VIDEO_STREAM_VIDEO, 0, big.count));
+	WAIT_FOR(p->current != NULL);
+	SETTLE(p);
+	pthread_mutex_lock(&p->lock);
+	n = p->nframes;
+	full = p->vroom && vl_frames_full(p, p->vroom);
+	bytes = p->frames_bytes;
+	pthread_mutex_unlock(&p->lock);
+	ASSERT(full);
+	ASSERT(n >= VL_FRAMES_MIN && n < 8);
+	ASSERT(bytes <= VL_FRAMES_BYTES);
+	vl_backend.destroy(p);
+	stream_free(&big);
+}
+
+TEST(oversized_frames_are_refused)
+{
+	/* An SPS past 4096x4096 pixels (4224x4096) is refused instead of
+	 * allocating what it asks for, and reported. */
+	VideoConfig config = config_for(1, 0, 1, 1, 100);
+	const char *error = NULL;
+	VideoPlayer *p;
+	VideoStatus st;
+	Stream huge = {0};
+
+	if (!have_x264)
+		return;
+	ASSERT(encode_video(4224, 4096, 0, 2, 2, 0, &huge));
+	fake_now = 0;
+	p = vl_backend.create(&config, &error);
+	ASSERT_NOT_NULL(p);
+	ASSERT(send_packets(p, &huge, VIDEO_STREAM_VIDEO, 0, huge.count));
+	vl_backend.end(p);
+	SETTLE(p);
+	st = status_of(p);
+	ASSERT(p->current == NULL && decoded_count(p) == 0);
+	ASSERT(st.error && !strncmp(st.error, "E2BIG:", 6));
+	/* Decoder messages about untrusted input stay off st's stderr. */
+	ASSERT_EQ(AV_LOG_QUIET, av_log_get_level());
+	vl_backend.destroy(p);
+	stream_free(&huge);
+}
+
+TEST(fast_displays_do_not_spin)
+{
+	/* On a fast display (a period under ~4 ms) the wake for a frame must
+	 * come when it is selectable: waking before then picks nothing and
+	 * polls until it is (61 such wakes a second here before the fix). */
+	VideoConfig config = config_for(1, 0, 64, 48, 100);
+	const char *error = NULL;
+	VideoPlayer *p;
+	int64_t t0;
+	int i, last, idle_wakes = 0, changes = 0;
+
+	if (!have_x264)
+		return;
+	fake_now = 9000000;
+	p = vl_backend.create(&config, &error);
+	ASSERT_NOT_NULL(p);
+	ASSERT(send_packets(p, &clip, VIDEO_STREAM_VIDEO, 0, 60));
+	WAIT_FOR(status_of(p).state == VIDEO_STATE_PLAYING &&
+	    decoded_count(p) >= 8);
+	t0 = fake_now;
+	video_linux_set_vblank(3000, t0 + 1000);	/* 333 Hz */
+	last = current_index(p, 60);
+	for (i = 0; i < 1000 && fake_now < t0 + 1000000; i++) {
+		double wait = video_linux_tick(NULL);
+		int index = current_index(p, 60);
+		if (index != last)
+			changes++;
+		else
+			idle_wakes++;
+		last = index;
+		ASSERT(wait >= 0);
+		fake_now += (int64_t)(wait * 1000);
+		SETTLE(p);
+	}
+	video_linux_set_vblank(0, VIDEO_TIME_NONE);
+	/* A second of 30 fps: about 30 picks, each wake picks one. */
+	ASSERT(changes >= 25);
+	ASSERT(idle_wakes <= 3);
+	vl_backend.destroy(p);
+}
+
 TEST(packets_for_missing_streams_are_refused)
 {
 	VideoConfig config = config_for(0, 1, 1, 1, 100);
@@ -858,6 +959,9 @@ TEST_SUITE(video_linux)
 	RUN_TEST(frames_are_picked_for_the_next_vblank);
 	RUN_TEST(audio_clock_steps_are_slewed);
 	RUN_TEST(late_audio_holds_video_on_the_host_clock);
+	RUN_TEST(decoded_queue_is_bounded_by_coded_bytes);
+	RUN_TEST(oversized_frames_are_refused);
+	RUN_TEST(fast_displays_do_not_spin);
 	RUN_TEST(packets_for_missing_streams_are_refused);
 	stream_free(&clip);
 }
