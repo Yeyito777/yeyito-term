@@ -50,6 +50,19 @@ typedef struct {
 @implementation STGlyph
 @end
 
+/* What CoreText lays out for one rune in one style, kept so a frame draws a
+ * cell with a hash lookup instead of building an attributed string and a
+ * CTLine.  The glyphs belong to r.glyphs; both are cleared together. */
+#define RUNE_GLYPHS 4
+#define RUNE_UNCACHED 0xff	/* more glyphs than fit: laid out every time */
+
+typedef struct {
+	uint32_t key;	/* rune | style << 21; 0 is an empty slot */
+	uint8_t count;
+	__unsafe_unretained STGlyph *glyph[RUNE_GLYPHS];
+	float x[RUNE_GLYPHS], y[RUNE_GLYPHS];
+} RuneGlyphs;
+
 typedef struct {
 	__unsafe_unretained MTKView *view;
 	__strong id<MTLDevice> device;
@@ -85,6 +98,8 @@ typedef struct {
 	/* CoreFoundation objects to release when this frame completes. */
 	const void **releases;
 	size_t releaseCount, releaseCapacity;
+	RuneGlyphs *runes;
+	size_t runeCapacity, runeCount;
 	void *(*offscreenAcquire)(void);
 	void (*offscreenDone)(void *);
 	__strong id<MTLTexture> offscreen;
@@ -222,6 +237,52 @@ fontFamily(const char *description)
 }
 
 static void
+runesClear(void)
+{
+	free(r.runes);
+	r.runes = NULL;
+	r.runeCapacity = r.runeCount = 0;
+}
+
+static size_t
+runeSlot(const RuneGlyphs *table, size_t capacity, uint32_t key)
+{
+	size_t i = (key * 0x9e3779b1u) & (capacity - 1);
+	while (table[i].key && table[i].key != key)
+		i = (i + 1) & (capacity - 1);
+	return i;
+}
+
+/* The cache entry for key, or a new empty one (key set, count 0) to fill. */
+static RuneGlyphs *
+runeEntry(uint32_t key, int *fresh)
+{
+	size_t i;
+
+	if (2 * (r.runeCount + 1) > r.runeCapacity) {
+		size_t capacity = r.runeCapacity ? 2 * r.runeCapacity : 1024;
+		RuneGlyphs *table = calloc(capacity, sizeof(*table));
+		if (!table)
+			return NULL;
+		for (size_t j = 0; j < r.runeCapacity; j++)
+			if (r.runes[j].key)
+				table[runeSlot(table, capacity, r.runes[j].key)] =
+				    r.runes[j];
+		free(r.runes);
+		r.runes = table;
+		r.runeCapacity = capacity;
+	}
+	i = runeSlot(r.runes, r.runeCapacity, key);
+	*fresh = !r.runes[i].key;
+	if (*fresh) {
+		r.runes[i].key = key;
+		r.runes[i].count = 0;
+		r.runeCount++;
+	}
+	return &r.runes[i];
+}
+
+static void
 releaseFonts(void)
 {
 	for (int i = 0; i < 4; i++) {
@@ -276,6 +337,7 @@ loadFonts(void)
 	r.cellHeight = MAX(1.0, r.ascent + r.descent + r.leading);
 
 	[r.glyphs removeAllObjects];
+	runesClear();
 	r.atlasX = r.atlasY = 1;
 	r.atlasRowHeight = 0;
 }
@@ -412,11 +474,10 @@ glyphEntry(CTFontRef font, CGGlyph glyph)
 }
 
 static void
-drawGlyph(enum MacRenderLayer layer, CTFontRef font, CGGlyph glyph,
+drawGlyphEntry(enum MacRenderLayer layer, STGlyph *entry,
 		double xPixels, double topPixels, double baselinePixels,
 		double maxWidthPixels, double maxHeightPixels, MacColor color)
 {
-	STGlyph *entry = glyphEntry(font, glyph);
 	if (!entry || entry.width <= 0 || entry.height <= 0)
 		return;
 	double x = xPixels + entry.left;
@@ -434,6 +495,15 @@ drawGlyph(enum MacRenderLayer layer, CTFontRef font, CGGlyph glyph,
 	}
 	quad(layer, x, y, width, height, entry.u0, entry.v0,
 	    entry.u1, entry.v1, color, entry.colorGlyph ? 2.0f : 1.0f);
+}
+
+static void
+drawGlyph(enum MacRenderLayer layer, CTFontRef font, CGGlyph glyph,
+		double xPixels, double topPixels, double baselinePixels,
+		double maxWidthPixels, double maxHeightPixels, MacColor color)
+{
+	drawGlyphEntry(layer, glyphEntry(font, glyph), xPixels, topPixels,
+	    baselinePixels, maxWidthPixels, maxHeightPixels, color);
 }
 
 int
@@ -506,6 +576,7 @@ mac_renderer_destroy(void)
 		r.imageLayers[i].count = r.imageLayers[i].capacity = 0;
 	}
 	r.glyphs = nil;
+	runesClear();
 	r.images = nil;
 	r.atlas = nil;
 	r.pipeline = nil;
@@ -597,13 +668,13 @@ mac_renderer_rect(enum MacRenderLayer layer, double x, double y,
 	    0, 0, 0, 0, color, 0);
 }
 
-void
-mac_renderer_rune(enum MacRenderLayer layer, uint32_t rune,
-		unsigned int style, double x, double top, double baseline,
-		double maxWidth, double maxHeight, MacColor color)
+/* Lay out rune with CoreText; with `cache`, keep its glyphs there instead
+ * of drawing them (RUNE_UNCACHED if there are too many). */
+static void
+layoutRune(enum MacRenderLayer layer, uint32_t rune, unsigned int style,
+		double x, double top, double baseline, double maxWidth,
+		double maxHeight, MacColor color, RuneGlyphs *cache)
 {
-	if (!rune || !r.fonts[0])
-		return;
 	uint8_t bytes[8] = {0};
 	int len;
 	if (rune < 0x80) {
@@ -642,15 +713,52 @@ mac_renderer_rune(enum MacRenderLayer layer, uint32_t rune,
 		CGPoint *positions = calloc((size_t)count, sizeof(*positions));
 		CTRunGetGlyphs(run, CFRangeMake(0, count), glyphs);
 		CTRunGetPositions(run, CFRangeMake(0, count), positions);
-		for (CFIndex j = 0; j < count; j++)
-			drawGlyph(layer, font, glyphs[j],
-			    x * r.scale + positions[j].x, top * r.scale,
-			    baseline * r.scale - positions[j].y,
-			    maxWidth * r.scale, maxHeight * r.scale, color);
+		for (CFIndex j = 0; j < count; j++) {
+			if (!cache) {
+				drawGlyph(layer, font, glyphs[j],
+				    x * r.scale + positions[j].x, top * r.scale,
+				    baseline * r.scale - positions[j].y,
+				    maxWidth * r.scale, maxHeight * r.scale, color);
+			} else if (cache->count < RUNE_GLYPHS) {
+				cache->glyph[cache->count] = glyphEntry(font, glyphs[j]);
+				cache->x[cache->count] = (float)positions[j].x;
+				cache->y[cache->count] = (float)positions[j].y;
+				cache->count++;
+			} else {
+				cache->count = RUNE_UNCACHED;
+			}
+		}
 		free(glyphs);
 		free(positions);
 	}
 	CFRelease(line);
+}
+
+void
+mac_renderer_rune(enum MacRenderLayer layer, uint32_t rune,
+		unsigned int style, double x, double top, double baseline,
+		double maxWidth, double maxHeight, MacColor color)
+{
+	RuneGlyphs *cached;
+	int fresh = 0;
+
+	if (!rune || !r.fonts[0])
+		return;
+	cached = rune <= 0x1fffff && style < 0x400 ?
+	    runeEntry(rune | (uint32_t)style << 21, &fresh) : NULL;
+	if (cached && fresh)
+		layoutRune(layer, rune, style, x, top, baseline, maxWidth,
+		    maxHeight, color, cached);
+	if (!cached || cached->count == RUNE_UNCACHED) {
+		layoutRune(layer, rune, style, x, top, baseline, maxWidth,
+		    maxHeight, color, NULL);
+		return;
+	}
+	for (int i = 0; i < cached->count; i++)
+		drawGlyphEntry(layer, cached->glyph[i],
+		    x * r.scale + cached->x[i], top * r.scale,
+		    baseline * r.scale - cached->y[i],
+		    maxWidth * r.scale, maxHeight * r.scale, color);
 }
 
 void
