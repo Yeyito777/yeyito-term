@@ -51,6 +51,7 @@ parseKey(const char *spec)
 		{"up", "\033[A"}, {"down", "\033[B"}, {"esc", "\033"},
 		{"enter", "\r"}, {"ctrl-d", "\004"}, {"ctrl-u", "\025"},
 		{"ctrl-e", "\005"}, {"ctrl-y", "\031"}, {"ctrl-n", "\016"},
+		{"ctrl-j", "\n"}, {"ctrl-k", "\013"},
 		{"mark", "\302\244"},
 	};
 	const char *colon = strchr(spec, ':');
