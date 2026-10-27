@@ -18,6 +18,7 @@
 #include <limits.h>
 #include <locale.h>
 #include <math.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -2415,30 +2416,157 @@ setupManagedWindowRevealSource(void)
 	dispatch_resume(revealSource);
 }
 
+/* PTY output.  A macOS PTY holds about 1 KiB, so a child writing more
+ * waits until someone reads: read on the main queue, it waited out every
+ * frame drawn and every key handled, and a stream (video, images) slowed
+ * to a crawl while the terminal was busy.  A read source on its own queue
+ * keeps the PTY drained into a ring; the main queue parses from the ring
+ * in batches and asks for one redraw per batch.  A full ring stops the
+ * reading, so a child that outpaces st still waits rather than using
+ * unbounded memory. */
+#define TTY_RING_SIZE (4U << 20)
+#define TTY_PARSE_CHUNK (64U << 10)
+#define TTY_PARSE_BUDGET 0.008	/* seconds of parsing before yielding */
+
+static struct {
+	pthread_mutex_t lock;
+	char *data;
+	size_t head, length;	/* bytes [head, head + length) mod size */
+	int parseQueued, suspended, closed;
+	dispatch_queue_t queue;
+} ttyRing = {PTHREAD_MUTEX_INITIALIZER};
+
+static void ttyParseRing(void *);
+
+/* On ttyRing.queue: drain the PTY until it is empty or the ring is full. */
+static void
+ttyReadable(void)
+{
+	for (;;) {
+		size_t tail, room;
+		ssize_t n;
+		int queue = 0;
+
+		pthread_mutex_lock(&ttyRing.lock);
+		room = TTY_RING_SIZE - ttyRing.length;
+		if (!room) {
+			if (!ttyRing.suspended) {
+				dispatch_suspend(ttySource);
+				ttyRing.suspended = 1;
+			}
+			pthread_mutex_unlock(&ttyRing.lock);
+			return;
+		}
+		tail = (ttyRing.head + ttyRing.length) % TTY_RING_SIZE;
+		room = MIN(room, TTY_RING_SIZE - tail);
+		pthread_mutex_unlock(&ttyRing.lock);
+
+		/* Only the reader writes past the tail; the main queue only reads
+		 * before it. */
+		n = read(ttyfd, ttyRing.data + tail, room);
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+			return;
+		pthread_mutex_lock(&ttyRing.lock);
+		if (n > 0) {
+			ttyRing.length += (size_t)n;
+		} else {
+			/* End of file or an error: once the ring is parsed, the
+			 * main queue's ttyread() sees it and handles the exit. */
+			ttyRing.closed = 1;
+			if (!ttyRing.suspended) {
+				dispatch_suspend(ttySource);
+				ttyRing.suspended = 1;
+			}
+		}
+		if (!ttyRing.parseQueued)
+			queue = ttyRing.parseQueued = 1;
+		pthread_mutex_unlock(&ttyRing.lock);
+		if (queue)
+			dispatch_async_f(dispatch_get_main_queue(), NULL, ttyParseRing);
+		if (n <= 0)
+			return;
+	}
+}
+
+/* On the main queue: parse what the reader queued, for a few milliseconds
+ * at most so input and frames are not held up behind a long stream. */
+static void
+ttyParseRing(void *context)
+{
+	double begin = CACurrentMediaTime();
+	size_t total = 0;
+	int closed = 0, more = 0;
+
+	(void)context;
+	for (;;) {
+		size_t take;
+
+		pthread_mutex_lock(&ttyRing.lock);
+		take = MIN(MIN(ttyRing.length, TTY_RING_SIZE - ttyRing.head),
+		    TTY_PARSE_CHUNK);
+		if (!take) {
+			closed = ttyRing.closed;
+			ttyRing.parseQueued = 0;
+			pthread_mutex_unlock(&ttyRing.lock);
+			break;
+		}
+		pthread_mutex_unlock(&ttyRing.lock);
+		ttyparse(ttyRing.data + ttyRing.head, take);
+		total += take;
+		pthread_mutex_lock(&ttyRing.lock);
+		ttyRing.head = (ttyRing.head + take) % TTY_RING_SIZE;
+		ttyRing.length -= take;
+		if (ttyRing.suspended && !ttyRing.closed) {
+			ttyRing.suspended = 0;
+			dispatch_resume(ttySource);
+		}
+		pthread_mutex_unlock(&ttyRing.lock);
+		if (CACurrentMediaTime() - begin >= TTY_PARSE_BUDGET) {
+			more = 1;	/* parseQueued stays set: this is the queued parse */
+			break;
+		}
+	}
+	if (more)
+		dispatch_async_f(dispatch_get_main_queue(), NULL, ttyParseRing);
+	if (total && launchStats.active && !launchStats.output)
+		launchStats.output = CACurrentMediaTime();
+	ttyStats.bytes += total;
+	ttyStats.events++;
+	ttyStats.seconds += CACurrentMediaTime() - begin;
+	if (total)
+		macos_request_redraw();
+	if (closed) {
+		/* The child closed the PTY (or reading failed): ttyread() reaps
+		 * the child and exits.  Should the child still be running, look
+		 * again shortly, as a readable descriptor at end of file would. */
+		while (ttyread() > 0)
+			macos_request_redraw();
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_MSEC),
+		    ttyRing.queue, ^{
+			pthread_mutex_lock(&ttyRing.lock);
+			ttyRing.closed = 0;
+			if (ttyRing.suspended) {
+				ttyRing.suspended = 0;
+				dispatch_resume(ttySource);
+			}
+			pthread_mutex_unlock(&ttyRing.lock);
+		});
+	}
+}
+
 static void
 setupTTYSource(void)
 {
+	if (!ttyRing.data && !(ttyRing.data = malloc(TTY_RING_SIZE)))
+		die("st: can't allocate the PTY buffer\n");
+	ttyRing.queue = dispatch_queue_create("io.yeyito.st.pty-reader",
+	    dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL,
+	    QOS_CLASS_USER_INTERACTIVE, 0));
 	ttySource = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, ttyfd, 0,
-	    dispatch_get_main_queue());
-	dispatch_source_set_event_handler(ttySource, ^{
-		/* A macOS PTY hands over at most 1 KiB per read.  Drain what is
-		 * there, for a few milliseconds at most, in one event so that bulk
-		 * output (raw video frames, big files) isn't paced by main-queue
-		 * round trips; the descriptor is nonblocking. */
-		double begin = CACurrentMediaTime(), deadline = begin + 0.004;
-		size_t total = 0, n;
-		while ((n = ttyread()) > 0) {
-			total += n;
-			if (CACurrentMediaTime() >= deadline)
-				break;
-		}
-		if (total && launchStats.active && !launchStats.output)
-			launchStats.output = CACurrentMediaTime();
-		ttyStats.bytes += total;
-		ttyStats.events++;
-		ttyStats.seconds += CACurrentMediaTime() - begin;
-		macos_request_redraw();
-	});
+	    ttyRing.queue);
+	dispatch_source_set_event_handler(ttySource, ^{ ttyReadable(); });
 	dispatch_resume(ttySource);
 }
 

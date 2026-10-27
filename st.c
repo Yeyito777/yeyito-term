@@ -1099,15 +1099,45 @@ ttynew(const char *line, char *cmd, const char *out, char **args)
 	return cmdfd;
 }
 
+/* Child output not parsed yet: an incomplete UTF-8 sequence at the end of
+ * what was read waits here for the rest. */
+static char ttybuf[262144];
+static int ttybuflen;
+
+static void
+ttyparsebuf(void)
+{
+	int written = twrite(ttybuf, ttybuflen, 0);
+
+	ttybuflen -= written;
+	/* keep any incomplete UTF-8 byte sequence for the next call */
+	if (ttybuflen > 0)
+		memmove(ttybuf, ttybuf + written, ttybuflen);
+}
+
+/* Parse child output that a backend read itself (macOS reads the PTY on
+ * its own queue). */
+void
+ttyparse(const char *data, size_t n)
+{
+	while (n > 0) {
+		size_t chunk = MIN(n, LEN(ttybuf) - (size_t)ttybuflen);
+		memcpy(ttybuf + ttybuflen, data, chunk);
+		ttybuflen += chunk;
+		data += chunk;
+		n -= chunk;
+		ttyparsebuf();
+	}
+}
+
 size_t
 ttyread(void)
 {
-	static char buf[262144];
-	static int buflen = 0;
-	int ret, written;
+	char *buf = ttybuf;
+	int ret;
 
 	/* append read bytes to unprocessed bytes */
-	ret = read(cmdfd, buf+buflen, LEN(buf)-buflen);
+	ret = read(cmdfd, buf+ttybuflen, LEN(ttybuf)-ttybuflen);
 
 	switch (ret) {
 	case 0:
@@ -1126,12 +1156,8 @@ ttyread(void)
 		}
 		die("couldn't read from shell: %s\n", strerror(errno));
 	default:
-		buflen += ret;
-		written = twrite(buf, buflen, 0);
-		buflen -= written;
-		/* keep any incomplete UTF-8 byte sequence for the next call */
-		if (buflen > 0)
-			memmove(buf, buf + written, buflen);
+		ttybuflen += ret;
+		ttyparsebuf();
 		return ret;
 	}
 }
