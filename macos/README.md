@@ -21,7 +21,10 @@ not use XQuartz or link against X11.
   two-column terminal layout.
 - `pty.m` and `pty.h` provide ordered, nonblocking PTY output. AppKit input
   handlers enqueue bytes here so a child that stops reading cannot freeze the
-  window.
+  window. PTY *input* (the child's output) is read in `backend.m` on its own
+  dispatch queue into a 4 MiB ring and parsed on the main queue in batches
+  (at most 8 ms at a time): a macOS PTY holds only about 1 KiB, so reading it
+  on the main queue made every frame and key handled stall the child.
 - `spare.c` and `spare.h` implement the warm spare's spawn-request parsing
   (and building) and single-slot protocol used by `st-aerospace-launch` (see
   `reference/warm-spare.md`).
@@ -42,3 +45,36 @@ not use XQuartz or link against X11.
 `config.mk` defines `ST_NATIVE_MACOS` on Darwin, and the top-level `Makefile`
 selects these Objective-C sources instead of `x.c`, `sshind.c`, and `notif.c`.
 Linux continues to build the original X11/OpenGL backend.
+
+## Frames and the frame timing log
+
+Redraw requests (output, video frames, input) are coalesced to at most one
+frame per display refresh; a glide or snap runs MTKView's display link at
+the screen's refresh rate. The renderer lays out each rune with CoreText
+once and keeps its glyphs, and puts a frame's vertices in one pooled buffer.
+
+`ST_FRAME_LOG=FILE` logs every frame from launch. A running st logs while
+`$TMPDIR/st-frames.log` exists (it looks once a second while drawing), so a
+window already in use can be measured, and every st appends to that file
+with its pid:
+
+```sh
+touch "$TMPDIR/st-frames.log"      # in any shell of the same user
+# ... use st (scroll, type, play video) for a while ...
+cp "$TMPDIR/st-frames.log" ~/st-frames.log && rm "$TMPDIR/st-frames.log"
+scripts/st-frame-stats ~/st-frames.log      # per-process summary
+```
+
+Each line is `pid start since draw wait shown main tty_bytes parse flags`,
+times in milliseconds: `start` is `CACurrentMediaTime()` when the frame
+began, `since` the time from the previous frame's start, `draw` the main
+thread's drawing time without `wait`, the time blocked for a drawable,
+`shown` the time from start until the frame was on screen (-1 if it never
+was), `main` the main thread's CPU time since the previous frame began,
+`tty_bytes` and `parse` the PTY output parsed in between and the time that
+took. `flags`: `g` the display link drew it (a glide), `v` a video frame
+changed, `t` output arrived, `k` a key was pressed. A process stops logging
+after 200,000 lines until the file is recreated.
+
+`tests/macos_headless -A` measures the same things without a window (see
+the comment at the top of `tests/macos_headless.m`).

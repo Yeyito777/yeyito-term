@@ -2,9 +2,11 @@
 #import <CoreText/CoreText.h>
 #import <Metal/Metal.h>
 #import <MetalKit/MetalKit.h>
+#import <QuartzCore/QuartzCore.h>
 #import <simd/simd.h>
 
 #include <math.h>
+#include <os/lock.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -50,6 +52,19 @@ typedef struct {
 @implementation STGlyph
 @end
 
+/* What CoreText lays out for one rune in one style, kept so a frame draws a
+ * cell with a hash lookup instead of building an attributed string and a
+ * CTLine.  The glyphs belong to r.glyphs; both are cleared together. */
+#define RUNE_GLYPHS 4
+#define RUNE_UNCACHED 0xff	/* more glyphs than fit: laid out every time */
+
+typedef struct {
+	uint32_t key;	/* rune | style << 21; 0 is an empty slot */
+	uint8_t count;
+	__unsafe_unretained STGlyph *glyph[RUNE_GLYPHS];
+	float x[RUNE_GLYPHS], y[RUNE_GLYPHS];
+} RuneGlyphs;
+
 typedef struct {
 	__unsafe_unretained MTKView *view;
 	__strong id<MTLDevice> device;
@@ -82,9 +97,22 @@ typedef struct {
 	__strong id<MTLCommandBuffer> command;
 	unsigned long frames;
 	void (*presentCallback)(double);
+	void (*presentHook)(unsigned long, double);
+	double drawableWait;
 	/* CoreFoundation objects to release when this frame completes. */
 	const void **releases;
 	size_t releaseCount, releaseCapacity;
+	RuneGlyphs *runes;
+	size_t runeCapacity, runeCount;
+	/* This frame's vertices, every layer in one buffer, and buffers whose
+	 * frames the GPU has finished, to reuse. */
+	__strong id<MTLBuffer> frameVertices;
+	size_t layerOffset[MAC_LAYER_COUNT];
+	__strong NSMutableArray<id<MTLBuffer>> *vertexPool;
+	os_unfair_lock vertexPoolLock;
+	void *(*offscreenAcquire)(void);
+	void (*offscreenDone)(void *);
+	__strong id<MTLTexture> offscreen;
 } MacRenderer;
 
 static MacRenderer r;
@@ -219,6 +247,52 @@ fontFamily(const char *description)
 }
 
 static void
+runesClear(void)
+{
+	free(r.runes);
+	r.runes = NULL;
+	r.runeCapacity = r.runeCount = 0;
+}
+
+static size_t
+runeSlot(const RuneGlyphs *table, size_t capacity, uint32_t key)
+{
+	size_t i = (key * 0x9e3779b1u) & (capacity - 1);
+	while (table[i].key && table[i].key != key)
+		i = (i + 1) & (capacity - 1);
+	return i;
+}
+
+/* The cache entry for key, or a new empty one (key set, count 0) to fill. */
+static RuneGlyphs *
+runeEntry(uint32_t key, int *fresh)
+{
+	size_t i;
+
+	if (2 * (r.runeCount + 1) > r.runeCapacity) {
+		size_t capacity = r.runeCapacity ? 2 * r.runeCapacity : 1024;
+		RuneGlyphs *table = calloc(capacity, sizeof(*table));
+		if (!table)
+			return NULL;
+		for (size_t j = 0; j < r.runeCapacity; j++)
+			if (r.runes[j].key)
+				table[runeSlot(table, capacity, r.runes[j].key)] =
+				    r.runes[j];
+		free(r.runes);
+		r.runes = table;
+		r.runeCapacity = capacity;
+	}
+	i = runeSlot(r.runes, r.runeCapacity, key);
+	*fresh = !r.runes[i].key;
+	if (*fresh) {
+		r.runes[i].key = key;
+		r.runes[i].count = 0;
+		r.runeCount++;
+	}
+	return &r.runes[i];
+}
+
+static void
 releaseFonts(void)
 {
 	for (int i = 0; i < 4; i++) {
@@ -273,6 +347,7 @@ loadFonts(void)
 	r.cellHeight = MAX(1.0, r.ascent + r.descent + r.leading);
 
 	[r.glyphs removeAllObjects];
+	runesClear();
 	r.atlasX = r.atlasY = 1;
 	r.atlasRowHeight = 0;
 }
@@ -409,11 +484,10 @@ glyphEntry(CTFontRef font, CGGlyph glyph)
 }
 
 static void
-drawGlyph(enum MacRenderLayer layer, CTFontRef font, CGGlyph glyph,
+drawGlyphEntry(enum MacRenderLayer layer, STGlyph *entry,
 		double xPixels, double topPixels, double baselinePixels,
 		double maxWidthPixels, double maxHeightPixels, MacColor color)
 {
-	STGlyph *entry = glyphEntry(font, glyph);
 	if (!entry || entry.width <= 0 || entry.height <= 0)
 		return;
 	double x = xPixels + entry.left;
@@ -433,6 +507,15 @@ drawGlyph(enum MacRenderLayer layer, CTFontRef font, CGGlyph glyph,
 	    entry.u1, entry.v1, color, entry.colorGlyph ? 2.0f : 1.0f);
 }
 
+static void
+drawGlyph(enum MacRenderLayer layer, CTFontRef font, CGGlyph glyph,
+		double xPixels, double topPixels, double baselinePixels,
+		double maxWidthPixels, double maxHeightPixels, MacColor color)
+{
+	drawGlyphEntry(layer, glyphEntry(font, glyph), xPixels, topPixels,
+	    baselinePixels, maxWidthPixels, maxHeightPixels, color);
+}
+
 int
 mac_renderer_init(void *viewPtr, const char *fontName, double fontSize)
 {
@@ -444,6 +527,7 @@ mac_renderer_init(void *viewPtr, const char *fontName, double fontSize)
 	r.queue = [r.device newCommandQueue];
 	r.glyphs = [NSMutableDictionary dictionary];
 	r.images = [NSMutableDictionary dictionary];
+	r.vertexPool = [NSMutableArray array];
 	r.scale = 1.0;
 	r.pointSize = fontSize > 0 ? fontSize : 14.0;
 	strlcpy(r.family, fontName ?: "Menlo", sizeof(r.family));
@@ -503,7 +587,12 @@ mac_renderer_destroy(void)
 		r.imageLayers[i].count = r.imageLayers[i].capacity = 0;
 	}
 	r.glyphs = nil;
+	runesClear();
 	r.images = nil;
+	os_unfair_lock_lock(&r.vertexPoolLock);
+	r.vertexPool = nil;
+	os_unfair_lock_unlock(&r.vertexPoolLock);
+	r.frameVertices = nil;
 	r.atlas = nil;
 	r.pipeline = nil;
 	r.queue = nil;
@@ -562,9 +651,21 @@ mac_renderer_begin(MacColor clearColor)
 		listreset(&r.layers[i]);
 	for (int i = 0; i < 3; i++)
 		r.imageLayers[i].count = 0;
-	r.pass = r.view.currentRenderPassDescriptor;
-	r.drawable = r.view.currentDrawable;
-	if (!r.pass || !r.drawable)
+	double begin = CACurrentMediaTime();
+	if (r.offscreenAcquire) {
+		r.offscreen = (__bridge id<MTLTexture>)r.offscreenAcquire();
+		r.drawableWait = CACurrentMediaTime() - begin;
+		if (!r.offscreen)
+			return 0;
+		r.pass = [MTLRenderPassDescriptor new];
+		r.pass.colorAttachments[0].texture = r.offscreen;
+	} else {
+		/* Either may block until a drawable is free. */
+		r.pass = r.view.currentRenderPassDescriptor;
+		r.drawable = r.view.currentDrawable;
+		r.drawableWait = CACurrentMediaTime() - begin;
+	}
+	if (!r.pass || (!r.drawable && !r.offscreen))
 		return 0;
 	r.pass.colorAttachments[0].loadAction = MTLLoadActionClear;
 	r.pass.colorAttachments[0].storeAction = MTLStoreActionStore;
@@ -586,13 +687,13 @@ mac_renderer_rect(enum MacRenderLayer layer, double x, double y,
 	    0, 0, 0, 0, color, 0);
 }
 
-void
-mac_renderer_rune(enum MacRenderLayer layer, uint32_t rune,
-		unsigned int style, double x, double top, double baseline,
-		double maxWidth, double maxHeight, MacColor color)
+/* Lay out rune with CoreText; with `cache`, keep its glyphs there instead
+ * of drawing them (RUNE_UNCACHED if there are too many). */
+static void
+layoutRune(enum MacRenderLayer layer, uint32_t rune, unsigned int style,
+		double x, double top, double baseline, double maxWidth,
+		double maxHeight, MacColor color, RuneGlyphs *cache)
 {
-	if (!rune || !r.fonts[0])
-		return;
 	uint8_t bytes[8] = {0};
 	int len;
 	if (rune < 0x80) {
@@ -631,15 +732,52 @@ mac_renderer_rune(enum MacRenderLayer layer, uint32_t rune,
 		CGPoint *positions = calloc((size_t)count, sizeof(*positions));
 		CTRunGetGlyphs(run, CFRangeMake(0, count), glyphs);
 		CTRunGetPositions(run, CFRangeMake(0, count), positions);
-		for (CFIndex j = 0; j < count; j++)
-			drawGlyph(layer, font, glyphs[j],
-			    x * r.scale + positions[j].x, top * r.scale,
-			    baseline * r.scale - positions[j].y,
-			    maxWidth * r.scale, maxHeight * r.scale, color);
+		for (CFIndex j = 0; j < count; j++) {
+			if (!cache) {
+				drawGlyph(layer, font, glyphs[j],
+				    x * r.scale + positions[j].x, top * r.scale,
+				    baseline * r.scale - positions[j].y,
+				    maxWidth * r.scale, maxHeight * r.scale, color);
+			} else if (cache->count < RUNE_GLYPHS) {
+				cache->glyph[cache->count] = glyphEntry(font, glyphs[j]);
+				cache->x[cache->count] = (float)positions[j].x;
+				cache->y[cache->count] = (float)positions[j].y;
+				cache->count++;
+			} else {
+				cache->count = RUNE_UNCACHED;
+			}
+		}
 		free(glyphs);
 		free(positions);
 	}
 	CFRelease(line);
+}
+
+void
+mac_renderer_rune(enum MacRenderLayer layer, uint32_t rune,
+		unsigned int style, double x, double top, double baseline,
+		double maxWidth, double maxHeight, MacColor color)
+{
+	RuneGlyphs *cached;
+	int fresh = 0;
+
+	if (!rune || !r.fonts[0])
+		return;
+	cached = rune <= 0x1fffff && style < 0x400 ?
+	    runeEntry(rune | (uint32_t)style << 21, &fresh) : NULL;
+	if (cached && fresh)
+		layoutRune(layer, rune, style, x, top, baseline, maxWidth,
+		    maxHeight, color, cached);
+	if (!cached || cached->count == RUNE_UNCACHED) {
+		layoutRune(layer, rune, style, x, top, baseline, maxWidth,
+		    maxHeight, color, NULL);
+		return;
+	}
+	for (int i = 0; i < cached->count; i++)
+		drawGlyphEntry(layer, cached->glyph[i],
+		    x * r.scale + cached->x[i], top * r.scale,
+		    baseline * r.scale - cached->y[i],
+		    maxWidth * r.scale, maxHeight * r.scale, color);
 }
 
 void
@@ -803,19 +941,84 @@ mac_renderer_set_image_clip(double x, double y, double width, double height)
 	r.imageClipHeight = height;
 }
 
+/* A frame's vertices go into one buffer that is reused once the GPU has
+ * finished with it.  A new buffer per layer, and per image for the cells
+ * drawn over it, cost an allocation and fresh zeroed pages on every frame. */
+#define VERTEX_POOL_MAX 4
+
+static id<MTLBuffer>
+takeVertexBuffer(NSUInteger length)
+{
+	id<MTLBuffer> found = nil;
+
+	os_unfair_lock_lock(&r.vertexPoolLock);
+	for (NSUInteger i = r.vertexPool.count; i-- > 0;) {
+		if (r.vertexPool[i].length >= length) {
+			found = r.vertexPool[i];
+			[r.vertexPool removeObjectAtIndex:i];
+			break;
+		}
+	}
+	os_unfair_lock_unlock(&r.vertexPoolLock);
+	if (!found)
+		found = [r.device newBufferWithLength:MAX(length + length / 2,
+		    (NSUInteger)(256 << 10)) options:MTLResourceStorageModeShared |
+		    MTLResourceCPUCacheModeWriteCombined];
+	return found;
+}
+
+/* Runs on a Metal thread once the frame that used `buffer` completed. */
 static void
-encodeLayer(id<MTLRenderCommandEncoder> encoder, MacVertexList *list,
+returnVertexBuffer(id<MTLBuffer> buffer)
+{
+	os_unfair_lock_lock(&r.vertexPoolLock);
+	if (r.vertexPool) {
+		if (r.vertexPool.count >= VERTEX_POOL_MAX)
+			[r.vertexPool removeObjectAtIndex:0];
+		[r.vertexPool addObject:buffer];
+	}
+	os_unfair_lock_unlock(&r.vertexPoolLock);
+}
+
+static void
+uploadLayers(void)
+{
+	size_t total = 0;
+	char *base;
+
+	for (int i = 0; i < MAC_LAYER_COUNT; i++) {
+		r.layerOffset[i] = total;
+		total += r.layers[i].count * sizeof(MacVertex);
+	}
+	r.frameVertices = total ? takeVertexBuffer(total) : nil;
+	if (!r.frameVertices)
+		return;
+	base = r.frameVertices.contents;
+	for (int i = 0; i < MAC_LAYER_COUNT; i++)
+		if (r.layers[i].count)
+			memcpy(base + r.layerOffset[i], r.layers[i].items,
+			    r.layers[i].count * sizeof(MacVertex));
+}
+
+/* Vertices [start, start + count) of a layer. */
+static void
+encodeLayerRange(id<MTLRenderCommandEncoder> encoder, int layer,
+		size_t start, size_t count, id<MTLTexture> texture)
+{
+	if (!count || !r.frameVertices)
+		return;
+	[encoder setFragmentTexture:texture atIndex:0];
+	[encoder setVertexBuffer:r.frameVertices offset:r.layerOffset[layer]
+	    atIndex:0];
+	[encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:start
+	    vertexCount:count];
+}
+
+static void
+encodeLayer(id<MTLRenderCommandEncoder> encoder, int layer,
 		id<MTLTexture> texture)
 {
-	if (!list->count)
-		return;
-	id<MTLBuffer> buffer = [r.device newBufferWithBytes:list->items
-	    length:list->count * sizeof(*list->items)
-	    options:MTLResourceStorageModeShared];
-	[encoder setFragmentTexture:texture atIndex:0];
-	[encoder setVertexBuffer:buffer offset:0 atIndex:0];
-	[encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0
-	    vertexCount:list->count];
+	encodeLayerRange(encoder, layer, 0, r.layers[layer].count, texture);
 }
 
 static void
@@ -854,11 +1057,10 @@ encodeImages(id<MTLRenderCommandEncoder> encoder, int stage)
 				size_t start = draw->occlusionStart[layer];
 				size_t end = i + 1 < list->count ?
 				    list->items[i + 1].occlusionStart[layer] : vertices->count;
-				if (end > start) {
-					MacVertexList slice = {
-					    .items = vertices->items + start, .count = end - start};
-					encodeLayer(encoder, &slice, r.atlas);
-				}
+				if (end > start)
+					encodeLayerRange(encoder,
+					    MAC_LAYER_IMAGE_BACKGROUND + layer, start,
+					    end - start, r.atlas);
 			}
 		}
 	}
@@ -873,27 +1075,49 @@ encodeFrame(id<MTLRenderCommandEncoder> encoder)
 	    (float)r.view.drawableSize.height};
 	[encoder setVertexBytes:&viewport length:sizeof(viewport) atIndex:1];
 	[encoder setFragmentSamplerState:r.sampler atIndex:0];
+	uploadLayers();
 	encodeImages(encoder, 0);
-	encodeLayer(encoder, &r.layers[MAC_LAYER_BACKGROUND], r.atlas);
+	encodeLayer(encoder, MAC_LAYER_BACKGROUND, r.atlas);
 	encodeImages(encoder, 1);
-	encodeLayer(encoder, &r.layers[MAC_LAYER_TEXT], r.atlas);
-	encodeLayer(encoder, &r.layers[MAC_LAYER_DECORATION], r.atlas);
+	encodeLayer(encoder, MAC_LAYER_TEXT, r.atlas);
+	encodeLayer(encoder, MAC_LAYER_DECORATION, r.atlas);
 	encodeImages(encoder, 2);
-	encodeLayer(encoder, &r.layers[MAC_LAYER_OVERLAY_BACKGROUND], r.atlas);
-	encodeLayer(encoder, &r.layers[MAC_LAYER_OVERLAY_TEXT], r.atlas);
-	encodeLayer(encoder, &r.layers[MAC_LAYER_OVERLAY_DECORATION], r.atlas);
+	encodeLayer(encoder, MAC_LAYER_OVERLAY_BACKGROUND, r.atlas);
+	encodeLayer(encoder, MAC_LAYER_OVERLAY_TEXT, r.atlas);
+	encodeLayer(encoder, MAC_LAYER_OVERLAY_DECORATION, r.atlas);
 }
 
 void
 mac_renderer_end(void)
 {
-	if (!r.command || !r.pass || !r.drawable)
+	if (!r.command || !r.pass || (!r.drawable && !r.offscreen))
 		return;
 	id<MTLRenderCommandEncoder> encoder =
 	    [r.command renderCommandEncoderWithDescriptor:r.pass];
 	encodeFrame(encoder);
 	[encoder endEncoding];
-	if (r.presentCallback) {
+	if (r.frameVertices) {
+		id<MTLBuffer> vertices = r.frameVertices;
+		r.frameVertices = nil;
+		[r.command addCompletedHandler:^(id<MTLCommandBuffer> buffer) {
+			(void)buffer;
+			returnVertexBuffer(vertices);
+		}];
+	}
+	if (r.presentHook) {
+		void (*hook)(unsigned long, double) = r.presentHook;
+		unsigned long frame = r.frames;
+		if (r.drawable)
+			[r.drawable addPresentedHandler:^(id<MTLDrawable> drawable) {
+				CFTimeInterval presented = drawable.presentedTime;
+				dispatch_async(dispatch_get_main_queue(), ^{
+					hook(frame, presented);
+				});
+			}];
+		else
+			dispatch_async(dispatch_get_main_queue(), ^{ hook(frame, -1); });
+	}
+	if (r.presentCallback && r.drawable) {
 		void (*callback)(double) = r.presentCallback;
 		r.presentCallback = NULL;
 		[r.drawable addPresentedHandler:^(id<MTLDrawable> drawable) {
@@ -913,12 +1137,42 @@ mac_renderer_end(void)
 			free((void *)releases);
 		}];
 	}
-	[r.command presentDrawable:r.drawable];
+	if (r.offscreen) {
+		void (*done)(void *) = r.offscreenDone;
+		id<MTLTexture> texture = r.offscreen;
+		[r.command addCompletedHandler:^(id<MTLCommandBuffer> buffer) {
+			(void)buffer;
+			if (done)
+				done((__bridge void *)texture);
+		}];
+	} else {
+		[r.command presentDrawable:r.drawable];
+	}
 	[r.command commit];
 	r.frames++;
 	r.command = nil;
 	r.pass = nil;
 	r.drawable = nil;
+	r.offscreen = nil;
+}
+
+double
+mac_renderer_drawable_wait(void)
+{
+	return r.drawableWait;
+}
+
+void
+mac_renderer_set_present_hook(void (*hook)(unsigned long, double))
+{
+	r.presentHook = hook;
+}
+
+void
+mac_renderer_set_offscreen(void *(*acquire)(void), void (*done)(void *))
+{
+	r.offscreenAcquire = acquire;
+	r.offscreenDone = done;
 }
 
 unsigned long

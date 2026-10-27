@@ -1,0 +1,67 @@
+#!/bin/sh
+# Summarize st's frame timing log (macOS; see macos/README.md):
+#   st-frame-stats [LOG] [PERIOD_MS]
+# LOG defaults to $TMPDIR/st-frames.log, PERIOD_MS (the display refresh) to
+# 8.33.  One block per st process: frame rate, time between frames, drawing
+# and drawable-wait times, time until shown, main-thread CPU, PTY input, and
+# glide frames that missed a refresh.
+log=${1:-${TMPDIR:-/tmp}/st-frames.log}
+period=${2:-8.33}
+[ -r "$log" ] || { echo "st-frame-stats: no log at $log" >&2; exit 1; }
+awk -v period="$period" '
+function qsort(a, lo, hi,    i, last, t) {
+	if (lo >= hi) return
+	t = a[lo]; a[lo] = a[int((lo + hi) / 2)]; a[int((lo + hi) / 2)] = t
+	last = lo
+	for (i = lo + 1; i <= hi; i++)
+		if (a[i] < a[lo]) { last++; t = a[last]; a[last] = a[i]; a[i] = t }
+	t = a[lo]; a[lo] = a[last]; a[last] = t
+	qsort(a, lo, last - 1); qsort(a, last + 1, hi)
+}
+# p-th percentile of the n values stored as key SUBSEP i in v
+function pct(v, key, n, p,    a, i, r) {
+	if (!n) return 0
+	for (i = 1; i <= n; i++) a[i] = v[key, i]
+	qsort(a, 1, n)
+	r = int(p / 100 * n + 0.999999); if (r < 1) r = 1; if (r > n) r = n
+	return a[r]
+}
+/^[0-9]/ && NF >= 9 {
+	p = $1
+	if (!(p in frames)) { order[++pids] = p; first[p] = $2 }
+	n = ++frames[p]; last[p] = $2
+	if ($3 >= 0 && $3 < 250) since[p, ++ns[p]] = $3
+	draw[p, n] = $4; wait[p, n] = $5
+	if ($5 > 1) waits[p]++
+	waitsum[p] += $5
+	if ($6 >= 0) shown[p, ++nsh[p]] = $6; else lost[p]++
+	if ($7 >= 0 && $3 >= 0 && $3 < 250) { cpu[p] += $7; cpuwall[p] += $3 }
+	bytes[p] += $8; parse[p] += $9
+	f = NF >= 10 ? $10 : ""
+	if (f ~ /g/) {
+		glide[p]++
+		if (prevg[p] && $3 > 1.5 * period) late[p]++
+		prevg[p] = 1
+	} else prevg[p] = 0
+}
+END {
+	for (k = 1; k <= pids; k++) {
+		p = order[k]; s = (last[p] - first[p]) / 1000; if (s <= 0) s = 1
+		printf "st %s: %d frames in %.1f s (%.0f/s)\n", p, frames[p], s, frames[p] / s
+		printf "  between frames ms: p50 %.2f p95 %.2f p99 %.2f max %.2f\n",
+		    pct(since, p, ns[p], 50), pct(since, p, ns[p], 95),
+		    pct(since, p, ns[p], 99), pct(since, p, ns[p], 100)
+		printf "  drawing ms: p50 %.2f p95 %.2f p99 %.2f max %.2f\n",
+		    pct(draw, p, frames[p], 50), pct(draw, p, frames[p], 95),
+		    pct(draw, p, frames[p], 99), pct(draw, p, frames[p], 100)
+		printf "  waiting for a drawable: %d frames over 1 ms, %.0f ms total, max %.2f ms\n",
+		    waits[p], waitsum[p], pct(wait, p, frames[p], 100)
+		printf "  start to shown ms: p50 %.2f p95 %.2f p99 %.2f max %.2f; never shown %d\n",
+		    pct(shown, p, nsh[p], 50), pct(shown, p, nsh[p], 95),
+		    pct(shown, p, nsh[p], 99), pct(shown, p, nsh[p], 100), lost[p]
+		printf "  main thread busy %.0f%%; pty %.1f KiB/s, parsing %.1f ms/s\n",
+		    cpuwall[p] ? 100 * cpu[p] / cpuwall[p] : 0, bytes[p] / 1024 / s, parse[p] / s
+		printf "  glide frames %d, late (over %.1f ms after the previous) %d\n",
+		    glide[p], 1.5 * period, late[p]
+	}
+}' "$log"

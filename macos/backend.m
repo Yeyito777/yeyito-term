@@ -17,7 +17,9 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <locale.h>
+#include <mach/mach.h>
 #include <math.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -122,6 +124,14 @@ static size_t paletteCount;
 static int ttyfd = -1;
 static int drawingFrame;
 static int redrawPending;
+static double lastFrameTime;	/* CACurrentMediaTime() of the last draw */
+static double framePeriod(void);
+/* What asked for frames since the last one (the frame timing log). */
+enum {
+	FRAMELOG_VIDEO = 1 << 0,
+	FRAMELOG_KEY = 1 << 1,
+};
+static unsigned frameLogFlags;
 static SyncUpdate syncUpdate;
 static int shuttingDown;
 static int cursorKind;
@@ -139,6 +149,8 @@ static int managedWindowRevealRequested;
 static const char macosDefaultFont[] = "SFMono-Regular:size=11";
 static const double macosDefaultFontWidthSpacing = 1.004032258064516;
 static dispatch_source_t ttySource;
+/* PTY output handled so far (tests/macos_headless reports it). */
+static struct { unsigned long long bytes, events; double seconds; } ttyStats;
 static dispatch_source_t blinkSource;
 static dispatch_source_t persistSource;
 static dispatch_source_t notificationSource;
@@ -786,12 +798,18 @@ freeGraphicsImage(uint64_t serial, void *context)
 }
 
 /* A video's shown frame changed: draw now (the display link already timed
- * it for the next refresh), not after the output-batching delay. */
+ * it for the next refresh), not after the output-batching delay, unless a
+ * frame was already drawn for this refresh. */
 static void
 videoRedraw(void)
 {
-	if (nativeView && !IS_SET(MODE_SYNC))
+	if (!nativeView || IS_SET(MODE_SYNC))
+		return;
+	frameLogFlags |= FRAMELOG_VIDEO;
+	if (!redrawPending && CACurrentMediaTime() - lastFrameTime >= framePeriod())
 		[nativeView setNeedsDisplay:YES];
+	else
+		macos_request_redraw();
 }
 
 void
@@ -1526,6 +1544,148 @@ updateSmoothScrollClock(void)
 	nativeView.paused = !run;
 }
 
+/* Frame timing log.  ST_FRAME_LOG=file logs every frame from the start; a
+ * running st logs while $TMPDIR/st-frames.log exists (looked for once a
+ * second while frames are drawn), so a terminal already in use can be
+ * measured: create the file, use the terminal, read it, delete it.  One
+ * line per frame, times in ms:
+ *
+ *   pid start since draw wait shown main tty_bytes parse flags
+ *
+ * start: CACurrentMediaTime() when drawing began; since: time since the
+ * previous frame began; draw: drawing on the main thread, without wait:
+ * time blocked for a drawable; shown: from start until the frame was on
+ * screen (-1 never shown); main: main-thread CPU used since the previous
+ * frame began; tty_bytes / parse: PTY output parsed since then and the
+ * time it took.  flags: g the animation clock ran it (glide), v a video
+ * frame changed, t output arrived, k a key was pressed. */
+#define FRAMELOG_SLOTS 64
+#define FRAMELOG_MAX_LINES 200000
+
+typedef struct {
+	unsigned long frame;
+	double start, since, draw, wait, main, parse;
+	unsigned long long bytes;
+	char flags[8];
+} FrameLogEntry;
+
+static struct {
+	FILE *file;
+	int opened, fromEnv;
+	unsigned long lines;
+	double lastCheck, lastStart, lastFlush, lastCPU, lastParse;
+	unsigned long long lastBytes;
+	thread_act_t thread;
+	FrameLogEntry entries[FRAMELOG_SLOTS];
+} frameLog;
+
+static double
+mainThreadCPU(void)
+{
+	thread_basic_info_data_t info;
+	mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
+
+	if (!frameLog.thread)
+		frameLog.thread = mach_thread_self();
+	if (thread_info(frameLog.thread, THREAD_BASIC_INFO,
+	    (thread_info_t)&info, &count) != KERN_SUCCESS)
+		return 0;
+	return info.user_time.seconds + info.user_time.microseconds / 1e6 +
+	    info.system_time.seconds + info.system_time.microseconds / 1e6;
+}
+
+static void
+frameLogPresented(unsigned long frame, double presented)
+{
+	FrameLogEntry *entry = &frameLog.entries[frame % FRAMELOG_SLOTS];
+
+	if (!frameLog.file || entry->frame != frame || !entry->start)
+		return;
+	fprintf(frameLog.file, "%d %.3f %.2f %.2f %.2f %.2f %.2f %llu %.2f %s\n",
+	    (int)getpid(), entry->start * 1000, entry->since, entry->draw,
+	    entry->wait, presented > 0 ? (presented - entry->start) * 1000 : -1.0,
+	    entry->main, entry->bytes, entry->parse,
+	    entry->flags[0] ? entry->flags : "-");
+	entry->start = 0;
+	if (++frameLog.lines >= FRAMELOG_MAX_LINES && !frameLog.fromEnv) {
+		fclose(frameLog.file);
+		frameLog.file = NULL;
+	}
+}
+
+/* Whether frames are being logged; opens or closes the log as its trigger
+ * file appears or goes away. */
+static int
+frameLogActive(double now)
+{
+	char path[PATH_MAX];
+	const char *dir;
+
+	if (!frameLog.opened) {
+		const char *env = getenv("ST_FRAME_LOG");
+		frameLog.opened = 1;
+		if (env && *env && (frameLog.file = fopen(env, "w")))
+			frameLog.fromEnv = 1;
+	}
+	if (!frameLog.fromEnv && now - frameLog.lastCheck >= 1.0) {
+		frameLog.lastCheck = now;
+		dir = getenv("TMPDIR");
+		snprintf(path, sizeof(path), "%s/st-frames.log",
+		    dir && *dir ? dir : "/tmp");
+		if (access(path, W_OK) == 0) {
+			if (!frameLog.file && frameLog.lines < FRAMELOG_MAX_LINES &&
+			    (frameLog.file = fopen(path, "a"))) {
+				mac_renderer_set_present_hook(frameLogPresented);
+				frameLog.lastStart = 0;
+			}
+		} else if (frameLog.file) {
+			fclose(frameLog.file);
+			frameLog.file = NULL;
+			frameLog.lines = 0;
+		}
+	}
+	if (frameLog.file && frameLog.fromEnv)
+		mac_renderer_set_present_hook(frameLogPresented);
+	if (frameLog.file && now - frameLog.lastFlush >= 1.0) {
+		frameLog.lastFlush = now;
+		fflush(frameLog.file);
+	}
+	return frameLog.file != NULL;
+}
+
+static void
+frameLogFrame(double start, unsigned long framesBefore, int clocked)
+{
+	unsigned long frames = mac_renderer_frames();
+	double end = CACurrentMediaTime(), cpu = mainThreadCPU();
+	double wait = mac_renderer_drawable_wait();
+	FrameLogEntry *entry;
+	char *flag;
+
+	if (frames == framesBefore)
+		return;	/* nothing was drawn (synchronized output) */
+	entry = &frameLog.entries[(frames - 1) % FRAMELOG_SLOTS];
+	entry->frame = frames - 1;
+	entry->start = start;
+	entry->since = frameLog.lastStart ? (start - frameLog.lastStart) * 1000 : -1;
+	entry->wait = wait * 1000;
+	entry->draw = (end - start - wait) * 1000;
+	entry->main = frameLog.lastCPU ? (cpu - frameLog.lastCPU) * 1000 : -1;
+	entry->bytes = ttyStats.bytes - frameLog.lastBytes;
+	entry->parse = (ttyStats.seconds - frameLog.lastParse) * 1000;
+	flag = entry->flags;
+	if (clocked) *flag++ = 'g';
+	if (frameLogFlags & FRAMELOG_VIDEO) *flag++ = 'v';
+	if (entry->bytes) *flag++ = 't';
+	if (frameLogFlags & FRAMELOG_KEY) *flag++ = 'k';
+	*flag = '\0';
+	frameLogFlags = 0;
+	frameLog.lastStart = start;
+	frameLog.lastCPU = cpu;
+	frameLog.lastBytes = ttyStats.bytes;
+	frameLog.lastParse = ttyStats.seconds;
+}
+
 @implementation STMetalView
 
 - (BOOL)isFlipped { return YES; }
@@ -1563,11 +1723,16 @@ updateSmoothScrollClock(void)
 	/* Frames drawn before the reveal are never shown: ask each one. */
 	if (measuring && !launchStats.presented)
 		mac_renderer_on_next_present(launchStatsPresented);
+	lastFrameTime = CACurrentMediaTime();
+	int logging = frameLogActive(lastFrameTime);
+	unsigned long committed = logging ? mac_renderer_frames() : 0;
 	drawingFrame = 1;
 	draw();
 	drawingFrame = 0;
 	if (measuring)
 		launchStatsFrame(begin, frames);
+	if (logging)
+		frameLogFrame(lastFrameTime, committed, !self.paused);
 	updateSmoothScrollClock();
 }
 
@@ -1854,6 +2019,8 @@ nativeDeadKey(NSEvent *event, uint state)
 static void
 nativeHandleKey(NSEvent *event, int release)
 {
+	if (!release)
+		frameLogFlags |= FRAMELOG_KEY;
 	if (!release && !IS_SET(MODE_KBDLOCK) && !cmdline_active() &&
 	    !tisvimnav() && nativeDeadKey(event, nativeModifiers(event))) {
 		macos_request_redraw();
@@ -1973,13 +2140,29 @@ nativeFocus(int focused)
 	macos_request_redraw();
 }
 
+/* At most one frame per display refresh.  Output, video frames and input
+ * each asked for a redraw on their own, and a burst of them (a GIF stream
+ * arrives in many small batches) drew several frames per refresh: wasted
+ * work, and once every drawable was queued for display, nextDrawable
+ * blocked the main thread until the next vblank. */
+static double
+framePeriod(void)
+{
+	NSInteger fps = nativeView ? nativeView.preferredFramesPerSecond : 0;
+	return 1.0 / (fps > 0 ? fps : 60);
+}
+
 void
 macos_request_redraw(void)
 {
+	double delay;
+
 	if (!nativeView || redrawPending || IS_SET(MODE_SYNC)) return;
 	redrawPending = 1;
+	delay = MAX(MAX(0.0, minlatency) / 1000,
+	    lastFrameTime + framePeriod() - CACurrentMediaTime());
 	dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-	    (int64_t)(MAX(0.0, minlatency) * NSEC_PER_MSEC)),
+	    (int64_t)(delay * NSEC_PER_SEC)),
 	    dispatch_get_main_queue(), ^{
 		redrawPending = 0;
 		[nativeView setNeedsDisplay:YES];
@@ -2413,28 +2596,165 @@ setupManagedWindowRevealSource(void)
 	dispatch_resume(revealSource);
 }
 
+/* PTY output.  A macOS PTY holds about 1 KiB, so a child writing more
+ * waits until someone reads: read on the main queue, it waited out every
+ * frame drawn and every key handled, and a stream (video, images) slowed
+ * to a crawl while the terminal was busy.  A read source on its own queue
+ * keeps the PTY drained into a ring; the main queue parses from the ring
+ * in batches and asks for one redraw per batch.  A full ring stops the
+ * reading, so a child that outpaces st still waits rather than using
+ * unbounded memory. */
+#define TTY_RING_SIZE (4U << 20)
+#define TTY_PARSE_CHUNK (64U << 10)
+#define TTY_PARSE_BUDGET 0.008	/* seconds of parsing before yielding */
+
+static struct {
+	pthread_mutex_t lock;
+	char *data;
+	size_t head, length;	/* bytes [head, head + length) mod size */
+	int parseQueued, suspended, closed, error;
+	dispatch_queue_t queue;
+} ttyRing = {PTHREAD_MUTEX_INITIALIZER};
+
+static void ttyParseRing(void *);
+
+/* On ttyRing.queue: drain the PTY until it is empty or the ring is full. */
+static void
+ttyReadable(void)
+{
+	for (;;) {
+		size_t tail, room;
+		ssize_t n;
+		int queue = 0;
+
+		pthread_mutex_lock(&ttyRing.lock);
+		room = TTY_RING_SIZE - ttyRing.length;
+		if (!room) {
+			if (!ttyRing.suspended) {
+				dispatch_suspend(ttySource);
+				ttyRing.suspended = 1;
+			}
+			pthread_mutex_unlock(&ttyRing.lock);
+			return;
+		}
+		tail = (ttyRing.head + ttyRing.length) % TTY_RING_SIZE;
+		room = MIN(room, TTY_RING_SIZE - tail);
+		pthread_mutex_unlock(&ttyRing.lock);
+
+		/* Only the reader writes past the tail; the main queue only reads
+		 * before it. */
+		n = read(ttyfd, ttyRing.data + tail, room);
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+			return;
+		pthread_mutex_lock(&ttyRing.lock);
+		if (n > 0) {
+			ttyRing.length += (size_t)n;
+		} else {
+			/* End of file or an error: once the ring is parsed, the
+			 * main queue handles it as ttyread() would. */
+			ttyRing.closed = 1;
+			ttyRing.error = n < 0 ? errno : 0;
+			if (!ttyRing.suspended) {
+				dispatch_suspend(ttySource);
+				ttyRing.suspended = 1;
+			}
+		}
+		if (!ttyRing.parseQueued)
+			queue = ttyRing.parseQueued = 1;
+		pthread_mutex_unlock(&ttyRing.lock);
+		if (queue)
+			dispatch_async_f(dispatch_get_main_queue(), NULL, ttyParseRing);
+		if (n <= 0)
+			return;
+	}
+}
+
+/* On the main queue: parse what the reader queued, for a few milliseconds
+ * at most so input and frames are not held up behind a long stream. */
+static void
+ttyParseRing(void *context)
+{
+	double begin = CACurrentMediaTime();
+	size_t total = 0;
+	int closed = 0, error = 0, more = 0;
+
+	(void)context;
+	for (;;) {
+		size_t take;
+
+		pthread_mutex_lock(&ttyRing.lock);
+		take = MIN(MIN(ttyRing.length, TTY_RING_SIZE - ttyRing.head),
+		    TTY_PARSE_CHUNK);
+		if (!take) {
+			closed = ttyRing.closed;
+			error = ttyRing.error;
+			ttyRing.parseQueued = 0;
+			pthread_mutex_unlock(&ttyRing.lock);
+			break;
+		}
+		pthread_mutex_unlock(&ttyRing.lock);
+		ttyparse(ttyRing.data + ttyRing.head, take);
+		total += take;
+		pthread_mutex_lock(&ttyRing.lock);
+		ttyRing.head = (ttyRing.head + take) % TTY_RING_SIZE;
+		ttyRing.length -= take;
+		if (ttyRing.suspended && !ttyRing.closed) {
+			ttyRing.suspended = 0;
+			dispatch_resume(ttySource);
+		}
+		pthread_mutex_unlock(&ttyRing.lock);
+		if (CACurrentMediaTime() - begin >= TTY_PARSE_BUDGET) {
+			more = 1;	/* parseQueued stays set: this is the queued parse */
+			break;
+		}
+	}
+	if (more)
+		dispatch_async_f(dispatch_get_main_queue(), NULL, ttyParseRing);
+	if (total && launchStats.active && !launchStats.output)
+		launchStats.output = CACurrentMediaTime();
+	ttyStats.bytes += total;
+	ttyStats.events++;
+	ttyStats.seconds += CACurrentMediaTime() - begin;
+	if (total)
+		macos_request_redraw();
+	if (closed) {
+		/* The child closed the PTY (or reading failed): reap it and exit.
+		 * Should the child still be running, look again shortly, as a
+		 * descriptor readable at end of file would. */
+		ttyclosed(error);
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_MSEC),
+		    ttyRing.queue, ^{
+			pthread_mutex_lock(&ttyRing.lock);
+			ttyRing.closed = 0;
+			if (ttyRing.suspended) {
+				ttyRing.suspended = 0;
+				dispatch_resume(ttySource);
+			}
+			pthread_mutex_unlock(&ttyRing.lock);
+		});
+	}
+}
+
+static void
+setupTTYSource(void)
+{
+	if (!ttyRing.data && !(ttyRing.data = malloc(TTY_RING_SIZE)))
+		die("st: can't allocate the PTY buffer\n");
+	ttyRing.queue = dispatch_queue_create("io.yeyito.st.pty-reader",
+	    dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL,
+	    QOS_CLASS_USER_INTERACTIVE, 0));
+	ttySource = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, ttyfd, 0,
+	    ttyRing.queue);
+	dispatch_source_set_event_handler(ttySource, ^{ ttyReadable(); });
+	dispatch_resume(ttySource);
+}
+
 static void
 setupSources(void)
 {
-	ttySource = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, ttyfd, 0,
-	    dispatch_get_main_queue());
-	dispatch_source_set_event_handler(ttySource, ^{
-		/* A macOS PTY hands over at most 1 KiB per read.  Drain what is
-		 * there, for a few milliseconds at most, in one event so that bulk
-		 * output (raw video frames, big files) isn't paced by main-queue
-		 * round trips; the descriptor is nonblocking. */
-		double deadline = CACurrentMediaTime() + 0.004;
-		size_t total = 0, n;
-		while ((n = ttyread()) > 0) {
-			total += n;
-			if (CACurrentMediaTime() >= deadline)
-				break;
-		}
-		if (total && launchStats.active && !launchStats.output)
-			launchStats.output = CACurrentMediaTime();
-		macos_request_redraw();
-	});
-	dispatch_resume(ttySource);
+	setupTTYSource();
 
 	if (blinktimeout) {
 		blinkSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
