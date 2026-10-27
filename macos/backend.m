@@ -150,7 +150,10 @@ static const char macosDefaultFont[] = "SFMono-Regular:size=11";
 static const double macosDefaultFontWidthSpacing = 1.004032258064516;
 static dispatch_source_t ttySource;
 /* PTY output handled so far (tests/macos_headless reports it). */
-static struct { unsigned long long bytes, events; double seconds; } ttyStats;
+static struct {
+	unsigned long long bytes, events;
+	double seconds, longest;	/* longest: one parse batch, until reset */
+} ttyStats;
 static dispatch_source_t blinkSource;
 static dispatch_source_t persistSource;
 static dispatch_source_t notificationSource;
@@ -622,8 +625,19 @@ xdrawline(Line line, int x1, int y, int x2)
 static void
 xdrawlineseg(Line line, int x1, int y, int x2)
 {
-	for (int x = x1; x < x2; x++)
-		drawCell(line[x], x, y, MAC_CELL_BASE, 1);
+	/* Most of a screen is blank cells that draw nothing: no glyph, the
+	 * clear color behind them and no highlight that could change that. */
+	int blanks = !selection_active() && !search_active() && !debug_mode &&
+	    y != vimnav_curline_y();
+
+	for (int x = x1; x < x2; x++) {
+		Glyph glyph = line[x];
+		if (blanks && (glyph.u == ' ' || glyph.u == 0) &&
+		    glyph.bg == defaultbg && !(glyph.mode & (ATTR_UNDERLINE |
+		    ATTR_STRUCK | ATTR_REVERSE | ATTR_WDUMMY)))
+			continue;
+		drawCell(glyph, x, y, MAC_CELL_BASE, 1);
+	}
 
 	if (debug_mode && !smoothscroll_plain()) {
 		int start, end;
@@ -2605,7 +2619,7 @@ setupManagedWindowRevealSource(void)
  * reading, so a child that outpaces st still waits rather than using
  * unbounded memory. */
 #define TTY_RING_SIZE (4U << 20)
-#define TTY_PARSE_CHUNK (64U << 10)
+#define TTY_PARSE_CHUNK (16U << 10)
 #define TTY_PARSE_BUDGET 0.008	/* seconds of parsing before yielding */
 
 static struct {
@@ -2717,6 +2731,7 @@ ttyParseRing(void *context)
 	ttyStats.bytes += total;
 	ttyStats.events++;
 	ttyStats.seconds += CACurrentMediaTime() - begin;
+	ttyStats.longest = MAX(ttyStats.longest, CACurrentMediaTime() - begin);
 	if (total)
 		macos_request_redraw();
 	if (closed) {
