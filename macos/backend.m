@@ -17,6 +17,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <locale.h>
+#include <mach/mach.h>
 #include <math.h>
 #include <pthread.h>
 #include <signal.h>
@@ -125,6 +126,12 @@ static int drawingFrame;
 static int redrawPending;
 static double lastFrameTime;	/* CACurrentMediaTime() of the last draw */
 static double framePeriod(void);
+/* What asked for frames since the last one (the frame timing log). */
+enum {
+	FRAMELOG_VIDEO = 1 << 0,
+	FRAMELOG_KEY = 1 << 1,
+};
+static unsigned frameLogFlags;
 static SyncUpdate syncUpdate;
 static int shuttingDown;
 static int cursorKind;
@@ -798,6 +805,7 @@ videoRedraw(void)
 {
 	if (!nativeView || IS_SET(MODE_SYNC))
 		return;
+	frameLogFlags |= FRAMELOG_VIDEO;
 	if (!redrawPending && CACurrentMediaTime() - lastFrameTime >= framePeriod())
 		[nativeView setNeedsDisplay:YES];
 	else
@@ -1536,6 +1544,148 @@ updateSmoothScrollClock(void)
 	nativeView.paused = !run;
 }
 
+/* Frame timing log.  ST_FRAME_LOG=file logs every frame from the start; a
+ * running st logs while $TMPDIR/st-frames.log exists (looked for once a
+ * second while frames are drawn), so a terminal already in use can be
+ * measured: create the file, use the terminal, read it, delete it.  One
+ * line per frame, times in ms:
+ *
+ *   pid start since draw wait shown main tty_bytes parse flags
+ *
+ * start: CACurrentMediaTime() when drawing began; since: time since the
+ * previous frame began; draw: drawing on the main thread, without wait:
+ * time blocked for a drawable; shown: from start until the frame was on
+ * screen (-1 never shown); main: main-thread CPU used since the previous
+ * frame began; tty_bytes / parse: PTY output parsed since then and the
+ * time it took.  flags: g the animation clock ran it (glide), v a video
+ * frame changed, t output arrived, k a key was pressed. */
+#define FRAMELOG_SLOTS 64
+#define FRAMELOG_MAX_LINES 200000
+
+typedef struct {
+	unsigned long frame;
+	double start, since, draw, wait, main, parse;
+	unsigned long long bytes;
+	char flags[8];
+} FrameLogEntry;
+
+static struct {
+	FILE *file;
+	int opened, fromEnv;
+	unsigned long lines;
+	double lastCheck, lastStart, lastFlush, lastCPU, lastParse;
+	unsigned long long lastBytes;
+	thread_act_t thread;
+	FrameLogEntry entries[FRAMELOG_SLOTS];
+} frameLog;
+
+static double
+mainThreadCPU(void)
+{
+	thread_basic_info_data_t info;
+	mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
+
+	if (!frameLog.thread)
+		frameLog.thread = mach_thread_self();
+	if (thread_info(frameLog.thread, THREAD_BASIC_INFO,
+	    (thread_info_t)&info, &count) != KERN_SUCCESS)
+		return 0;
+	return info.user_time.seconds + info.user_time.microseconds / 1e6 +
+	    info.system_time.seconds + info.system_time.microseconds / 1e6;
+}
+
+static void
+frameLogPresented(unsigned long frame, double presented)
+{
+	FrameLogEntry *entry = &frameLog.entries[frame % FRAMELOG_SLOTS];
+
+	if (!frameLog.file || entry->frame != frame || !entry->start)
+		return;
+	fprintf(frameLog.file, "%d %.3f %.2f %.2f %.2f %.2f %.2f %llu %.2f %s\n",
+	    (int)getpid(), entry->start * 1000, entry->since, entry->draw,
+	    entry->wait, presented > 0 ? (presented - entry->start) * 1000 : -1.0,
+	    entry->main, entry->bytes, entry->parse,
+	    entry->flags[0] ? entry->flags : "-");
+	entry->start = 0;
+	if (++frameLog.lines >= FRAMELOG_MAX_LINES && !frameLog.fromEnv) {
+		fclose(frameLog.file);
+		frameLog.file = NULL;
+	}
+}
+
+/* Whether frames are being logged; opens or closes the log as its trigger
+ * file appears or goes away. */
+static int
+frameLogActive(double now)
+{
+	char path[PATH_MAX];
+	const char *dir;
+
+	if (!frameLog.opened) {
+		const char *env = getenv("ST_FRAME_LOG");
+		frameLog.opened = 1;
+		if (env && *env && (frameLog.file = fopen(env, "w")))
+			frameLog.fromEnv = 1;
+	}
+	if (!frameLog.fromEnv && now - frameLog.lastCheck >= 1.0) {
+		frameLog.lastCheck = now;
+		dir = getenv("TMPDIR");
+		snprintf(path, sizeof(path), "%s/st-frames.log",
+		    dir && *dir ? dir : "/tmp");
+		if (access(path, W_OK) == 0) {
+			if (!frameLog.file && frameLog.lines < FRAMELOG_MAX_LINES &&
+			    (frameLog.file = fopen(path, "a"))) {
+				mac_renderer_set_present_hook(frameLogPresented);
+				frameLog.lastStart = 0;
+			}
+		} else if (frameLog.file) {
+			fclose(frameLog.file);
+			frameLog.file = NULL;
+			frameLog.lines = 0;
+		}
+	}
+	if (frameLog.file && frameLog.fromEnv)
+		mac_renderer_set_present_hook(frameLogPresented);
+	if (frameLog.file && now - frameLog.lastFlush >= 1.0) {
+		frameLog.lastFlush = now;
+		fflush(frameLog.file);
+	}
+	return frameLog.file != NULL;
+}
+
+static void
+frameLogFrame(double start, unsigned long framesBefore, int clocked)
+{
+	unsigned long frames = mac_renderer_frames();
+	double end = CACurrentMediaTime(), cpu = mainThreadCPU();
+	double wait = mac_renderer_drawable_wait();
+	FrameLogEntry *entry;
+	char *flag;
+
+	if (frames == framesBefore)
+		return;	/* nothing was drawn (synchronized output) */
+	entry = &frameLog.entries[(frames - 1) % FRAMELOG_SLOTS];
+	entry->frame = frames - 1;
+	entry->start = start;
+	entry->since = frameLog.lastStart ? (start - frameLog.lastStart) * 1000 : -1;
+	entry->wait = wait * 1000;
+	entry->draw = (end - start - wait) * 1000;
+	entry->main = frameLog.lastCPU ? (cpu - frameLog.lastCPU) * 1000 : -1;
+	entry->bytes = ttyStats.bytes - frameLog.lastBytes;
+	entry->parse = (ttyStats.seconds - frameLog.lastParse) * 1000;
+	flag = entry->flags;
+	if (clocked) *flag++ = 'g';
+	if (frameLogFlags & FRAMELOG_VIDEO) *flag++ = 'v';
+	if (entry->bytes) *flag++ = 't';
+	if (frameLogFlags & FRAMELOG_KEY) *flag++ = 'k';
+	*flag = '\0';
+	frameLogFlags = 0;
+	frameLog.lastStart = start;
+	frameLog.lastCPU = cpu;
+	frameLog.lastBytes = ttyStats.bytes;
+	frameLog.lastParse = ttyStats.seconds;
+}
+
 @implementation STMetalView
 
 - (BOOL)isFlipped { return YES; }
@@ -1574,11 +1724,15 @@ updateSmoothScrollClock(void)
 	if (measuring && !launchStats.presented)
 		mac_renderer_on_next_present(launchStatsPresented);
 	lastFrameTime = CACurrentMediaTime();
+	int logging = frameLogActive(lastFrameTime);
+	unsigned long committed = logging ? mac_renderer_frames() : 0;
 	drawingFrame = 1;
 	draw();
 	drawingFrame = 0;
 	if (measuring)
 		launchStatsFrame(begin, frames);
+	if (logging)
+		frameLogFrame(lastFrameTime, committed, !self.paused);
 	updateSmoothScrollClock();
 }
 
@@ -1865,6 +2019,8 @@ nativeDeadKey(NSEvent *event, uint state)
 static void
 nativeHandleKey(NSEvent *event, int release)
 {
+	if (!release)
+		frameLogFlags |= FRAMELOG_KEY;
 	if (!release && !IS_SET(MODE_KBDLOCK) && !cmdline_active() &&
 	    !tisvimnav() && nativeDeadKey(event, nativeModifiers(event))) {
 		macos_request_redraw();

@@ -77,6 +77,14 @@ void mac_renderer_end(void);
  * (CACurrentMediaTime's clock; 0 if it was never shown). */
 unsigned long mac_renderer_frames(void);
 void mac_renderer_on_next_present(void (*callback)(double presented));
+/* Frame timing log: seconds the last mac_renderer_begin() waited for a
+ * drawable, and a hook called on the main queue with each committed
+ * frame's number (mac_renderer_frames() - 1 right after it) and the time
+ * it was presented (CACurrentMediaTime's clock; 0 if it never was, -1
+ * when drawing offscreen). */
+double mac_renderer_drawable_wait(void);
+void mac_renderer_set_present_hook(void (*hook)(unsigned long frame,
+		double presented));
 /* tests/macos_headless: frames draw into the texture (a bridged
  * id<MTLTexture>) acquire() returns instead of the view's drawable, and
  * done(texture) runs on a Metal thread once the GPU has finished one.

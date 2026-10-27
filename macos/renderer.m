@@ -2,6 +2,7 @@
 #import <CoreText/CoreText.h>
 #import <Metal/Metal.h>
 #import <MetalKit/MetalKit.h>
+#import <QuartzCore/QuartzCore.h>
 #import <simd/simd.h>
 
 #include <math.h>
@@ -96,6 +97,8 @@ typedef struct {
 	__strong id<MTLCommandBuffer> command;
 	unsigned long frames;
 	void (*presentCallback)(double);
+	void (*presentHook)(unsigned long, double);
+	double drawableWait;
 	/* CoreFoundation objects to release when this frame completes. */
 	const void **releases;
 	size_t releaseCount, releaseCapacity;
@@ -648,15 +651,19 @@ mac_renderer_begin(MacColor clearColor)
 		listreset(&r.layers[i]);
 	for (int i = 0; i < 3; i++)
 		r.imageLayers[i].count = 0;
+	double begin = CACurrentMediaTime();
 	if (r.offscreenAcquire) {
 		r.offscreen = (__bridge id<MTLTexture>)r.offscreenAcquire();
+		r.drawableWait = CACurrentMediaTime() - begin;
 		if (!r.offscreen)
 			return 0;
 		r.pass = [MTLRenderPassDescriptor new];
 		r.pass.colorAttachments[0].texture = r.offscreen;
 	} else {
+		/* Either may block until a drawable is free. */
 		r.pass = r.view.currentRenderPassDescriptor;
 		r.drawable = r.view.currentDrawable;
+		r.drawableWait = CACurrentMediaTime() - begin;
 	}
 	if (!r.pass || (!r.drawable && !r.offscreen))
 		return 0;
@@ -1097,6 +1104,19 @@ mac_renderer_end(void)
 			returnVertexBuffer(vertices);
 		}];
 	}
+	if (r.presentHook) {
+		void (*hook)(unsigned long, double) = r.presentHook;
+		unsigned long frame = r.frames;
+		if (r.drawable)
+			[r.drawable addPresentedHandler:^(id<MTLDrawable> drawable) {
+				CFTimeInterval presented = drawable.presentedTime;
+				dispatch_async(dispatch_get_main_queue(), ^{
+					hook(frame, presented);
+				});
+			}];
+		else
+			dispatch_async(dispatch_get_main_queue(), ^{ hook(frame, -1); });
+	}
 	if (r.presentCallback && r.drawable) {
 		void (*callback)(double) = r.presentCallback;
 		r.presentCallback = NULL;
@@ -1134,6 +1154,18 @@ mac_renderer_end(void)
 	r.pass = nil;
 	r.drawable = nil;
 	r.offscreen = nil;
+}
+
+double
+mac_renderer_drawable_wait(void)
+{
+	return r.drawableWait;
+}
+
+void
+mac_renderer_set_present_hook(void (*hook)(unsigned long, double))
+{
+	r.presentHook = hook;
 }
 
 void
