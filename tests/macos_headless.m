@@ -23,6 +23,7 @@
 #import <ImageIO/ImageIO.h>
 #include <libproc.h>
 #include <mach/mach.h>
+#include <mach/mach_time.h>
 #include <poll.h>
 #include <pthread.h>
 #include <sys/resource.h>
