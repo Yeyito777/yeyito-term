@@ -14,6 +14,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 #include <wchar.h>
 
@@ -2607,11 +2608,29 @@ strhandle(void)
 	term.esc &= ~(ESC_STR_END|ESC_STR|ESC_STR_IGNORE);
 	if (strescseq.type == '_' && strescseq.len && strescseq.buf[0] == 'G') {
 		int cellwidth, cellheight;
+		/* ST_GRAPHICS_DEBUG=1: commands that took 2 ms or more. */
+		static int slowlog = -1;
+		struct timespec begin, end;
+		double ms;
+
+		if (slowlog < 0)
+			slowlog = getenv("ST_GRAPHICS_DEBUG") != NULL;
+		if (slowlog)
+			clock_gettime(CLOCK_MONOTONIC, &begin);
 		xgetdimensions(NULL, NULL, &cellwidth, &cellheight);
 		graphics_handle_apc(strescseq.buf, strescseq.len,
 		    term.line[term.c.y], term.c.x, IS_SET(MODE_ALTSCREEN),
 		    cellwidth, cellheight, term.row, tlineviewrowslow,
 		    xgraphicsavailable(), &graphics);
+		if (slowlog) {
+			clock_gettime(CLOCK_MONOTONIC, &end);
+			ms = (end.tv_sec - begin.tv_sec) * 1e3 +
+			    (end.tv_nsec - begin.tv_nsec) / 1e6;
+			if (ms >= 2)
+				fprintf(stderr, "[st graphics] %.1f ms: %.*s (%zu bytes)\n",
+				    ms, (int)MIN(strcspn(strescseq.buf, ";"), 60),
+				    strescseq.buf, strescseq.len);
+		}
 		if (graphics.response_len)
 			ttywrite(graphics.response, graphics.response_len, 0);
 		if (graphics.move_cursor)
