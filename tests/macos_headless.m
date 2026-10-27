@@ -587,6 +587,7 @@ appMain(HeadlessView *view, double seconds, double fps, double every,
 	    NSActivityUserInitiated | NSActivityLatencyCritical
 	    reason:@"st headless measurement"];
 
+	view.preferredFramesPerSecond = (NSInteger)lrint(fps);
 	display.view = view;
 	display.child = ttypid();	/* a session leader: its group is its own */
 	display.period = 1.0 / fps;

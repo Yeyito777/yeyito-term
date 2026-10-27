@@ -123,6 +123,8 @@ static size_t paletteCount;
 static int ttyfd = -1;
 static int drawingFrame;
 static int redrawPending;
+static double lastFrameTime;	/* CACurrentMediaTime() of the last draw */
+static double framePeriod(void);
 static SyncUpdate syncUpdate;
 static int shuttingDown;
 static int cursorKind;
@@ -789,12 +791,17 @@ freeGraphicsImage(uint64_t serial, void *context)
 }
 
 /* A video's shown frame changed: draw now (the display link already timed
- * it for the next refresh), not after the output-batching delay. */
+ * it for the next refresh), not after the output-batching delay, unless a
+ * frame was already drawn for this refresh. */
 static void
 videoRedraw(void)
 {
-	if (nativeView && !IS_SET(MODE_SYNC))
+	if (!nativeView || IS_SET(MODE_SYNC))
+		return;
+	if (!redrawPending && CACurrentMediaTime() - lastFrameTime >= framePeriod())
 		[nativeView setNeedsDisplay:YES];
+	else
+		macos_request_redraw();
 }
 
 void
@@ -1566,6 +1573,7 @@ updateSmoothScrollClock(void)
 	/* Frames drawn before the reveal are never shown: ask each one. */
 	if (measuring && !launchStats.presented)
 		mac_renderer_on_next_present(launchStatsPresented);
+	lastFrameTime = CACurrentMediaTime();
 	drawingFrame = 1;
 	draw();
 	drawingFrame = 0;
@@ -1976,13 +1984,29 @@ nativeFocus(int focused)
 	macos_request_redraw();
 }
 
+/* At most one frame per display refresh.  Output, video frames and input
+ * each asked for a redraw on their own, and a burst of them (a GIF stream
+ * arrives in many small batches) drew several frames per refresh: wasted
+ * work, and once every drawable was queued for display, nextDrawable
+ * blocked the main thread until the next vblank. */
+static double
+framePeriod(void)
+{
+	NSInteger fps = nativeView ? nativeView.preferredFramesPerSecond : 0;
+	return 1.0 / (fps > 0 ? fps : 60);
+}
+
 void
 macos_request_redraw(void)
 {
+	double delay;
+
 	if (!nativeView || redrawPending || IS_SET(MODE_SYNC)) return;
 	redrawPending = 1;
+	delay = MAX(MAX(0.0, minlatency) / 1000,
+	    lastFrameTime + framePeriod() - CACurrentMediaTime());
 	dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-	    (int64_t)(MAX(0.0, minlatency) * NSEC_PER_MSEC)),
+	    (int64_t)(delay * NSEC_PER_SEC)),
 	    dispatch_get_main_queue(), ^{
 		redrawPending = 0;
 		[nativeView setNeedsDisplay:YES];
