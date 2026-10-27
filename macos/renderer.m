@@ -54,14 +54,23 @@ typedef struct {
 
 /* What CoreText lays out for one rune in one style, kept so a frame draws a
  * cell with a hash lookup instead of building an attributed string and a
- * CTLine.  The glyphs belong to r.glyphs; both are cleared together. */
+ * CTLine.  Cleared with r.glyphs (the atlas) when the font or scale
+ * changes. */
 #define RUNE_GLYPHS 4
 #define RUNE_UNCACHED 0xff	/* more glyphs than fit: laid out every time */
+
+/* An atlas glyph's placement, copied out of its STGlyph for the hot path. */
+typedef struct {
+	float u0, v0, u1, v1;
+	float left, top, width, height;
+	float inkWidth, inkHeight;
+	int colorGlyph;
+} GlyphMetrics;
 
 typedef struct {
 	uint32_t key;	/* rune | style << 21; 0 is an empty slot */
 	uint8_t count;
-	__unsafe_unretained STGlyph *glyph[RUNE_GLYPHS];
+	GlyphMetrics glyph[RUNE_GLYPHS];
 	float x[RUNE_GLYPHS], y[RUNE_GLYPHS];
 } RuneGlyphs;
 
@@ -175,19 +184,6 @@ listreset(MacVertexList *list)
 	list->count = 0;
 }
 
-static void
-listappend(MacVertexList *list, MacVertex vertex)
-{
-	if (list->count == list->capacity) {
-		list->capacity = list->capacity ? list->capacity * 2 : 4096;
-		list->items = realloc(list->items,
-		    list->capacity * sizeof(*list->items));
-		if (!list->items)
-			abort();
-	}
-	list->items[list->count++] = vertex;
-}
-
 static MacImageDraw *
 imageappend(MacImageList *list)
 {
@@ -226,12 +222,21 @@ quad(enum MacRenderLayer layer, float x, float y, float width, float height,
 		width = x1 - x0;
 		height = y1 - y0;
 	}
-	MacVertex a = {{x, y}, {u0, v0}, c, mode};
-	MacVertex b = {{x + width, y}, {u1, v0}, c, mode};
-	MacVertex d = {{x, y + height}, {u0, v1}, c, mode};
-	MacVertex e = {{x + width, y + height}, {u1, v1}, c, mode};
-	listappend(list, a); listappend(list, d); listappend(list, b);
-	listappend(list, b); listappend(list, d); listappend(list, e);
+	if (list->count + 6 > list->capacity) {
+		list->capacity = list->capacity ? list->capacity * 2 : 4096;
+		list->items = realloc(list->items,
+		    list->capacity * sizeof(*list->items));
+		if (!list->items)
+			abort();
+	}
+	MacVertex *v = list->items + list->count;
+	v[0] = (MacVertex){{x, y}, {u0, v0}, c, mode};
+	v[1] = (MacVertex){{x, y + height}, {u0, v1}, c, mode};
+	v[2] = (MacVertex){{x + width, y}, {u1, v0}, c, mode};
+	v[3] = v[2];
+	v[4] = v[1];
+	v[5] = (MacVertex){{x + width, y + height}, {u1, v1}, c, mode};
+	list->count += 6;
 }
 
 static NSString *
@@ -483,28 +488,40 @@ glyphEntry(CTFontRef font, CGGlyph glyph)
 	return entry;
 }
 
+static GlyphMetrics
+glyphMetrics(STGlyph *entry)
+{
+	GlyphMetrics metrics = {0};
+
+	if (entry)
+		metrics = (GlyphMetrics){entry.u0, entry.v0, entry.u1, entry.v1,
+		    entry.left, entry.top, entry.width, entry.height,
+		    entry.inkWidth, entry.inkHeight, entry.colorGlyph};
+	return metrics;
+}
+
 static void
-drawGlyphEntry(enum MacRenderLayer layer, STGlyph *entry,
+drawGlyphEntry(enum MacRenderLayer layer, const GlyphMetrics *entry,
 		double xPixels, double topPixels, double baselinePixels,
 		double maxWidthPixels, double maxHeightPixels, MacColor color)
 {
-	if (!entry || entry.width <= 0 || entry.height <= 0)
+	if (entry->width <= 0 || entry->height <= 0)
 		return;
-	double x = xPixels + entry.left;
-	double y = baselinePixels - entry.top;
-	double width = entry.width;
-	double height = entry.height;
-	if (entry.colorGlyph && maxWidthPixels > 0 && maxHeightPixels > 0) {
+	double x = xPixels + entry->left;
+	double y = baselinePixels - entry->top;
+	double width = entry->width;
+	double height = entry->height;
+	if (entry->colorGlyph && maxWidthPixels > 0 && maxHeightPixels > 0) {
 		MacGlyphRect rect = macos_color_glyph_rect(xPixels, topPixels,
 		    maxWidthPixels, maxHeightPixels, width, height,
-		    entry.inkWidth, entry.inkHeight);
+		    entry->inkWidth, entry->inkHeight);
 		x = rect.x;
 		y = rect.y;
 		width = rect.width;
 		height = rect.height;
 	}
-	quad(layer, x, y, width, height, entry.u0, entry.v0,
-	    entry.u1, entry.v1, color, entry.colorGlyph ? 2.0f : 1.0f);
+	quad(layer, x, y, width, height, entry->u0, entry->v0,
+	    entry->u1, entry->v1, color, entry->colorGlyph ? 2.0f : 1.0f);
 }
 
 static void
@@ -512,7 +529,8 @@ drawGlyph(enum MacRenderLayer layer, CTFontRef font, CGGlyph glyph,
 		double xPixels, double topPixels, double baselinePixels,
 		double maxWidthPixels, double maxHeightPixels, MacColor color)
 {
-	drawGlyphEntry(layer, glyphEntry(font, glyph), xPixels, topPixels,
+	GlyphMetrics metrics = glyphMetrics(glyphEntry(font, glyph));
+	drawGlyphEntry(layer, &metrics, xPixels, topPixels,
 	    baselinePixels, maxWidthPixels, maxHeightPixels, color);
 }
 
@@ -739,7 +757,8 @@ layoutRune(enum MacRenderLayer layer, uint32_t rune, unsigned int style,
 				    baseline * r.scale - positions[j].y,
 				    maxWidth * r.scale, maxHeight * r.scale, color);
 			} else if (cache->count < RUNE_GLYPHS) {
-				cache->glyph[cache->count] = glyphEntry(font, glyphs[j]);
+				cache->glyph[cache->count] =
+				    glyphMetrics(glyphEntry(font, glyphs[j]));
 				cache->x[cache->count] = (float)positions[j].x;
 				cache->y[cache->count] = (float)positions[j].y;
 				cache->count++;
@@ -774,7 +793,7 @@ mac_renderer_rune(enum MacRenderLayer layer, uint32_t rune,
 		return;
 	}
 	for (int i = 0; i < cached->count; i++)
-		drawGlyphEntry(layer, cached->glyph[i],
+		drawGlyphEntry(layer, &cached->glyph[i],
 		    x * r.scale + cached->x[i], top * r.scale,
 		    baseline * r.scale - cached->y[i],
 		    maxWidth * r.scale, maxHeight * r.scale, color);

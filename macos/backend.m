@@ -622,8 +622,19 @@ xdrawline(Line line, int x1, int y, int x2)
 static void
 xdrawlineseg(Line line, int x1, int y, int x2)
 {
-	for (int x = x1; x < x2; x++)
-		drawCell(line[x], x, y, MAC_CELL_BASE, 1);
+	/* Most of a screen is blank cells that draw nothing: no glyph, the
+	 * clear color behind them and no highlight that could change that. */
+	int blanks = !selection_active() && !search_active() && !debug_mode &&
+	    y != vimnav_curline_y();
+
+	for (int x = x1; x < x2; x++) {
+		Glyph glyph = line[x];
+		if (blanks && (glyph.u == ' ' || glyph.u == 0) &&
+		    glyph.bg == defaultbg && !(glyph.mode & (ATTR_UNDERLINE |
+		    ATTR_STRUCK | ATTR_REVERSE | ATTR_WDUMMY)))
+			continue;
+		drawCell(glyph, x, y, MAC_CELL_BASE, 1);
+	}
 
 	if (debug_mode && !smoothscroll_plain()) {
 		int start, end;
