@@ -150,7 +150,10 @@ static const char macosDefaultFont[] = "SFMono-Regular:size=11";
 static const double macosDefaultFontWidthSpacing = 1.004032258064516;
 static dispatch_source_t ttySource;
 /* PTY output handled so far (tests/macos_headless reports it). */
-static struct { unsigned long long bytes, events; double seconds; } ttyStats;
+static struct {
+	unsigned long long bytes, events;
+	double seconds, longest;	/* longest: one parse batch, until reset */
+} ttyStats;
 static dispatch_source_t blinkSource;
 static dispatch_source_t persistSource;
 static dispatch_source_t notificationSource;
@@ -2616,7 +2619,7 @@ setupManagedWindowRevealSource(void)
  * reading, so a child that outpaces st still waits rather than using
  * unbounded memory. */
 #define TTY_RING_SIZE (4U << 20)
-#define TTY_PARSE_CHUNK (64U << 10)
+#define TTY_PARSE_CHUNK (16U << 10)
 #define TTY_PARSE_BUDGET 0.008	/* seconds of parsing before yielding */
 
 static struct {
@@ -2728,6 +2731,7 @@ ttyParseRing(void *context)
 	ttyStats.bytes += total;
 	ttyStats.events++;
 	ttyStats.seconds += CACurrentMediaTime() - begin;
+	ttyStats.longest = MAX(ttyStats.longest, CACurrentMediaTime() - begin);
 	if (total)
 		macos_request_redraw();
 	if (closed) {

@@ -310,6 +310,7 @@ phaseBegin(const char *name)
 	phase.ttyBytes = ttyStats.bytes;
 	phase.ttyEvents = ttyStats.events;
 	phase.ttySeconds = ttyStats.seconds;
+	ttyStats.longest = 0;
 	pthread_mutex_unlock(&phaseLock);
 }
 
@@ -348,10 +349,12 @@ phaseEnd(double origin)
 	    phase.stalls8, phase.stalls16, phase.stalls33, phase.maxStall,
 	    100 * (processCPUSeconds(getpid()) - phase.processCPU) / wall,
 	    100 * (processCPUSeconds(display.child) - phase.childCPU) / wall);
-	printf("  pty: %.1f KiB/s in %.0f events/s, handling %.0f ms/s\n",
+	printf("  pty: %.1f KiB/s in %.0f events/s, handling %.0f ms/s, "
+	    "longest %.1f ms\n",
 	    (ttyStats.bytes - phase.ttyBytes) / 1024.0 / wall,
 	    (ttyStats.events - phase.ttyEvents) / wall,
-	    (ttyStats.seconds - phase.ttySeconds) * 1000 / wall);
+	    (ttyStats.seconds - phase.ttySeconds) * 1000 / wall,
+	    ttyStats.longest * 1000);
 	if (phase.latencyMs.count)
 		printf("  key-to-screen ms p50 %.1f p95 %.1f max %.1f (%zu keys)\n",
 		    samplesPercentile(&phase.latencyMs, 50),
