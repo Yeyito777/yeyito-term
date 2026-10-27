@@ -2456,7 +2456,7 @@ static struct {
 	pthread_mutex_t lock;
 	char *data;
 	size_t head, length;	/* bytes [head, head + length) mod size */
-	int parseQueued, suspended, closed;
+	int parseQueued, suspended, closed, error;
 	dispatch_queue_t queue;
 } ttyRing = {PTHREAD_MUTEX_INITIALIZER};
 
@@ -2497,8 +2497,9 @@ ttyReadable(void)
 			ttyRing.length += (size_t)n;
 		} else {
 			/* End of file or an error: once the ring is parsed, the
-			 * main queue's ttyread() sees it and handles the exit. */
+			 * main queue handles it as ttyread() would. */
 			ttyRing.closed = 1;
+			ttyRing.error = n < 0 ? errno : 0;
 			if (!ttyRing.suspended) {
 				dispatch_suspend(ttySource);
 				ttyRing.suspended = 1;
@@ -2521,7 +2522,7 @@ ttyParseRing(void *context)
 {
 	double begin = CACurrentMediaTime();
 	size_t total = 0;
-	int closed = 0, more = 0;
+	int closed = 0, error = 0, more = 0;
 
 	(void)context;
 	for (;;) {
@@ -2532,6 +2533,7 @@ ttyParseRing(void *context)
 		    TTY_PARSE_CHUNK);
 		if (!take) {
 			closed = ttyRing.closed;
+			error = ttyRing.error;
 			ttyRing.parseQueued = 0;
 			pthread_mutex_unlock(&ttyRing.lock);
 			break;
@@ -2562,11 +2564,10 @@ ttyParseRing(void *context)
 	if (total)
 		macos_request_redraw();
 	if (closed) {
-		/* The child closed the PTY (or reading failed): ttyread() reaps
-		 * the child and exits.  Should the child still be running, look
-		 * again shortly, as a readable descriptor at end of file would. */
-		while (ttyread() > 0)
-			macos_request_redraw();
+		/* The child closed the PTY (or reading failed): reap it and exit.
+		 * Should the child still be running, look again shortly, as a
+		 * descriptor readable at end of file would. */
+		ttyclosed(error);
 		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_MSEC),
 		    ttyRing.queue, ^{
 			pthread_mutex_lock(&ttyRing.lock);

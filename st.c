@@ -1130,6 +1130,24 @@ ttyparse(const char *data, size_t n)
 	}
 }
 
+/* A backend reading the PTY itself saw end of file (error 0) or a read
+ * error: what ttyread() does then. */
+void
+ttyclosed(int error)
+{
+	if (!error) {
+		reapchild();	/* exits once the child is gone */
+		return;
+	}
+	if (error == EIO) {
+		xcleanup();
+		persist_save();
+		persist_cleanup();
+		exit(0);
+	}
+	die("couldn't read from shell: %s\n", strerror(error));
+}
+
 size_t
 ttyread(void)
 {
