@@ -1020,10 +1020,34 @@ reset_timeline(STVideo *player)
 	player->lastPosition = VIDEO_TIME_NONE;
 }
 
+/* The first synchronizer to start its clock in a process takes 35 ms
+ * (AVFoundation sets up its clock machinery).  Start a throwaway one on
+ * another thread when the first video opens: the video's own clock only
+ * starts once it has buffered (300 ms by default). */
+static void
+prewarm_clock(void)
+{
+	static dispatch_once_t once;
+
+	dispatch_once(&once, ^{
+		dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+			double begin = CACurrentMediaTime();
+			AVSampleBufferRenderSynchronizer *warm =
+			    [AVSampleBufferRenderSynchronizer new];
+			[warm setRate:1.0 time:kCMTimeZero];
+			warm.rate = 0;
+			debug("clock prewarmed in %.1f ms",
+			    (CACurrentMediaTime() - begin) * 1000);
+		});
+	});
+}
+
 static VideoPlayer *
 backend_create(const VideoConfig *config, const char **error)
 {
 	int slot;
+
+	prewarm_clock();
 
 	for (slot = 0; slot < PLAYER_SLOTS && players[slot]; slot++)
 		;
