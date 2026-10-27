@@ -975,6 +975,12 @@ childready(void)
 	return childexited;
 }
 
+pid_t
+ttypid(void)
+{
+	return pid;
+}
+
 void
 reapchild(void)
 {

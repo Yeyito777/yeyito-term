@@ -139,6 +139,8 @@ static int managedWindowRevealRequested;
 static const char macosDefaultFont[] = "SFMono-Regular:size=11";
 static const double macosDefaultFontWidthSpacing = 1.004032258064516;
 static dispatch_source_t ttySource;
+/* PTY output handled so far (tests/macos_headless reports it). */
+static struct { unsigned long long bytes, events; double seconds; } ttyStats;
 static dispatch_source_t blinkSource;
 static dispatch_source_t persistSource;
 static dispatch_source_t notificationSource;
@@ -2414,7 +2416,7 @@ setupManagedWindowRevealSource(void)
 }
 
 static void
-setupSources(void)
+setupTTYSource(void)
 {
 	ttySource = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, ttyfd, 0,
 	    dispatch_get_main_queue());
@@ -2423,7 +2425,7 @@ setupSources(void)
 		 * there, for a few milliseconds at most, in one event so that bulk
 		 * output (raw video frames, big files) isn't paced by main-queue
 		 * round trips; the descriptor is nonblocking. */
-		double deadline = CACurrentMediaTime() + 0.004;
+		double begin = CACurrentMediaTime(), deadline = begin + 0.004;
 		size_t total = 0, n;
 		while ((n = ttyread()) > 0) {
 			total += n;
@@ -2432,9 +2434,18 @@ setupSources(void)
 		}
 		if (total && launchStats.active && !launchStats.output)
 			launchStats.output = CACurrentMediaTime();
+		ttyStats.bytes += total;
+		ttyStats.events++;
+		ttyStats.seconds += CACurrentMediaTime() - begin;
 		macos_request_redraw();
 	});
 	dispatch_resume(ttySource);
+}
+
+static void
+setupSources(void)
+{
+	setupTTYSource();
 
 	if (blinktimeout) {
 		blinkSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,

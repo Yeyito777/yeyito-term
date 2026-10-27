@@ -77,5 +77,11 @@ void mac_renderer_end(void);
  * (CACurrentMediaTime's clock; 0 if it was never shown). */
 unsigned long mac_renderer_frames(void);
 void mac_renderer_on_next_present(void (*callback)(double presented));
+/* tests/macos_headless: frames draw into the texture (a bridged
+ * id<MTLTexture>) acquire() returns instead of the view's drawable, and
+ * done(texture) runs on a Metal thread once the GPU has finished one.
+ * acquire() may block, as nextDrawable does; NULL skips the frame. */
+void mac_renderer_set_offscreen(void *(*acquire)(void),
+		void (*done)(void *texture));
 
 #endif

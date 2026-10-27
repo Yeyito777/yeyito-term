@@ -122,6 +122,7 @@ void tsetdirtattr(int);
 void ttyhangup(void);
 int ttynew(const char *, char *, const char *, char **);
 size_t ttyread(void);
+pid_t ttypid(void);
 int ttyflush(void);
 void ttyresize(int, int);
 void ttywrite(const char *, size_t, int);

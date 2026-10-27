@@ -85,6 +85,9 @@ typedef struct {
 	/* CoreFoundation objects to release when this frame completes. */
 	const void **releases;
 	size_t releaseCount, releaseCapacity;
+	void *(*offscreenAcquire)(void);
+	void (*offscreenDone)(void *);
+	__strong id<MTLTexture> offscreen;
 } MacRenderer;
 
 static MacRenderer r;
@@ -562,9 +565,17 @@ mac_renderer_begin(MacColor clearColor)
 		listreset(&r.layers[i]);
 	for (int i = 0; i < 3; i++)
 		r.imageLayers[i].count = 0;
-	r.pass = r.view.currentRenderPassDescriptor;
-	r.drawable = r.view.currentDrawable;
-	if (!r.pass || !r.drawable)
+	if (r.offscreenAcquire) {
+		r.offscreen = (__bridge id<MTLTexture>)r.offscreenAcquire();
+		if (!r.offscreen)
+			return 0;
+		r.pass = [MTLRenderPassDescriptor new];
+		r.pass.colorAttachments[0].texture = r.offscreen;
+	} else {
+		r.pass = r.view.currentRenderPassDescriptor;
+		r.drawable = r.view.currentDrawable;
+	}
+	if (!r.pass || (!r.drawable && !r.offscreen))
 		return 0;
 	r.pass.colorAttachments[0].loadAction = MTLLoadActionClear;
 	r.pass.colorAttachments[0].storeAction = MTLStoreActionStore;
@@ -887,13 +898,13 @@ encodeFrame(id<MTLRenderCommandEncoder> encoder)
 void
 mac_renderer_end(void)
 {
-	if (!r.command || !r.pass || !r.drawable)
+	if (!r.command || !r.pass || (!r.drawable && !r.offscreen))
 		return;
 	id<MTLRenderCommandEncoder> encoder =
 	    [r.command renderCommandEncoderWithDescriptor:r.pass];
 	encodeFrame(encoder);
 	[encoder endEncoding];
-	if (r.presentCallback) {
+	if (r.presentCallback && r.drawable) {
 		void (*callback)(double) = r.presentCallback;
 		r.presentCallback = NULL;
 		[r.drawable addPresentedHandler:^(id<MTLDrawable> drawable) {
@@ -913,12 +924,30 @@ mac_renderer_end(void)
 			free((void *)releases);
 		}];
 	}
-	[r.command presentDrawable:r.drawable];
+	if (r.offscreen) {
+		void (*done)(void *) = r.offscreenDone;
+		id<MTLTexture> texture = r.offscreen;
+		[r.command addCompletedHandler:^(id<MTLCommandBuffer> buffer) {
+			(void)buffer;
+			if (done)
+				done((__bridge void *)texture);
+		}];
+	} else {
+		[r.command presentDrawable:r.drawable];
+	}
 	[r.command commit];
 	r.frames++;
 	r.command = nil;
 	r.pass = nil;
 	r.drawable = nil;
+	r.offscreen = nil;
+}
+
+void
+mac_renderer_set_offscreen(void *(*acquire)(void), void (*done)(void *))
+{
+	r.offscreenAcquire = acquire;
+	r.offscreenDone = done;
 }
 
 unsigned long
