@@ -111,8 +111,10 @@ The decoded payload is a 10-byte header followed by codec data:
   of order (B-frames). Both streams share one timeline.
 
 Packets never produce a reply, so they can't flood an application that
-doesn't read its input. A problem (undecodable data, a full buffer) is kept
-and reported by the next `k=q` as `error=`.
+doesn't read its input. A problem is kept and reported by a `k=q` as
+`error=`: a full buffer by the next one, undecodable data once st has
+decoded that packet (decoding runs beside the parser, so a query sent
+right after a bad packet may not report it yet).
 
 #### `k=f`: flush
 
@@ -260,7 +262,7 @@ between a real terminal and st-play:
 | --- | --- |
 | `video.h`, `video.c` | Backend-neutral parsing: configuration text, packet headers, status replies, and the `VideoBackend` interface. |
 | `graphics.c` | `a=v` dispatch, video images and their lifecycle (open, replace, delete, reset). |
-| `macos/videoplayer.m` | VideoToolbox decode, `AVSampleBufferAudioRenderer` and `AVSampleBufferRenderSynchronizer` playback, frames as Metal textures. |
+| `macos/videoplayer.m` | VideoToolbox decode (each video's session lives on its own serial queue: creating one can take 50 ms), `AVSampleBufferAudioRenderer` and `AVSampleBufferRenderSynchronizer` playback, frames as Metal textures. |
 | `render/video_linux.c` | libavcodec decode, PulseAudio playback, frames as OpenGL textures. |
 | `play/` | `st-play`: reference sender and terminal video player (`media.c` ffmpeg pipeline, `flow.c` flow control and adaptation, `out.c` APC framing and write queue, `input.c` key and reply parser). |
 | `tests/test_video.c` | Protocol and lifecycle tests against a mock backend. |
@@ -270,7 +272,11 @@ harnesses can play real streams silently (`ST_VIDEO_VOLUME=0`). On macOS,
 `make macos_headless` builds `tests/macos_headless`, a windowless st that
 runs a command in a PTY through the real terminal core and renderer and
 saves PNG snapshots, for end-to-end runs such as
-`tests/macos_headless -- ssh -t host st-play clip.mp4`.
+`tests/macos_headless -- ssh -t host st-play clip.mp4`. With `-A` it runs
+st's own event loop and reports frame times and main-thread stalls; with
+`ST_VIDEO_DEBUG=1` the macOS player also logs main-thread work that took a
+millisecond or more, and `ST_GRAPHICS_DEBUG=1` logs graphics commands that
+took 2 ms or more.
 
 The platform registers a `VideoBackend` with `graphics_set_video_backend()`.
 Without one (the non-GPU X11 path, tests that don't register one), `k=c`

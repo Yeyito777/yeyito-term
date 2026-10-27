@@ -337,6 +337,24 @@ waitState(const char *state, double timeout)
 	return stateIs(state);
 }
 
+/* Spin until a status query reports `error` (decoding is asynchronous, so
+ * a bad packet's error shows once it has been decoded). */
+static int
+waitError(const char *error, double timeout)
+{
+	char key[64];
+	double end = CACurrentMediaTime() + timeout;
+	snprintf(key, sizeof(key), " error=%s", error);
+	for (;;) {
+		statusField("pos");
+		if (strstr(response, key))
+			return 1;
+		if (CACurrentMediaTime() >= end)
+			return 0;
+		spin(0.01);
+	}
+}
+
 /* Render the placement through drawGraphicsPlacement and read the pixel at
  * its centre: 'r', 'b', '-' (nothing drawn) or '?'. */
 static char
@@ -573,8 +591,7 @@ TEST(frames_beyond_4096_are_refused)
 	openVideo(0, 100);	/* declared 160x96: the SPS decides */
 	big.length = oversizedFrame(frame, 301, 2);	/* 4816 x 32 */
 	sendPacket(VIDEO_STREAM_VIDEO, &big, 0);
-	statusField("pos");
-	ASSERT(strstr(response, " error=E2BIG") != NULL);
+	ASSERT(waitError("E2BIG", 2));
 	/* Valid parameter sets afterwards decode again. */
 	text("a=v,i=77,k=f,q=1", "");
 	sendMedia(0, 0);

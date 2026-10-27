@@ -48,6 +48,7 @@ typedef struct VideoQueued {
 	struct VideoQueued *next;
 	int64_t pts;
 	int keyframe;
+	unsigned generation;	/* the timeline (flush) it belongs to */
 	size_t length;
 	unsigned char data[];
 } VideoQueued;
@@ -65,18 +66,23 @@ typedef struct {
 @interface STVideo : NSObject {
 @public
 	VideoConfig config;
-	/* Video decoding (main thread). */
+	/* Video decoding, on decodeQueue: creating a VideoToolbox session can
+	 * take 50 ms and submitting frames a few, which held up the main thread
+	 * every time a GIF started playing. */
+	dispatch_queue_t decodeQueue;
 	VTDecompressionSessionRef session;
 	CMVideoFormatDescriptionRef format;
 	unsigned char sps[PARAMETER_MAX], pps[PARAMETER_MAX];
 	size_t spsLength, ppsLength;
-	VideoQueue videoQueue;
-	int needKeyframe;
-	int64_t frameDuration;
 	int framesAhead;	/* decode-ahead bound for the coded size */
+	int64_t frameDuration;
 	double lastPacket;	/* host time of the newest packet */
-	/* Shared with VideoToolbox's callback thread, under lock. */
+	/* Shared by the main thread, decodeQueue and VideoToolbox's callback
+	 * thread, under lock. */
 	pthread_mutex_t lock;
+	VideoQueue videoQueue;
+	int decodeScheduled;
+	int needKeyframe;
 	DecodedFrame frames[FRAMES_MAX];
 	int frameCount;
 	int inflight;
@@ -204,6 +210,16 @@ set_error(STVideo *player, const char *error)
 		player->error = error;
 }
 
+/* An error found while decoding; the main thread reports it (tick). */
+static void
+decode_error(STVideo *player, const char *error)
+{
+	pthread_mutex_lock(&player->lock);
+	if (!player->decodeError)
+		player->decodeError = error;
+	pthread_mutex_unlock(&player->lock);
+}
+
 /* Frames: the VideoToolbox callback inserts by pts, the main thread takes
  * them in order.  Caller holds the lock. */
 static void
@@ -317,7 +333,7 @@ update_format(STVideo *player)
 		if (player->format)
 			CFRelease(player->format);
 		player->format = NULL;
-		set_error(player, "E2BIG:video frames larger than 4096x4096");
+		decode_error(player, "E2BIG:video frames larger than 4096x4096");
 		return -1;
 	}
 	player->framesAhead = (int)(FRAMES_BYTES /
@@ -360,7 +376,7 @@ next_nal(const unsigned char *p, const unsigned char *end, size_t *length)
 }
 
 /* Annex B access unit -> parameter sets + a length-prefixed sample, then an
- * asynchronous decode. */
+ * asynchronous decode.  On decodeQueue. */
 static void
 decode_packet(STVideo *player, VideoQueued *item)
 {
@@ -368,8 +384,13 @@ decode_packet(STVideo *player, VideoQueued *item)
 	const unsigned char *nal;
 	size_t length, used = 0;
 	unsigned char *avcc;
-	int changed = 0;
+	int changed = 0, skip;
 
+	pthread_mutex_lock(&player->lock);
+	skip = item->generation != player->generation;	/* flushed since */
+	pthread_mutex_unlock(&player->lock);
+	if (skip)
+		return;
 	avcc = malloc(item->length + 64);
 	if (!avcc)
 		return;
@@ -413,14 +434,18 @@ decode_packet(STVideo *player, VideoQueued *item)
 	}
 	if (changed && player->spsLength && player->ppsLength &&
 	    !update_format(player))
-		set_error(player, "EBADMSG:invalid H.264 parameter sets");
+		decode_error(player, "EBADMSG:invalid H.264 parameter sets");
 	/* (update_format() < 0: oversized; packets drop until new sets.) */
-	if (!player->session || !used ||
-	    (player->needKeyframe && !item->keyframe)) {
+	pthread_mutex_lock(&player->lock);
+	skip = !player->session || !used ||
+	    (player->needKeyframe && !item->keyframe);
+	if (!skip)
+		player->needKeyframe = 0;
+	pthread_mutex_unlock(&player->lock);
+	if (skip) {
 		free(avcc);
 		return;
 	}
-	player->needKeyframe = 0;
 
 	CMBlockBufferRef block = NULL;
 	CMSampleBufferRef sample = NULL;
@@ -446,7 +471,7 @@ decode_packet(STVideo *player, VideoQueued *item)
 	VTDecodeInfoFlags info = 0;
 	OSStatus status = VTDecompressionSessionDecodeFrame(player->session,
 	    sample, kVTDecodeFrame_EnableAsynchronousDecompression,
-	    (void *)(uintptr_t)player->generation, &info);
+	    (void *)(uintptr_t)item->generation, &info);
 	CFRelease(sample);
 	if (status != noErr) {
 		/* A frame VideoToolbox refused never reaches the callback. */
@@ -455,25 +480,53 @@ decode_packet(STVideo *player, VideoQueued *item)
 			player->inflight--;
 		pthread_mutex_unlock(&player->lock);
 		if (status != kVTInvalidSessionErr)
-			set_error(player, "EBADMSG:video decode failed");
+			decode_error(player, "EBADMSG:video decode failed");
 	}
 }
 
+/* On decodeQueue: decode queued packets up to the decode-ahead bound. */
 static void
-feed_decoder(STVideo *player)
+decode_pump(STVideo *player)
 {
 	VideoQueued *item;
 
 	for (;;) {
 		pthread_mutex_lock(&player->lock);
-		int ahead = player->frameCount + player->inflight;
-		pthread_mutex_unlock(&player->lock);
-		if (ahead >= player->framesAhead ||
-		    !(item = queue_pop(&player->videoQueue)))
+		if (player->frameCount + player->inflight >= player->framesAhead ||
+		    !(item = queue_pop(&player->videoQueue))) {
+			player->decodeScheduled = 0;
+			pthread_mutex_unlock(&player->lock);
 			return;
+		}
+		pthread_mutex_unlock(&player->lock);
 		decode_packet(player, item);
 		free(item);
 	}
+}
+
+/* Main thread: have decodeQueue take what is queued (after a packet, and
+ * each tick as shown frames make room). */
+static void
+feed_decoder(STVideo *player)
+{
+	int schedule;
+
+	pthread_mutex_lock(&player->lock);
+	schedule = !player->decodeScheduled && player->videoQueue.head;
+	if (schedule)
+		player->decodeScheduled = 1;
+	pthread_mutex_unlock(&player->lock);
+	if (schedule)
+		dispatch_async(player->decodeQueue, ^{ decode_pump(player); });
+}
+
+static int
+video_queued(STVideo *player)
+{
+	pthread_mutex_lock(&player->lock);
+	int queued = player->videoQueue.head != NULL;
+	pthread_mutex_unlock(&player->lock);
+	return queued;
 }
 
 /* The AAC "magic cookie" Core Audio decoders expect: an MPEG-4 ES
@@ -655,7 +708,7 @@ advance_state(STVideo *player)
 		return;
 	/* End of stream with nothing (left) to play ends at once. */
 	if (player->ended && !player->started &&
-	    player->firstPts == VIDEO_TIME_NONE && !player->videoQueue.head &&
+	    player->firstPts == VIDEO_TIME_NONE && !video_queued(player) &&
 	    !player->audioQueue.head) {
 		player->finished = 1;
 		player->lastPosition = VIDEO_TIME_NONE;
@@ -670,13 +723,15 @@ advance_state(STVideo *player)
 		    buffered_ahead(player, from) >=
 		    (int64_t)player->config.prebuffer_ms * 1000;
 		if (player->config.video_codec && !has_frames(player) &&
-		    player->videoQueue.head)
+		    video_queued(player))
 			ready = 0;
 		if (!ready || from == VIDEO_TIME_NONE)
 			return;
 		if (!player->started) {
+			double begin = CACurrentMediaTime();
 			[player.synchronizer setRate:1.0
 			    time:CMTimeMake(player->firstPts, TIMESCALE)];
+			slow("clock started", begin);
 			player->started = 1;
 			debug("start at %lld (vend %lld aend %lld)",
 			    (long long)player->firstPts, (long long)player->videoEnd,
@@ -691,7 +746,7 @@ advance_state(STVideo *player)
 	now = clock_now(player);
 	if (player->ended) {
 		int64_t end = media_end(player);
-		if (!player->videoQueue.head && !player->audioQueue.head &&
+		if (!video_queued(player) && !player->audioQueue.head &&
 		    (end == VIDEO_TIME_NONE || now >= end)) {
 			set_rate(player, 0);
 			player->lastPosition = now;
@@ -979,6 +1034,9 @@ backend_create(const VideoConfig *config, const char **error)
 	STVideo *player = [STVideo new];
 	player->config = *config;
 	pthread_mutex_init(&player->lock, NULL);
+	player->decodeQueue = dispatch_queue_create("io.yeyito.st.video-decode",
+	    dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL,
+	    QOS_CLASS_USER_INITIATED, 0));
 	player->dropBefore = VIDEO_TIME_NONE;
 	player->needKeyframe = 1;
 	player->frameDuration = 1000000 / 30;
@@ -1011,25 +1069,38 @@ backend_destroy(VideoPlayer *handle)
 		[player.synchronizer removeRenderer:player.audio
 		    atTime:kCMTimeInvalid completionHandler:nil];
 	}
-	destroy_session(player);
+	/* Packets still queued are dropped; one being decoded is discarded. */
 	pthread_mutex_lock(&player->lock);
-	frames_clear_locked(player);
-	pthread_mutex_unlock(&player->lock);
 	queue_clear(&player->videoQueue);
+	player->generation++;
+	pthread_mutex_unlock(&player->lock);
 	queue_clear(&player->audioQueue);
 	if (player->current)
 		CVPixelBufferRelease(player->current);
+	player->current = NULL;
 	/* The renderer dropped the texture with the image; the GPU may still
 	 * be reading it. */
 	if (player->texture)
 		mac_renderer_release_after_frame(player->texture);
-	if (player->format)
-		CFRelease(player->format);
+	player->texture = NULL;
 	if (player->audioFormat)
 		CFRelease(player->audioFormat);
-	pthread_mutex_destroy(&player->lock);
+	player->audioFormat = NULL;
 	player.audio = nil;
 	player.synchronizer = nil;
+	/* Waiting for the decoder to finish and tearing it down takes a few
+	 * milliseconds: after everything queued for it, off the main thread.
+	 * The block keeps the player alive until then. */
+	dispatch_async(player->decodeQueue, ^{
+		destroy_session(player);
+		pthread_mutex_lock(&player->lock);
+		frames_clear_locked(player);
+		pthread_mutex_unlock(&player->lock);
+		if (player->format)
+			CFRelease(player->format);
+		player->format = NULL;
+		pthread_mutex_destroy(&player->lock);
+	});
 	updateTicking();
 }
 
@@ -1046,8 +1117,10 @@ backend_packet(VideoPlayer *handle, const VideoPacket *packet,
 		*error = "EINVAL:packet for a stream the video does not have";
 		return 0;
 	}
-	if (player->videoQueue.bytes + player->audioQueue.bytes +
-	    packet->length > VIDEO_QUEUE_MAX) {
+	pthread_mutex_lock(&player->lock);
+	size_t queued = player->videoQueue.bytes + player->audioQueue.bytes;
+	pthread_mutex_unlock(&player->lock);
+	if (queued + packet->length > VIDEO_QUEUE_MAX) {
 		*error = "ENOBUFS:video queue is full";
 		return 0;
 	}
@@ -1065,7 +1138,10 @@ backend_packet(VideoPlayer *handle, const VideoPacket *packet,
 	item->length = packet->length;
 	memcpy(item->data, packet->data, packet->length);
 	queue = video ? &player->videoQueue : &player->audioQueue;
+	pthread_mutex_lock(&player->lock);
+	item->generation = player->generation;
 	queue_push(queue, item);
+	pthread_mutex_unlock(&player->lock);
 	if (video) {
 		if (player->videoEnd != VIDEO_TIME_NONE &&
 		    packet->pts > player->videoEnd &&
@@ -1106,17 +1182,17 @@ backend_flush(VideoPlayer *handle, int64_t start)
 	debug("flush start=%lld at clock %lld", (long long)start,
 	    (long long)clock_now(player));
 	reset_clock(player);
-	queue_clear(&player->videoQueue);
 	queue_clear(&player->audioQueue);
+	/* Frames of the old timeline still decoding are discarded by their
+	 * generation when they arrive. */
 	pthread_mutex_lock(&player->lock);
+	queue_clear(&player->videoQueue);
 	player->generation++;
 	player->dropBefore = start;
 	player->decodeError = NULL;
+	player->needKeyframe = 1;
 	frames_clear_locked(player);
 	pthread_mutex_unlock(&player->lock);
-	if (player->session)
-		VTDecompressionSessionWaitForAsynchronousFrames(player->session);
-	player->needKeyframe = 1;
 	player->error = NULL;
 	/* The current frame stays on screen until the new segment's first. */
 	reset_timeline(player);
