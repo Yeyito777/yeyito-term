@@ -5,6 +5,7 @@
 #import <simd/simd.h>
 
 #include <math.h>
+#include <os/lock.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -100,6 +101,12 @@ typedef struct {
 	size_t releaseCount, releaseCapacity;
 	RuneGlyphs *runes;
 	size_t runeCapacity, runeCount;
+	/* This frame's vertices, every layer in one buffer, and buffers whose
+	 * frames the GPU has finished, to reuse. */
+	__strong id<MTLBuffer> frameVertices;
+	size_t layerOffset[MAC_LAYER_COUNT];
+	__strong NSMutableArray<id<MTLBuffer>> *vertexPool;
+	os_unfair_lock vertexPoolLock;
 	void *(*offscreenAcquire)(void);
 	void (*offscreenDone)(void *);
 	__strong id<MTLTexture> offscreen;
@@ -517,6 +524,7 @@ mac_renderer_init(void *viewPtr, const char *fontName, double fontSize)
 	r.queue = [r.device newCommandQueue];
 	r.glyphs = [NSMutableDictionary dictionary];
 	r.images = [NSMutableDictionary dictionary];
+	r.vertexPool = [NSMutableArray array];
 	r.scale = 1.0;
 	r.pointSize = fontSize > 0 ? fontSize : 14.0;
 	strlcpy(r.family, fontName ?: "Menlo", sizeof(r.family));
@@ -578,6 +586,10 @@ mac_renderer_destroy(void)
 	r.glyphs = nil;
 	runesClear();
 	r.images = nil;
+	os_unfair_lock_lock(&r.vertexPoolLock);
+	r.vertexPool = nil;
+	os_unfair_lock_unlock(&r.vertexPoolLock);
+	r.frameVertices = nil;
 	r.atlas = nil;
 	r.pipeline = nil;
 	r.queue = nil;
@@ -922,19 +934,84 @@ mac_renderer_set_image_clip(double x, double y, double width, double height)
 	r.imageClipHeight = height;
 }
 
+/* A frame's vertices go into one buffer that is reused once the GPU has
+ * finished with it.  A new buffer per layer, and per image for the cells
+ * drawn over it, cost an allocation and fresh zeroed pages on every frame. */
+#define VERTEX_POOL_MAX 4
+
+static id<MTLBuffer>
+takeVertexBuffer(NSUInteger length)
+{
+	id<MTLBuffer> found = nil;
+
+	os_unfair_lock_lock(&r.vertexPoolLock);
+	for (NSUInteger i = r.vertexPool.count; i-- > 0;) {
+		if (r.vertexPool[i].length >= length) {
+			found = r.vertexPool[i];
+			[r.vertexPool removeObjectAtIndex:i];
+			break;
+		}
+	}
+	os_unfair_lock_unlock(&r.vertexPoolLock);
+	if (!found)
+		found = [r.device newBufferWithLength:MAX(length + length / 2,
+		    (NSUInteger)(256 << 10)) options:MTLResourceStorageModeShared |
+		    MTLResourceCPUCacheModeWriteCombined];
+	return found;
+}
+
+/* Runs on a Metal thread once the frame that used `buffer` completed. */
 static void
-encodeLayer(id<MTLRenderCommandEncoder> encoder, MacVertexList *list,
+returnVertexBuffer(id<MTLBuffer> buffer)
+{
+	os_unfair_lock_lock(&r.vertexPoolLock);
+	if (r.vertexPool) {
+		if (r.vertexPool.count >= VERTEX_POOL_MAX)
+			[r.vertexPool removeObjectAtIndex:0];
+		[r.vertexPool addObject:buffer];
+	}
+	os_unfair_lock_unlock(&r.vertexPoolLock);
+}
+
+static void
+uploadLayers(void)
+{
+	size_t total = 0;
+	char *base;
+
+	for (int i = 0; i < MAC_LAYER_COUNT; i++) {
+		r.layerOffset[i] = total;
+		total += r.layers[i].count * sizeof(MacVertex);
+	}
+	r.frameVertices = total ? takeVertexBuffer(total) : nil;
+	if (!r.frameVertices)
+		return;
+	base = r.frameVertices.contents;
+	for (int i = 0; i < MAC_LAYER_COUNT; i++)
+		if (r.layers[i].count)
+			memcpy(base + r.layerOffset[i], r.layers[i].items,
+			    r.layers[i].count * sizeof(MacVertex));
+}
+
+/* Vertices [start, start + count) of a layer. */
+static void
+encodeLayerRange(id<MTLRenderCommandEncoder> encoder, int layer,
+		size_t start, size_t count, id<MTLTexture> texture)
+{
+	if (!count || !r.frameVertices)
+		return;
+	[encoder setFragmentTexture:texture atIndex:0];
+	[encoder setVertexBuffer:r.frameVertices offset:r.layerOffset[layer]
+	    atIndex:0];
+	[encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:start
+	    vertexCount:count];
+}
+
+static void
+encodeLayer(id<MTLRenderCommandEncoder> encoder, int layer,
 		id<MTLTexture> texture)
 {
-	if (!list->count)
-		return;
-	id<MTLBuffer> buffer = [r.device newBufferWithBytes:list->items
-	    length:list->count * sizeof(*list->items)
-	    options:MTLResourceStorageModeShared];
-	[encoder setFragmentTexture:texture atIndex:0];
-	[encoder setVertexBuffer:buffer offset:0 atIndex:0];
-	[encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0
-	    vertexCount:list->count];
+	encodeLayerRange(encoder, layer, 0, r.layers[layer].count, texture);
 }
 
 static void
@@ -973,11 +1050,10 @@ encodeImages(id<MTLRenderCommandEncoder> encoder, int stage)
 				size_t start = draw->occlusionStart[layer];
 				size_t end = i + 1 < list->count ?
 				    list->items[i + 1].occlusionStart[layer] : vertices->count;
-				if (end > start) {
-					MacVertexList slice = {
-					    .items = vertices->items + start, .count = end - start};
-					encodeLayer(encoder, &slice, r.atlas);
-				}
+				if (end > start)
+					encodeLayerRange(encoder,
+					    MAC_LAYER_IMAGE_BACKGROUND + layer, start,
+					    end - start, r.atlas);
 			}
 		}
 	}
@@ -992,15 +1068,16 @@ encodeFrame(id<MTLRenderCommandEncoder> encoder)
 	    (float)r.view.drawableSize.height};
 	[encoder setVertexBytes:&viewport length:sizeof(viewport) atIndex:1];
 	[encoder setFragmentSamplerState:r.sampler atIndex:0];
+	uploadLayers();
 	encodeImages(encoder, 0);
-	encodeLayer(encoder, &r.layers[MAC_LAYER_BACKGROUND], r.atlas);
+	encodeLayer(encoder, MAC_LAYER_BACKGROUND, r.atlas);
 	encodeImages(encoder, 1);
-	encodeLayer(encoder, &r.layers[MAC_LAYER_TEXT], r.atlas);
-	encodeLayer(encoder, &r.layers[MAC_LAYER_DECORATION], r.atlas);
+	encodeLayer(encoder, MAC_LAYER_TEXT, r.atlas);
+	encodeLayer(encoder, MAC_LAYER_DECORATION, r.atlas);
 	encodeImages(encoder, 2);
-	encodeLayer(encoder, &r.layers[MAC_LAYER_OVERLAY_BACKGROUND], r.atlas);
-	encodeLayer(encoder, &r.layers[MAC_LAYER_OVERLAY_TEXT], r.atlas);
-	encodeLayer(encoder, &r.layers[MAC_LAYER_OVERLAY_DECORATION], r.atlas);
+	encodeLayer(encoder, MAC_LAYER_OVERLAY_BACKGROUND, r.atlas);
+	encodeLayer(encoder, MAC_LAYER_OVERLAY_TEXT, r.atlas);
+	encodeLayer(encoder, MAC_LAYER_OVERLAY_DECORATION, r.atlas);
 }
 
 void
@@ -1012,6 +1089,14 @@ mac_renderer_end(void)
 	    [r.command renderCommandEncoderWithDescriptor:r.pass];
 	encodeFrame(encoder);
 	[encoder endEncoding];
+	if (r.frameVertices) {
+		id<MTLBuffer> vertices = r.frameVertices;
+		r.frameVertices = nil;
+		[r.command addCompletedHandler:^(id<MTLCommandBuffer> buffer) {
+			(void)buffer;
+			returnVertexBuffer(vertices);
+		}];
+	}
 	if (r.presentCallback && r.drawable) {
 		void (*callback)(double) = r.presentCallback;
 		r.presentCallback = NULL;
