@@ -145,6 +145,16 @@ debug(const char *format, ...)
 	fputc('\n', stderr);
 }
 
+/* With ST_VIDEO_DEBUG: main-thread work that took a millisecond or more. */
+static void
+slow(const char *what, double begin)
+{
+	double ms = (CACurrentMediaTime() - begin) * 1000;
+
+	if (ms >= 1)
+		debug("slow: %s %.1f ms", what, ms);
+}
+
 static int64_t
 cmtime_us(CMTime time)
 {
@@ -249,12 +259,15 @@ decoded(void *refcon, void *frameRefcon, OSStatus status,
 static void
 destroy_session(STVideo *player)
 {
+	double begin = CACurrentMediaTime();
+
 	if (!player->session)
 		return;
 	VTDecompressionSessionWaitForAsynchronousFrames(player->session);
 	VTDecompressionSessionInvalidate(player->session);
 	CFRelease(player->session);
 	player->session = NULL;
+	slow("decoder session destroyed", begin);
 }
 
 static int
@@ -269,9 +282,11 @@ make_session(STVideo *player, CMVideoFormatDescriptionRef format)
 		decoded, (__bridge void *)player
 	};
 	VTDecompressionSessionRef session = NULL;
+	double begin = CACurrentMediaTime();
 	OSStatus status = VTDecompressionSessionCreate(kCFAllocatorDefault,
 	    format, NULL, (__bridge CFDictionaryRef)attributes, &callback,
 	    &session);
+	slow("decoder session created", begin);
 	if (status != noErr || !session)
 		return 0;
 	player->session = session;
@@ -527,7 +542,9 @@ reset_clock(STVideo *player)
 			    completionHandler:nil];
 		}
 	}
+	double begin = CACurrentMediaTime();
 	player.synchronizer = [AVSampleBufferRenderSynchronizer new];
+	slow("synchronizer created", begin);
 	player.audio = nil;
 	if (player->audioFormat) {
 		player.audio = [AVSampleBufferAudioRenderer new];
@@ -830,12 +847,14 @@ int
 mac_video_tick(double target)
 {
 	int changed = 0;
+	double begin = CACurrentMediaTime();
 
 	for (int i = 0; i < PLAYER_SLOTS; i++)
 		if (players[i])
 			changed |= tick_player(players[i], target);
 	if (textureCache)
 		CVMetalTextureCacheFlush(textureCache, 0);
+	slow("tick", begin);
 	if (changed && requestRedraw)
 		requestRedraw();
 	return changed;
