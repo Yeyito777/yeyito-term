@@ -239,10 +239,53 @@ bitrate) and switches to transcoding at once when it falls short. `--stats` logs
 adaptation state every 250 ms. Video is always H.264 (libx264, Annex B,
 SPS/PPS on every IDR), audio AAC-LC 48 kHz stereo.
 
+### Pipe mode
+
+```
+st-play --pipe --id N [--size WxH] [--link local|remote] [options] FILE
+```
+
+For a program that owns the terminal and wants to show a video inside its
+own layout (Exocortex's TUI, for one): st-play does the transcoding, flow
+control and adaptation, and the owner relays bytes and places the video.
+
+- stdout carries only complete Kitty graphics APCs for image id `N`:
+  the capability query (`k=c`), the open, packets, status queries.
+  Write each one through to the terminal unchanged and in order, and never
+  write anything between the chunks of a chunked (`m=1`) transfer.
+- stdin takes the terminal's replies about id `N`, relayed unchanged (they
+  are the acknowledgements the flow control runs on), and the owner's
+  commands as `ESC _ ! <command> ESC \`:
+
+  | Command | Effect |
+  | --- | --- |
+  | `pause`, `resume`, `toggle` | Pause or play; playing again after the end starts over. |
+  | `seek S` | Exact seek to `S` seconds. |
+  | `skip S` | Seek by `S` seconds (negative goes back). |
+  | `size WxH` | The placement is now `W` x `H` pixels: the resolution the encoder sends follows it. |
+  | `volume V`, `mute 0\|1` | Volume 0..1, mute. |
+  | `quit` | Exit. |
+
+- The video opens at the source's size (at most 4096 a side, the same
+  shape), so placements of any size scale it and a new placement size
+  never reopens it; `--size` and `size` only cap the resolution sent. The
+  owner places it (`a=p,i=N,...`) once the open has been written, moves
+  and crops it like any image, and deletes it (`a=d,d=I,i=N`): st-play
+  never places or deletes it, and at the end of the stream it waits for a
+  command instead of exiting.
+- The round trip of the capability query, across every link between
+  st-play and the terminal, seeds the flow control; `--link` says whether
+  that path is local (the default is a round trip under 10 ms).
+- stderr gets a line a second for the owner's status display:
+  `status kbps=.. size=WxH copy=0|1 rate=.. rtt=..` (`rate` in kbit/s),
+  and the reason when it exits with an error.
+- EOF on stdin or a closed stdout ends it.
+
 `tests/fake_video_term` runs st-play on a PTY behind a link with a set
 bandwidth, round-trip time and buffer, parses the stream with `graphics.c`
 and `video.c`, and validates it with libavcodec; `tests/test_play_e2e.sh`
-uses it in `make test`. `tests/pty_throttle` puts the same kind of link
+uses it in `make test` (with `--pipe` it plays st-play's owner, turning
+`--key` and `--command` into pipe commands). `tests/pty_throttle` puts the same kind of link
 between a real terminal and st-play:
 `st -e tests/pty_throttle --bw 3000 --rtt 150 -- st-play clip.mp4`.
 

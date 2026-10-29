@@ -89,10 +89,20 @@ run inline --key 1.5:space --key 2:space --key 2.5:q \
 # Terminals without video.
 run novideo --no-video -- $PLAY "$scratch/tiny.mp4" &
 run nographics --no-graphics -- $PLAY "$scratch/tiny.mp4" &
+# Pipe mode (an owner relays the stream and sends commands) over the
+# MacBook's link: pause, skip, an exact seek, a smaller placement, quit.
+run pipe --pipe --bw 3000 --rtt 150 --key 3:space --key 4:space \
+    --key 5:right --command 6:"seek 2" --command 7:"size 320x180" --key 10:q \
+    -- $PLAY --pipe --id 4242 --size 960x540 --link remote "$scratch/short.mp4" &
+# Pipe mode at the end of the clip: it waits for the owner, and playing
+# again starts over.
+run pipeend --pipe --command 4:toggle --command 7:quit \
+    -- $PLAY --pipe --id 77 --link local "$scratch/tiny.mp4" &
+run pipenovideo --pipe --no-video -- $PLAY --pipe --id 5 "$scratch/tiny.mp4" &
 wait
 
 echo "st-play end-to-end"
-for n in local slow drop eof term inline; do
+for n in local slow drop eof term inline pipe pipeend; do
 	check "$n: stream decodes cleanly" "v == 0" "$(value $n decode_errors)"
 	check "$n: keyframe with SPS/PPS after open/flush" "v == 0" \
 	    "$(value $n key_violations)"
@@ -140,9 +150,31 @@ check "inline: pause latency (s)" "v >= 0 && v < 0.3" "$(key_latency inline spac
 clean_exit novideo 1
 clean_exit nographics 1
 
+# Pipe mode: the owner places and deletes the video, so it is still there.
+pipe_exit() { # name [expected exit status]
+	check "$1: exit status" "v == ${2:-0}" "$(value "$1" exit_status)"
+	check "$1: parser not inside an escape" "v == 1" "$(value "$1" parser_ground)"
+	check "$1: nothing on the alternate screen" "v == 0" "$(value "$1" alt_screen_left_on)"
+}
+pipe_exit pipe
+check "pipe: video left for its owner to delete" "v == 1" "$(value pipe videos_left)"
+check "pipe: startup to playing (s)" "v > 0 && v < 1.5" "$(value pipe startup_playing)"
+check "pipe: pause latency (s)" "v >= 0 && v < 0.6" "$(key_latency pipe space effect_latency)"
+check "pipe: skip to playing (s)" "v >= 0 && v < 1.5" "$(key_latency pipe right playing_latency)"
+check "pipe: exact seek to playing (s)" "v >= 0 && v < 1.5" "$(key_latency pipe 'seek' playing_latency)"
+check "pipe: quit exits (s)" "v > 10 && v < 11" "$(value pipe child_exit)"
+check "pipe: no rebuffering" "v == 0" "$(value pipe rebuffers)"
+check "pipe: smaller placement lowers the resolution" "v == 1" \
+    "$(value pipe sizes | tr , '\n' | awk -F'[:x]' '$1 > 7 && $2 <= 320 { ok = 1 } END { print ok + 0 }')"
+pipe_exit pipeend
+check "pipeend: waits at the end, then plays again" "v >= 1" \
+    "$(value pipeend opens | sed 's/.*flushes=\([0-9]*\).*/\1/')"
+check "pipeend: exits on quit, not at the end (s)" "v > 7 && v < 8" "$(value pipeend child_exit)"
+pipe_exit pipenovideo 1
+
 echo "$pass passed, $fail failed"
 if [ "$fail" -ne 0 ]; then
-	for n in local slow drop eof term inline novideo nographics; do
+	for n in local slow drop eof term inline novideo nographics pipe pipeend pipenovideo; do
 		echo "--- $n (exit $(cat "$scratch/$n.code"))"
 		grep -v '_per_s=' "$scratch/$n.out" | head -n 40
 	done

@@ -4,7 +4,12 @@
  * the terminal it runs in through Kitty graphics APCs (a=v), so it plays
  * over SSH.  The terminal decodes and plays; st-play adapts bitrate and
  * resolution to the measured delivery rate and keeps the bytes in flight
- * small so keys act at once.  See play/flow.h for the flow control. */
+ * small so keys act at once.  See play/flow.h for the flow control.
+ *
+ * With --pipe it is a sender for another program that owns the terminal
+ * (docs/video.md, "Pipe mode"): packets go to stdout, the terminal's
+ * replies and the program's commands come in on stdin, and that program
+ * places the video and deletes it. */
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
 #define _DARWIN_C_SOURCE
@@ -48,8 +53,16 @@ typedef struct {
 	double ahead_cap;
 	FILE *stats;
 
+	/* Pipe mode: no terminal of our own, stdin/stdout instead. */
+	int pipe;
+	int link;		/* --link: 1 local, 0 remote, -1 by the round trip */
+	int box_w, box_h;	/* --size: the placement's pixels (resolution cap) */
+	int has_id;
+	double next_report;
+
 	/* Terminal */
 	int tty;
+	int rfd, wfd;	/* what we read replies from and write to */
 	struct termios saved;
 	int raw;
 	int cols, rows, cw, ch;
@@ -76,6 +89,7 @@ typedef struct {
 
 	/* Geometry */
 	int vw, vh;		/* display size of the video (terminal pixels) */
+	int limit_w, limit_h;	/* the encoder never goes above this */
 	int vcol, vrow, vx, vy;	/* placement, relative to the area */
 	int area_rows;
 	int opened;
@@ -241,7 +255,7 @@ static int
 write_all(App *a, const char *data, size_t length, double deadline)
 {
 	while (length) {
-		ssize_t n = write(a->tty, data, length);
+		ssize_t n = write(a->wfd, data, length);
 		if (n > 0) {
 			data += n;
 			length -= (size_t)n;
@@ -250,7 +264,7 @@ write_all(App *a, const char *data, size_t length, double deadline)
 		if (n < 0 && errno != EAGAIN && errno != EINTR)
 			return -1;
 		{
-			struct pollfd p = { a->tty, POLLOUT, 0 };
+			struct pollfd p = { a->wfd, POLLOUT, 0 };
 			double left = deadline - now_s();
 			if (left <= 0)
 				return -1;
@@ -428,7 +442,7 @@ pump_output(App *a, double now)
 				a->ping_queued = 0;
 			}
 		}
-		n = write(a->tty, m->data + m->offset, m->length - m->offset);
+		n = write(a->wfd, m->data + m->offset, m->length - m->offset);
 		if (n < 0) {
 			if (errno == EAGAIN || errno == EINTR)
 				return;
@@ -561,12 +575,49 @@ layout(App *a)
 	if (fh < 1) fh = 1;
 	ox = (area_w - fw) / 2;
 	oy = (area_h - fh) / 2;
-	a->vw = fw;
-	a->vh = fh;
+	a->vw = a->limit_w = fw;
+	a->vh = a->limit_h = fh;
 	a->vcol = ox / a->cw;
 	a->vx = ox % a->cw;
 	a->vrow = oy / a->ch;
 	a->vy = oy % a->ch;
+}
+
+/* Fit the source's shape into w x h (at most 4096 a side). */
+static void
+fit_source(App *a, int w, int h, int *out_w, int *out_h)
+{
+	double aspect = (double)a->info.width / a->info.height;
+	int fw, fh;
+
+	if (w > 4096) w = 4096;
+	if (h > 4096) h = 4096;
+	fw = w;
+	fh = (int)lround(fw / aspect);
+	if (fh > h) {
+		fh = h;
+		fw = (int)lround(fh * aspect);
+	}
+	*out_w = fw < 1 ? 1 : fw;
+	*out_h = fh < 1 ? 1 : fh;
+}
+
+/* Pipe mode: the video keeps the source's size (placements scale it), so
+ * a new placement size never reopens it; the placement only caps the
+ * resolution the encoder sends. */
+static void
+pipe_layout(App *a)
+{
+	if (!a->info.has_video) {
+		a->vw = a->vh = a->limit_w = a->limit_h = 0;
+		return;
+	}
+	fit_source(a, a->info.width, a->info.height, &a->vw, &a->vh);
+	a->limit_w = a->vw;
+	a->limit_h = a->vh;
+	if (a->box_w > 0 && a->box_h > 0 &&
+	    (a->box_w < a->vw || a->box_h < a->vh))
+		fit_source(a, a->box_w, a->box_h, &a->limit_w, &a->limit_h);
 }
 
 /* Move to row (0-based, relative to the area) and column. */
@@ -649,9 +700,9 @@ setup_adapt(App *a, double now)
 	/* Never upscale beyond the source or the placement. */
 	mw = a->info.width;
 	mh = a->info.height;
-	if (a->vw < mw || a->vh < mh) {
-		mw = a->vw;
-		mh = a->vh;
+	if (a->limit_w < mw || a->limit_h < mh) {
+		mw = a->limit_w;
+		mh = a->limit_h;
 	}
 	count = adapt_ladder(rungs, ADAPT_RUNGS, mw, mh);
 	adapt_init(&a->adapt, now, rungs, count, a->fps, a->flow.rate, audio,
@@ -687,7 +738,7 @@ open_video(App *a)
 	    "prebuffer=%d volume=%.3f pause=%d", a->prebuffer_ms,
 	    a->muted ? 0.0 : a->volume, a->paused);
 	video_command(a, "o", 1, "%s", config);
-	if (a->info.has_video) {
+	if (a->info.has_video && !a->pipe) {
 		char controls[128];
 		queue_goto(a, 0, a->vrow, a->vcol);
 		snprintf(controls, sizeof(controls),
@@ -865,12 +916,41 @@ draw_status(App *a, double now)
 	}
 }
 
+/* Pipe mode: what the owner shows instead of our status line, one line on
+ * stderr: "status kbps=.. size=WxH copy=0|1 rate=.. rtt=..". */
+static void
+report_status(App *a)
+{
+	int w = 0, h = 0;
+
+	if (a->media && a->info.has_video)
+		media_encoder_size(a->media, &w, &h);
+	fprintf(stderr, "status kbps=%.0f size=%dx%d copy=%d rate=%.0f rtt=%.3f\n",
+	    a->copying ? (a->info.bitrate > 0 ? a->info.bitrate / 1000.0 : 0) :
+	    a->adapt.kbps, w, h, a->copying, a->flow.rate * 8 / 1000,
+	    a->flow.srtt);
+	fflush(stderr);
+}
+
 /* Input */
 
 static void
 set_volume(App *a)
 {
 	video_command(a, "s", 1, "volume=%.3f", a->muted ? 0.0 : a->volume);
+}
+
+static void
+set_paused(App *a, int paused, double now)
+{
+	if (a->paused == paused)
+		return;
+	a->paused = paused;
+	video_command(a, "s", 1, "pause=%d", a->paused);
+	if (a->pos_known && a->state == ST_PLAYING && a->paused) {
+		a->pos = position_estimate(a, now);
+		a->pos_time = now;
+	}
 }
 
 static void
@@ -885,12 +965,7 @@ handle_key(App *a, int key, double now)
 		a->quit = 1;
 		break;
 	case ' ': case 'p': case 'P':
-		a->paused = !a->paused;
-		video_command(a, "s", 1, "pause=%d", a->paused);
-		if (a->pos_known && a->state == ST_PLAYING && a->paused) {
-			a->pos = position_estimate(a, now);
-			a->pos_time = now;
-		}
+		set_paused(a, !a->paused, now);
 		break;
 	case KEY_LEFT: seek_by(a, -5, now); break;
 	case KEY_RIGHT: seek_by(a, 5, now); break;
@@ -926,6 +1001,66 @@ handle_key(App *a, int key, double now)
 	a->next_status = 0;
 }
 
+/* Pipe mode: a command from the program that owns the terminal, the body
+ * of "ESC _ ! <verb> [<value>] ESC \\" (docs/video.md, "Pipe mode"). */
+static void
+handle_command(App *a, const char *text, size_t length, double now)
+{
+	int paused = a->paused, flushes = (int)a->valid_seq;
+	int ended = a->state == ST_ENDED && a->eof_sent;
+	char buf[128], verb[16];
+	double value = 0;
+	int fields, w, h;
+
+	if (length >= sizeof(buf))
+		return;
+	memcpy(buf, text, length);
+	buf[length] = '\0';
+	fields = sscanf(buf, "%15s %lf", verb, &value);
+	if (fields < 1)
+		return;
+	if (a->stats)
+		fprintf(a->stats, "command %s t=%.3f\n", buf, now - a->start_time);
+	if (!strcmp(verb, "quit")) {
+		a->quit = 1;
+	} else if (!strcmp(verb, "pause")) {
+		set_paused(a, 1, now);
+	} else if (!strcmp(verb, "resume") || !strcmp(verb, "toggle")) {
+		/* Playing again after the end starts over. */
+		if (ended) {
+			if (a->info.seekable)
+				restart_stream(a, 0, 0, now);
+			set_paused(a, 0, now);
+		} else {
+			set_paused(a, !strcmp(verb, "resume") ? 0 : !a->paused, now);
+		}
+	} else if (!strcmp(verb, "seek") && fields == 2) {
+		if (a->info.seekable)
+			restart_stream(a, (int64_t)(value * 1e6), 0, now);
+	} else if (!strcmp(verb, "skip") && fields == 2) {
+		seek_by(a, value, now);
+	} else if (!strcmp(verb, "volume") && fields == 2) {
+		a->volume = value < 0 ? 0 : value > 1 ? 1 : value;
+		a->muted = 0;
+		set_volume(a);
+	} else if (!strcmp(verb, "mute") && fields == 2) {
+		a->muted = value != 0;
+		set_volume(a);
+	} else if (!strcmp(verb, "size") &&
+	    sscanf(buf, "%*s %dx%d", &w, &h) == 2 && w > 0 && h > 0) {
+		int old_w = a->limit_w, old_h = a->limit_h;
+		a->box_w = w;
+		a->box_h = h;
+		pipe_layout(a);
+		if (a->info.has_video &&
+		    (a->limit_w != old_w || a->limit_h != old_h))
+			setup_adapt(a, now);
+	}
+	if (a->paused != paused || (int)a->valid_seq != flushes)
+		queue_ping(a);
+	a->next_report = 0;
+}
+
 static void
 handle_reply(App *a, const Reply *r, double now)
 {
@@ -951,7 +1086,8 @@ handle_reply(App *a, const Reply *r, double now)
 		a->shown = r->shown;
 		a->dropped = r->dropped;
 		snprintf(a->term_error, sizeof(a->term_error), "%s", r->error);
-		if (a->state == ST_ENDED && a->eof_sent) {
+		/* In pipe mode the owner decides: replay, seek back, close. */
+		if (a->state == ST_ENDED && a->eof_sent && !a->pipe) {
 			a->quit = 1;
 		}
 		return;
@@ -978,12 +1114,18 @@ input_event(const InputEvent *e, void *context)
 	double now = now_s();
 
 	if (e->type == INPUT_KEY) {
-		handle_key(a, e->key, now);
+		/* A pipe carries replies and commands, never keystrokes. */
+		if (!a->pipe)
+			handle_key(a, e->key, now);
+	} else if (e->type == INPUT_COMMAND) {
+		if (a->pipe)
+			handle_command(a, e->text, e->length, now);
 	} else if (e->type == INPUT_APC) {
 		Reply r;
 		if (reply_parse(e->text, e->length, &r))
 			handle_reply(a, &r, now);
-	} else if (e->type == INPUT_CELL_SIZE && e->width > 0 && e->height > 0) {
+	} else if (e->type == INPUT_CELL_SIZE && e->width > 0 && e->height > 0 &&
+	    !a->pipe) {
 		if (a->cw != e->width || a->ch != e->height) {
 			a->cw = e->width;
 			a->ch = e->height;
@@ -1000,7 +1142,7 @@ read_input(App *a)
 	unsigned char buf[4096];
 	ssize_t n;
 
-	while ((n = read(a->tty, buf, sizeof(buf))) > 0) {
+	while ((n = read(a->rfd, buf, sizeof(buf))) > 0) {
 		input_feed(&a->in, buf, (size_t)n, input_event, a);
 		if (input_pending_escape(&a->in))
 			a->esc_time = now_s();
@@ -1046,8 +1188,9 @@ probe_event(const InputEvent *e, void *context)
 static void
 probe_wait(App *a, Probe *p, double deadline)
 {
-	while (!p->got_da1 && !got_quit) {
-		struct pollfd fd = { a->tty, POLLIN, 0 };
+	/* A pipe's reader answers only the query (no DA1). */
+	while (!(a->pipe ? p->got_caps : p->got_da1) && !got_quit) {
+		struct pollfd fd = { a->rfd, POLLIN, 0 };
 		double left = deadline - now_s();
 		unsigned char buf[4096];
 		ssize_t n;
@@ -1056,7 +1199,7 @@ probe_wait(App *a, Probe *p, double deadline)
 			break;
 		if (select_poll(&fd, 1, (int)(left * 1000) + 1) <= 0)
 			continue;
-		while ((n = read(a->tty, buf, sizeof(buf))) > 0)
+		while ((n = read(a->rfd, buf, sizeof(buf))) > 0)
 			input_feed(&a->in, buf, (size_t)n, probe_event, p);
 		if (n == 0 || (n < 0 && errno != EAGAIN && errno != EINTR))
 			break;
@@ -1108,6 +1251,24 @@ shutdown_terminal(App *a)
 		probe_wait(a, &p, now_s() + wait);
 	}
 	restore_tty(a);
+}
+
+/* Pipe mode: the owner deletes the video; only never leave its terminal
+ * inside a half-written APC. */
+static void
+shutdown_pipe(App *a)
+{
+	OutMsg *head = a->out.head;
+	double deadline = now_s() + 1.0;
+
+	if (!got_hup && head && head->offset && head->offset < head->length) {
+		if (head->kind == OUT_MEDIA)
+			write_all(a, apc_abort, sizeof(apc_abort) - 1, deadline);
+		else
+			write_all(a, (char *)head->data + head->offset,
+			    head->length - head->offset, deadline);
+	}
+	out_clear(&a->out);
 }
 
 /* Stats */
@@ -1247,7 +1408,12 @@ usage(FILE *f)
 	    "  --stats FILE      append flow/adaptation stats every 250 ms\n"
 	    "  --log FILE        append ffmpeg's log\n\n"
 	    "keys: space/p pause, left/right 5 s, down/up 60 s, PgDn/PgUp 10 min,\n"
-	    "      m mute, 9/0 volume, q/Esc/Ctrl-C quit\n");
+	    "      m mute, 9/0 volume, q/Esc/Ctrl-C quit\n\n"
+	    "Pipe mode, for a program that owns the terminal (docs/video.md):\n"
+	    "  --pipe            packets to stdout; replies and commands on stdin\n"
+	    "  --id N            the video's image id (required with --pipe)\n"
+	    "  --size WxH        the placement in pixels (caps the resolution)\n"
+	    "  --link local|remote  the terminal's link (default: by round trip)\n");
 }
 
 static int
@@ -1312,6 +1478,36 @@ parse_args(App *a, int argc, char **argv)
 		} else if (!strcmp(arg, "--log")) {
 			NEEDS();
 			log = val;
+		} else if (!strcmp(arg, "--pipe")) {
+			a->pipe = 1;
+		} else if (!strcmp(arg, "--id")) {
+			char *end;
+			unsigned long id;
+			NEEDS();
+			id = strtoul(val, &end, 10);
+			if (*end || !id || id > 0xffffffffUL) {
+				fprintf(stderr, "st-play: --id needs a number from 1 to 4294967295\n");
+				return -1;
+			}
+			a->id = (uint32_t)id;
+			a->has_id = 1;
+		} else if (!strcmp(arg, "--size")) {
+			NEEDS();
+			if (sscanf(val, "%dx%d", &a->box_w, &a->box_h) != 2 ||
+			    a->box_w < 1 || a->box_h < 1) {
+				fprintf(stderr, "st-play: --size needs WIDTHxHEIGHT\n");
+				return -1;
+			}
+		} else if (!strcmp(arg, "--link")) {
+			NEEDS();
+			if (!strcmp(val, "local"))
+				a->link = 1;
+			else if (!strcmp(val, "remote"))
+				a->link = 0;
+			else {
+				fprintf(stderr, "st-play: --link is local or remote\n");
+				return -1;
+			}
 		} else if (arg[0] == '-' && arg[1]) {
 			fprintf(stderr, "st-play: unknown option %s\n", arg);
 			return -1;
@@ -1327,34 +1523,35 @@ parse_args(App *a, int argc, char **argv)
 		usage(stderr);
 		return -1;
 	}
+	if (a->pipe && !a->has_id) {
+		fprintf(stderr, "st-play: --pipe needs --id\n");
+		return -1;
+	}
+	if (a->pipe && a->inline_rows) {
+		fprintf(stderr, "st-play: --pipe and --inline don't mix\n");
+		return -1;
+	}
 	media_log_to(log);
 	return 0;
 }
 
-int
-main(int argc, char **argv)
+/* Terminal startup: raw input, the video query (timed for the round trip
+ * while the input opens).  Returns 0, or the exit status. */
+static int
+tty_start(App *a)
 {
-	App *a = &app;
 	Probe probe;
 	char error[512];
 	double t0, opened_at, now;
 	char query[128];
 	int n;
 
-	memset(a, 0, sizeof(*a));
-	a->tty = -1;
-	if (parse_args(a, argc, argv) < 0)
-		return 2;
-	a->start_time = now_s();
-	a->id = 0x5700000u | ((uint32_t)getpid() & 0xfffffu);
-	a->state = STATE_UNKNOWN;
-	a->sent_video = a->sent_audio = MEDIA_TIME_NONE;
-
 	a->tty = open("/dev/tty", O_RDWR | O_NOCTTY | O_CLOEXEC);
 	if (a->tty < 0) {
 		fprintf(stderr, "st-play: no terminal: %s\n", strerror(errno));
 		return 1;
 	}
+	a->rfd = a->wfd = a->tty;
 	install_signals();
 	if (set_raw(a, 1) < 0) {
 		fprintf(stderr, "st-play: cannot set up the terminal: %s\n",
@@ -1431,6 +1628,84 @@ main(int argc, char **argv)
 		a->cw = 8;
 		a->ch = 16;
 	}
+	return 0;
+}
+
+/* Pipe startup: open the input, then ask the terminal (through the owner)
+ * whether it plays video; the answer's round trip, which crosses every
+ * link between us and the terminal, seeds the flow control. */
+static int
+pipe_start(App *a)
+{
+	Probe probe;
+	char error[512], query[64];
+	double t0, rtt;
+	int n;
+
+	a->rfd = 0;
+	a->wfd = 1;
+	install_signals();
+	fcntl(a->rfd, F_SETFL, fcntl(a->rfd, F_GETFL) | O_NONBLOCK);
+	fcntl(a->wfd, F_SETFL, fcntl(a->wfd, F_GETFL) | O_NONBLOCK);
+	/* A fatal signal only has to end a half-written packet. */
+	emergency_tty = a->wfd;
+	emergency_length = 0;
+	input_init(&a->in);
+	a->media = media_open(a->input, !a->no_audio, &got_quit, &a->info,
+	    error, sizeof(error));
+	if (!a->media) {
+		if (got_quit)
+			return 130;
+		fprintf(stderr, "st-play: %s\n", error);
+		return 1;
+	}
+	n = snprintf(query, sizeof(query), "\033_Ga=v,i=%u,k=c\033\\", a->id);
+	t0 = now_s();
+	if (write_all(a, query, (size_t)n, t0 + 5) < 0) {
+		fprintf(stderr, "st-play: cannot write to the pipe\n");
+		return 1;
+	}
+	memset(&probe, 0, sizeof(probe));
+	probe.app = a;
+	probe_wait(a, &probe, t0 + 10);
+	if (!probe.got_caps || !probe.caps_ok) {
+		if (got_quit)
+			return 130;
+		if (probe.got_caps)
+			fprintf(stderr, "st-play: the terminal can't play video (%s)\n",
+			    probe.caps);
+		else
+			fprintf(stderr, "st-play: the terminal did not answer\n");
+		return 1;
+	}
+	rtt = probe.caps_time - t0;
+	a->local = a->link >= 0 ? a->link : rtt < 0.01;
+	flow_init(&a->flow, now_s(), rtt, a->local ? 40e6 : 250e3);
+	return 0;
+}
+
+int
+main(int argc, char **argv)
+{
+	App *a = &app;
+	double now;
+	int status;
+
+	memset(a, 0, sizeof(*a));
+	a->tty = a->rfd = a->wfd = -1;
+	a->link = -1;
+	if (parse_args(a, argc, argv) < 0)
+		return 2;
+	a->start_time = now_s();
+	if (!a->has_id)
+		a->id = 0x5700000u | ((uint32_t)getpid() & 0xfffffu);
+	a->state = STATE_UNKNOWN;
+	a->sent_video = a->sent_audio = MEDIA_TIME_NONE;
+
+	status = a->pipe ? pipe_start(a) : tty_start(a);
+	if (status)
+		return status;
+	now = now_s();
 	if (a->prebuffer_ms < 0)
 		a->prebuffer_ms = a->local ? 200 : 300;
 	if (a->ahead_cap < 0)
@@ -1442,7 +1717,9 @@ main(int argc, char **argv)
 		a->inline_rows = a->rows;
 
 	/* Screen */
-	if (a->inline_rows) {
+	if (a->pipe) {
+		/* The owner's screen: nothing to set up. */
+	} else if (a->inline_rows) {
 		char buf[64];
 		int k, i;
 		write_all(a, "\033[?25l\r", 7, now + 2);
@@ -1456,7 +1733,10 @@ main(int argc, char **argv)
 	} else {
 		write_all(a, "\033[?1049h\033[?25l\033[H\033[2J", 21, now + 2);
 	}
-	layout(a);
+	if (a->pipe)
+		pipe_layout(a);
+	else
+		layout(a);
 	setup_adapt(a, now);
 	if (a->copy && a->info.copyable && (a->local || a->adapt.usable_kbps >
 	    1.3 * (a->info.bitrate > 0 ? a->info.bitrate / 1000.0 : 8000))) {
@@ -1475,8 +1755,9 @@ main(int argc, char **argv)
 
 	/* Main loop */
 	while (!a->quit && !got_quit) {
-		struct pollfd fds[3];
-		int nfds = 0, timeout, producing;
+		struct pollfd fds[4];
+		int nfds = 0, timeout, producing, want_out;
+		int sig_fd, media_fd = -1;
 		double next;
 
 		now = now_s();
@@ -1489,7 +1770,8 @@ main(int argc, char **argv)
 			a->resize_at = 0;
 			relayout(a, now);
 		}
-		if (input_pending_escape(&a->in) &&
+		/* A pipe has no Escape key: a lone ESC is half a reply. */
+		if (!a->pipe && input_pending_escape(&a->in) &&
 		    now - a->esc_time >= INPUT_ESC_TIMEOUT)
 			input_timeout(&a->in, input_event, a);
 		if (now >= a->next_adapt) {
@@ -1497,7 +1779,10 @@ main(int argc, char **argv)
 			speed_tick(a, now);
 			a->next_adapt = now + 0.1;
 		}
-		if (now >= a->next_status) {
+		if (a->pipe && now >= a->next_report) {
+			report_status(a);
+			a->next_report = now + 1.0;
+		} else if (!a->pipe && now >= a->next_status) {
 			draw_status(a, now);
 			a->next_status = now + 0.25;
 		}
@@ -1518,24 +1803,33 @@ main(int argc, char **argv)
 		if (a->quit || got_quit)
 			break;
 
-		fds[nfds].fd = a->tty;
-		fds[nfds].events = POLLIN | (a->out.head && (a->out.head->offset ||
-		    a->out.head->kind != OUT_MEDIA || flow_may_send(&a->flow)) ?
+		want_out = a->out.head && (a->out.head->offset ||
+		    a->out.head->kind != OUT_MEDIA || flow_may_send(&a->flow));
+		fds[nfds].fd = a->rfd;
+		fds[nfds].events = POLLIN | (want_out && a->wfd == a->rfd ?
 		    POLLOUT : 0);
 		nfds++;
+		if (a->wfd != a->rfd) {
+			fds[nfds].fd = a->wfd;
+			fds[nfds].events = want_out ? POLLOUT : 0;
+			nfds++;
+		}
+		sig_fd = nfds;
 		fds[nfds].fd = signal_pipe[0];
 		fds[nfds].events = POLLIN;
 		nfds++;
 		if (a->media) {
+			media_fd = nfds;
 			fds[nfds].fd = media_wake_fd(a->media);
 			fds[nfds].events = POLLIN;
 			nfds++;
 		}
 		next = a->next_adapt;
-		if (a->next_status < next) next = a->next_status;
+		if (!a->pipe && a->next_status < next) next = a->next_status;
+		if (a->pipe && a->next_report < next) next = a->next_report;
 		if (a->stats && a->next_stats < next) next = a->next_stats;
 		if (a->resize_at && a->resize_at < next) next = a->resize_at;
-		if (input_pending_escape(&a->in) &&
+		if (!a->pipe && input_pending_escape(&a->in) &&
 		    a->esc_time + INPUT_ESC_TIMEOUT < next)
 			next = a->esc_time + INPUT_ESC_TIMEOUT;
 		{
@@ -1548,18 +1842,23 @@ main(int argc, char **argv)
 		    (int)((next - now) * 1000) + 1;
 		if (select_poll(fds, nfds, timeout) < 0 && errno != EINTR)
 			break;
-		if (fds[1].revents & POLLIN) {
+		if (fds[sig_fd].revents & POLLIN) {
 			char buf[64];
 			while (read(signal_pipe[0], buf, sizeof(buf)) > 0)
 				;
 		}
-		if (nfds > 2 && (fds[2].revents & POLLIN))
+		if (media_fd >= 0 && (fds[media_fd].revents & POLLIN))
 			media_drain_wake(a->media);
 		if (fds[0].revents & (POLLIN | POLLHUP | POLLERR))
 			read_input(a);
+		if (a->wfd != a->rfd && (fds[1].revents & (POLLHUP | POLLERR)))
+			got_hup = got_quit = 1;
 	}
 
-	shutdown_terminal(a);
+	if (a->pipe)
+		shutdown_pipe(a);
+	else
+		shutdown_terminal(a);
 	if (a->stats) {
 		write_stats(a, now_s());
 		fclose(a->stats);
