@@ -47,15 +47,35 @@ below): beyond them the offset is held at that many rows.
 On macOS those frames come from the window's display link. macOS has been
 seen to slow one window's link to about 10 Hz for good while its other
 redraws stayed fast (Oct 2026: glides at 10 fps in that window only; a new
-window was fine). A watchdog timer runs during glides: when the link misses
-two frames in a row, the timer paces that window's glides at the display's
-rate, and it hands them back once the link ticks on time again (8 ticks in a
-row). The first switch in a process adds an `event=displaylink_slow` line to
-`~/Library/Logs/st/launch.log` with the window's and the system's state.
+window was fine). A watchdog timer runs during glides and draws any frame the
+link is 1.5 periods late with, so a link slow to wake up when a glide starts
+costs nothing. Three link intervals in a row of 2.5 periods or more (counted
+across glides) make the window's glides timer-paced and restart the link;
+after 8 on-time link ticks in a row they go back to it. Timer frames reach
+the screen like link frames (measured in a real window: 8.33 ms apart,
+28 ms p50 from start to shown, both ways).
+
+`~/Library/Logs/st/launch.log` records it, always on:
+
+- `event=glide_slow`: a glide whose frames came slowly (p50 over 1.5 periods
+  apart, or p90 over 4): its duration, frames drawn by the link and by the
+  timer, p50/p90/max interval, the link's p50, the first tick's delay, the
+  longest wait for a drawable. At most one line per 2 s (later ones are
+  counted in `suppressed`), 200 per process.
+- `event=displaylink_slow`: a slow-link episode began: the three intervals,
+  the first tick's delay, how many glides started late, timer frames so far.
+- `event=displaylink_recovered`: back on the link: duration, slow ticks,
+  the longest interval, timer frames, and `slow_after_restart` (0: nothing
+  was slow once the link was restarted). `displaylink_slow_at_exit` if the
+  window closed first.
+
+Every line ends with the window's and the system's state (visibility, key,
+active, fps, thermal state, low power, RSS, load). For testing:
 `ST_DISPLAYLINK_THROTTLE_MS=N[:S]` slows the link to one frame per N ms (for
-the first S seconds) and `ST_GLIDE_WATCHDOG=0` turns the watchdog off, for
-testing it: `tests/macos_headless -A -- tests/glide_driver.sh` prints the
-frames the timer drew.
+the first S seconds), `ST_DISPLAYLINK_START_MS=N` holds each glide's first
+tick back N ms and `ST_GLIDE_WATCHDOG=0` turns the watchdog off;
+`tests/macos_headless -A -- tests/glide_driver.sh [INTERVAL [EASE_MS]]`
+prints the frames the timer drew and, with no window, the event lines.
 
 While the offset `o` is not 0, every grid cell inside a rectangle is drawn `o`
 rows lower (or higher), clipped to its rectangle. An image moves with the
