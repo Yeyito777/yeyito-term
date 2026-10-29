@@ -27,6 +27,9 @@ if [ -z "$scratch" ] || ! clip short 20 960x540 30 2>/dev/null; then
 fi
 trap 'rm -rf "$scratch"' EXIT INT TERM
 clip tiny 2 320x180 25 || exit 1
+# A phone held upright: coded 320x180, shown turned (display matrix).
+ffmpeg -v error -y -display_rotation 90 -i "$scratch/tiny.mp4" -c copy \
+    "$scratch/portrait.mp4" || exit 1
 
 run() { # name, fake_video_term args... -- st-play args...
 	name=$1
@@ -99,10 +102,12 @@ run pipe --pipe --bw 3000 --rtt 150 --key 3:space --key 4:space \
 run pipeend --pipe --command 4:toggle --command 7:quit \
     -- $PLAY --pipe --id 77 --link local "$scratch/tiny.mp4" &
 run pipenovideo --pipe --no-video -- $PLAY --pipe --id 5 "$scratch/tiny.mp4" &
+# A rotated file plays upright.
+run portrait -- $PLAY "$scratch/portrait.mp4" &
 wait
 
 echo "st-play end-to-end"
-for n in local slow drop eof term inline pipe pipeend; do
+for n in local slow drop eof term inline pipe pipeend portrait; do
 	check "$n: stream decodes cleanly" "v == 0" "$(value $n decode_errors)"
 	check "$n: keyframe with SPS/PPS after open/flush" "v == 0" \
 	    "$(value $n key_violations)"
@@ -172,9 +177,13 @@ check "pipeend: waits at the end, then plays again" "v >= 1" \
 check "pipeend: exits on quit, not at the end (s)" "v > 7 && v < 8" "$(value pipeend child_exit)"
 pipe_exit pipenovideo 1
 
+clean_exit portrait
+check "portrait: sent upright (portrait frames)" "v == 1" \
+    "$(value portrait sizes | tr , '\n' | awk -F'[:x]' 'NR == 1 { print ($3 > $2) ? 1 : 0 }')"
+
 echo "$pass passed, $fail failed"
 if [ "$fail" -ne 0 ]; then
-	for n in local slow drop eof term inline novideo nographics pipe pipeend pipenovideo; do
+	for n in local slow drop eof term inline novideo nographics pipe pipeend pipenovideo portrait; do
 		echo "--- $n (exit $(cat "$scratch/$n.code"))"
 		grep -v '_per_s=' "$scratch/$n.out" | head -n 40
 	done

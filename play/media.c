@@ -18,6 +18,7 @@
 #include <libavformat/avformat.h>
 #include <libavutil/audio_fifo.h>
 #include <libavutil/channel_layout.h>
+#include <libavutil/display.h>
 #include <libavutil/opt.h>
 #include <libavutil/pixdesc.h>
 #include <libswresample/swresample.h>
@@ -60,7 +61,10 @@ struct Media {
 
 	/* Decode */
 	AVCodecContext *vdec, *adec;
-	AVFrame *frame, *held, *scaled, *aframe;
+	AVFrame *frame, *held, *scaled, *upright, *aframe;
+	/* Clockwise degrees (0, 90, 180, 270) that turn decoded frames the
+	 * way the file says to show them (a phone held upright). */
+	int rotate;
 	AVPacket *out;
 	struct SwsContext *sws;
 	int sws_w, sws_h, sws_fmt;
@@ -301,6 +305,62 @@ open_decoder(AVStream *st, char *error, size_t size)
 	return c;
 }
 
+/* The display matrix's rotation, as clockwise degrees to apply. */
+static int
+stream_rotation(AVStream *st)
+{
+	const int32_t *matrix = NULL;
+	double theta;
+	int degrees;
+
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(60, 31, 102)
+	const AVPacketSideData *sd = av_packet_side_data_get(
+	    st->codecpar->coded_side_data, st->codecpar->nb_coded_side_data,
+	    AV_PKT_DATA_DISPLAYMATRIX);
+	if (sd && sd->size >= 9 * sizeof(int32_t))
+		matrix = (const int32_t *)sd->data;
+#else
+	size_t size = 0;
+	matrix = (const int32_t *)av_stream_get_side_data(st,
+	    AV_PKT_DATA_DISPLAYMATRIX, &size);
+	if (size < 9 * sizeof(int32_t))
+		matrix = NULL;
+#endif
+	if (!matrix)
+		return 0;
+	theta = -av_display_rotation_get(matrix);
+	if (isnan(theta))
+		return 0;
+	degrees = (int)lround(theta / 90) * 90;
+	return ((degrees % 360) + 360) % 360;
+}
+
+/* Turn one 8-bit plane `degrees` clockwise (90, 180, 270). */
+static void
+rotate_plane(const uint8_t *src, int src_stride, int w, int h, uint8_t *dst,
+		int dst_stride, int degrees)
+{
+	int x, y;
+
+	for (y = 0; y < h; y++) {
+		const uint8_t *row = src + (size_t)y * src_stride;
+		for (x = 0; x < w; x++) {
+			int dx, dy;
+			if (degrees == 90) {
+				dx = h - 1 - y;
+				dy = x;
+			} else if (degrees == 270) {
+				dx = y;
+				dy = w - 1 - x;
+			} else {
+				dx = w - 1 - x;
+				dy = h - 1 - y;
+			}
+			dst[(size_t)dy * dst_stride + dx] = row[x];
+		}
+	}
+}
+
 Media *
 media_open(const char *url, int want_audio, volatile sig_atomic_t *cancel,
 		MediaInfo *info, char *error, size_t error_size)
@@ -378,10 +438,17 @@ media_open(const char *url, int want_audio, volatile sig_atomic_t *cancel,
 			m->info.width = (int)((int64_t)p->width * sar.num / sar.den);
 		if (m->info.width < 2) m->info.width = 2;
 		if (m->info.height < 2) m->info.height = 2;
+		m->rotate = stream_rotation(st);
+		if (m->rotate == 90 || m->rotate == 270) {
+			int w = m->info.width;
+			m->info.width = m->info.height;
+			m->info.height = w;
+		}
 		m->info.fps = fr.num > 0 && fr.den > 0 ? av_q2d(fr) : 30;
 		if (m->info.fps > 120 || m->info.fps < 1)
 			m->info.fps = 30;
-		m->info.copyable = p->codec_id == AV_CODEC_ID_H264 &&
+		/* A rotated stream passed through would show sideways. */
+		m->info.copyable = !m->rotate && p->codec_id == AV_CODEC_ID_H264 &&
 		    (p->format == AV_PIX_FMT_YUV420P ||
 		    p->format == AV_PIX_FMT_YUVJ420P) &&
 		    p->width <= 4096 && p->height <= 4096;
@@ -466,6 +533,7 @@ media_close(Media *m)
 	av_frame_free(&m->held);
 	av_frame_free(&m->pending);
 	av_frame_free(&m->scaled);
+	av_frame_free(&m->upright);
 	av_frame_free(&m->aframe);
 	av_packet_free(&m->out);
 	sws_freeContext(m->sws);
@@ -710,7 +778,8 @@ flush_video_encoder(Media *m, MediaEmit emit, void *ctx)
 static int
 encode_video(Media *m, AVFrame *frame, int64_t pts, MediaEmit emit, void *ctx)
 {
-	int r;
+	int r, scaled_w, scaled_h;
+	AVFrame *out;
 
 	if (m->venc && (m->want_w != m->enc_w || m->want_h != m->enc_h ||
 	    m->want_fps != m->enc_fps || strcmp(m->want_preset, m->enc_preset))) {
@@ -742,9 +811,12 @@ encode_video(Media *m, AVFrame *frame, int64_t pts, MediaEmit emit, void *ctx)
 		return 0;
 	m->last_enc_pts = pts;
 
+	/* A rotated stream is scaled as it was coded, then turned. */
+	scaled_w = m->rotate == 90 || m->rotate == 270 ? m->enc_h : m->enc_w;
+	scaled_h = m->rotate == 90 || m->rotate == 270 ? m->enc_w : m->enc_h;
 	if (!m->sws || m->sws_w != frame->width || m->sws_h != frame->height ||
 	    m->sws_fmt != frame->format || !m->scaled ||
-	    m->scaled->width != m->enc_w || m->scaled->height != m->enc_h) {
+	    m->scaled->width != scaled_w || m->scaled->height != scaled_h) {
 		int full = frame->color_range == AVCOL_RANGE_JPEG ||
 		    frame->format == AV_PIX_FMT_YUVJ420P ||
 		    frame->format == AV_PIX_FMT_YUVJ422P ||
@@ -761,8 +833,8 @@ encode_video(Media *m, AVFrame *frame, int64_t pts, MediaEmit emit, void *ctx)
 			av_opt_set_int(m->sws, "srcw", frame->width, 0);
 			av_opt_set_int(m->sws, "srch", frame->height, 0);
 			av_opt_set_int(m->sws, "src_format", frame->format, 0);
-			av_opt_set_int(m->sws, "dstw", m->enc_w, 0);
-			av_opt_set_int(m->sws, "dsth", m->enc_h, 0);
+			av_opt_set_int(m->sws, "dstw", scaled_w, 0);
+			av_opt_set_int(m->sws, "dsth", scaled_h, 0);
 			av_opt_set_int(m->sws, "dst_format", AV_PIX_FMT_YUV420P, 0);
 			av_opt_set_int(m->sws, "sws_flags", flags, 0);
 			av_opt_set_int(m->sws, "threads", 4, 0);
@@ -783,13 +855,24 @@ encode_video(Media *m, AVFrame *frame, int64_t pts, MediaEmit emit, void *ctx)
 		m->sws_h = frame->height;
 		m->sws_fmt = frame->format;
 		av_frame_free(&m->scaled);
+		av_frame_free(&m->upright);
 		m->scaled = av_frame_alloc();
 		m->scaled->format = AV_PIX_FMT_YUV420P;
-		m->scaled->width = m->enc_w;
-		m->scaled->height = m->enc_h;
+		m->scaled->width = scaled_w;
+		m->scaled->height = scaled_h;
 		if (av_frame_get_buffer(m->scaled, 0) < 0) {
 			snprintf(m->error, sizeof(m->error), "out of memory");
 			return -1;
+		}
+		if (m->rotate) {
+			m->upright = av_frame_alloc();
+			m->upright->format = AV_PIX_FMT_YUV420P;
+			m->upright->width = m->enc_w;
+			m->upright->height = m->enc_h;
+			if (av_frame_get_buffer(m->upright, 0) < 0) {
+				snprintf(m->error, sizeof(m->error), "out of memory");
+				return -1;
+			}
 		}
 	}
 	if (av_frame_make_writable(m->scaled) < 0)
@@ -798,13 +881,27 @@ encode_video(Media *m, AVFrame *frame, int64_t pts, MediaEmit emit, void *ctx)
 		snprintf(m->error, sizeof(m->error), "scaling failed");
 		return -1;
 	}
-	m->scaled->pts = pts;
-	m->scaled->pict_type = AV_PICTURE_TYPE_NONE;
-	m->scaled->color_primaries = m->venc->color_primaries;
-	m->scaled->color_trc = m->venc->color_trc;
-	m->scaled->colorspace = m->venc->colorspace;
-	m->scaled->color_range = AVCOL_RANGE_MPEG;
-	if ((r = avcodec_send_frame(m->venc, m->scaled)) < 0) {
+	out = m->scaled;
+	if (m->rotate) {
+		int plane;
+		if (av_frame_make_writable(m->upright) < 0)
+			return -1;
+		for (plane = 0; plane < 3; plane++) {
+			int shift = plane ? 1 : 0;
+			rotate_plane(m->scaled->data[plane], m->scaled->linesize[plane],
+			    scaled_w >> shift, scaled_h >> shift,
+			    m->upright->data[plane], m->upright->linesize[plane],
+			    m->rotate);
+		}
+		out = m->upright;
+	}
+	out->pts = pts;
+	out->pict_type = AV_PICTURE_TYPE_NONE;
+	out->color_primaries = m->venc->color_primaries;
+	out->color_trc = m->venc->color_trc;
+	out->colorspace = m->venc->colorspace;
+	out->color_range = AVCOL_RANGE_MPEG;
+	if ((r = avcodec_send_frame(m->venc, out)) < 0) {
 		set_error(m, "encoding video", r);
 		return -1;
 	}

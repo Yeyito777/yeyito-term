@@ -233,7 +233,9 @@ st-play [--inline ROWS] [--start S] [--copy] [--bitrate KBPS]
 Fullscreen on the alternate screen with a status line, or `--inline ROWS`
 at the cursor. Keys: space/`p` pause, left/right 5 s, down/up 60 s,
 PgDn/PgUp 10 min, `m` mute, `9`/`0` volume, `q`/Esc/Ctrl-C quit. Seeks are
-exact (decode to the target, `k=f` with `start=`, a new IDR). `--copy` passes
+exact (decode to the target, `k=f` with `start=`, a new IDR). A file whose
+display matrix turns it (a phone video held upright) is sent upright, and never
+passed through. `--copy` passes
 8-bit H.264 through when the link has room for it (about 1.5 times its
 bitrate) and switches to transcoding at once when it falls short. `--stats` logs the flow and
 adaptation state every 250 ms. Video is always H.264 (libx264, Annex B,
