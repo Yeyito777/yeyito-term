@@ -44,6 +44,19 @@ window is on (X11: the monitor's mode from XRandR; macOS: the screen's
 a term is running. It never goes past the lines st kept for that side (see
 below): beyond them the offset is held at that many rows.
 
+On macOS those frames come from the window's display link. macOS has been
+seen to slow one window's link to about 10 Hz for good while its other
+redraws stayed fast (Oct 2026: glides at 10 fps in that window only; a new
+window was fine). A watchdog timer runs during glides: when the link misses
+two frames in a row, the timer paces that window's glides at the display's
+rate, and it hands them back once the link ticks on time again (8 ticks in a
+row). The first switch in a process adds an `event=displaylink_slow` line to
+`~/Library/Logs/st/launch.log` with the window's and the system's state.
+`ST_DISPLAYLINK_THROTTLE_MS=N[:S]` slows the link to one frame per N ms (for
+the first S seconds) and `ST_GLIDE_WATCHDOG=0` turns the watchdog off, for
+testing it: `tests/macos_headless -A -- tests/glide_driver.sh` prints the
+frames the timer drew.
+
 While the offset `o` is not 0, every grid cell inside a rectangle is drawn `o`
 rows lower (or higher), clipped to its rectangle. An image moves with the
 offset and clips to the bounding box of every rectangle on its anchor row (an

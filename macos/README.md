@@ -72,8 +72,9 @@ thread's drawing time without `wait`, the time blocked for a drawable,
 `shown` the time from start until the frame was on screen (-1 if it never
 was), `main` the main thread's CPU time since the previous frame began,
 `tty_bytes` and `parse` the PTY output parsed in between and the time that
-took. `flags`: `g` the display link drew it (a glide), `v` a video frame
-changed, `t` output arrived, `k` a key was pressed. A process stops logging
+took. `flags`: `g` a glide frame, `v` a video frame changed, `t` output
+arrived, `k` a key was pressed, `w` the glide watchdog's timer drew it
+instead of the display link (docs/app-smooth-scroll.md). A process stops logging
 after 200,000 lines until the file is recreated.
 
 `tests/macos_headless -A` measures the same things without a window (see
