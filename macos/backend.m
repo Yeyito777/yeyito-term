@@ -110,6 +110,8 @@ static void ttysend(const Arg *);
 @interface STMetalView : MTKView <MTKViewDelegate, NSTextInputClient>
 @property(nonatomic, strong) NSMutableAttributedString *marked;
 @property(nonatomic) NSRange markedSelection;
+/* Draw a glide frame now, outside the display link (the glide watchdog). */
+- (void)glideDraw;
 @end
 
 TermWindow win;
@@ -130,6 +132,7 @@ static double framePeriod(void);
 enum {
 	FRAMELOG_VIDEO = 1 << 0,
 	FRAMELOG_KEY = 1 << 1,
+	FRAMELOG_WATCHDOG = 1 << 2,
 };
 static unsigned frameLogFlags;
 static SyncUpdate syncUpdate;
@@ -1544,6 +1547,130 @@ updateDisplayRate(void)
 	nativeView.preferredFramesPerSecond = fps;
 }
 
+/* Glide watchdog.  Glide frames come from MTKView's display link, and macOS
+ * has been seen to slow one window's link to ~10 Hz for good while that
+ * window's ordinary redraws stayed fast (Oct 2026: a glide frame every
+ * 100 ms in one window, 8.3 ms in every other; a fresh window was fine).
+ * While a glide runs, a timer checks twice per frame period.  A frame the
+ * link is 1.5 periods late with is drawn by the timer; twice in a row and
+ * the window switches to timer-paced glides: the timer draws every frame
+ * while the link is behind.  The link keeps running and is timed on its own:
+ * after 8 on-time ticks in a row the window goes back to it.  A healthy link
+ * always draws first, so there the timer only looks.
+ *
+ * For tests, in a real window or the headless harness:
+ * ST_DISPLAYLINK_THROTTLE_MS=N[:S] lets the link draw at most every N ms
+ * (for the first S seconds only, if given); ST_GLIDE_WATCHDOG=0 turns the
+ * watchdog off. */
+static dispatch_source_t glideWatchdog;
+static int glideWatchdogDrawing;	/* the timer is drawing this frame */
+static int glideTimerPaced;		/* the link was found slow */
+static unsigned glideLateRun;		/* frames the timer drew in a row */
+static unsigned glideLinkOnTime;	/* on-time link ticks in a row */
+static double glideLinkLast;		/* last frame the link drew, 0: none yet */
+static double glideLinkInterval;	/* ms between the last two link ticks */
+static double displayLinkThrottle = -1;	/* s; 0 off */
+static double displayLinkThrottleUntil;	/* CACurrentMediaTime(); 0 always */
+static int glideWatchdogOff = -1;
+static int glideLinkReported;
+static unsigned long glideWatchdogFrames;	/* drawn by the timer (harness) */
+static void logDisplayLinkSlow(void);
+
+static void
+stopGlideWatchdog(void)
+{
+	if (!glideWatchdog)
+		return;
+	dispatch_source_cancel(glideWatchdog);
+	glideWatchdog = nil;
+}
+
+static void
+glideWatchdogTick(void)
+{
+	double now = CACurrentMediaTime(), period = framePeriod();
+
+	if (!nativeView || !smoothscroll_pending()) {
+		stopGlideWatchdog();
+		return;
+	}
+	if (now - lastFrameTime < period * (glideTimerPaced ? 0.9 : 1.5))
+		return;
+	/* A link that has recovered draws its own frames, not two per refresh. */
+	if (glideTimerPaced && glideLinkOnTime && now - glideLinkLast < period * 1.5)
+		return;
+	glideWatchdogDrawing = 1;
+	glideWatchdogFrames++;
+	frameLogFlags |= FRAMELOG_WATCHDOG;
+	[nativeView glideDraw];
+	glideWatchdogDrawing = 0;
+	if (glideTimerPaced || ++glideLateRun < 2)
+		return;
+	glideTimerPaced = 1;
+	glideLinkOnTime = 0;
+	if (!glideLinkReported) {
+		glideLinkReported = 1;
+		logDisplayLinkSlow();
+	}
+	/* Restarting the link may be all it needs; the timer covers it if not. */
+	nativeView.paused = YES;
+	nativeView.paused = NO;
+}
+
+static void
+startGlideWatchdog(void)
+{
+	uint64_t interval;
+
+	if (glideWatchdogOff < 0) {
+		const char *on = getenv("ST_GLIDE_WATCHDOG");
+		glideWatchdogOff = on && !strcmp(on, "0");
+	}
+	if (glideWatchdog || glideWatchdogOff)
+		return;
+	glideLateRun = 0;
+	glideLinkLast = 0;
+	interval = (uint64_t)(framePeriod() / 2 * NSEC_PER_SEC);
+	glideWatchdog = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+	    dispatch_get_main_queue());
+	dispatch_source_set_timer(glideWatchdog,
+	    dispatch_time(DISPATCH_TIME_NOW, (int64_t)interval), interval,
+	    NSEC_PER_MSEC / 2);
+	dispatch_source_set_event_handler(glideWatchdog, ^{ glideWatchdogTick(); });
+	dispatch_resume(glideWatchdog);
+}
+
+/* A frame the display link is about to draw; NO to skip it (throttled). */
+static BOOL
+glideLinkTick(double now)
+{
+	double period = framePeriod();
+
+	if (displayLinkThrottle < 0) {
+		const char *ms = getenv("ST_DISPLAYLINK_THROTTLE_MS");
+		const char *seconds = ms ? strchr(ms, ':') : NULL;
+		displayLinkThrottle = ms ? MAX(0.0, atof(ms) / 1000) : 0;
+		if (seconds)
+			displayLinkThrottleUntil = now + atof(seconds + 1);
+	}
+	if (displayLinkThrottle > 0 && glideLinkLast &&
+	    (!displayLinkThrottleUntil || now < displayLinkThrottleUntil) &&
+	    now - glideLinkLast < displayLinkThrottle)
+		return NO;
+	if (glideLinkLast) {
+		glideLinkInterval = (now - glideLinkLast) * 1000;
+		if (now - glideLinkLast <= period * 1.25) {
+			if (glideTimerPaced && ++glideLinkOnTime >= 8)
+				glideTimerPaced = 0;
+		} else {
+			glideLinkOnTime = 0;
+		}
+	}
+	glideLinkLast = now;
+	glideLateRun = 0;
+	return YES;
+}
+
 /* Animation frames come from MTKView's display link only while a glide or a
  * pending snap needs them; at rest the view returns to on-demand drawing, so
  * an idle terminal does no work. */
@@ -1552,6 +1679,10 @@ updateSmoothScrollClock(void)
 {
 	BOOL run = smoothscroll_pending();
 
+	if (run && nativeView)
+		startGlideWatchdog();
+	else
+		stopGlideWatchdog();
 	if (!nativeView || nativeView.paused == !run)
 		return;
 	nativeView.enableSetNeedsDisplay = !run;
@@ -1692,6 +1823,7 @@ frameLogFrame(double start, unsigned long framesBefore, int clocked)
 	if (frameLogFlags & FRAMELOG_VIDEO) *flag++ = 'v';
 	if (entry->bytes) *flag++ = 't';
 	if (frameLogFlags & FRAMELOG_KEY) *flag++ = 'k';
+	if (frameLogFlags & FRAMELOG_WATCHDOG) *flag++ = 'w';
 	*flag = '\0';
 	frameLogFlags = 0;
 	frameLog.lastStart = start;
@@ -1728,9 +1860,17 @@ frameLogFrame(double start, unsigned long framesBefore, int clocked)
 	return self;
 }
 
+- (void)glideDraw
+{
+	[self draw];
+}
+
 - (void)drawInMTKView:(MTKView *)view
 {
 	(void)view;
+	if (!self.paused && !glideWatchdogDrawing &&
+	    !glideLinkTick(CACurrentMediaTime()))
+		return;
 	int measuring = launchStats.active;
 	double begin = measuring ? CACurrentMediaTime() : 0;
 	unsigned long frames = measuring ? mac_renderer_frames() : 0;
@@ -2904,6 +3044,7 @@ cleanupNative(void)
 {
 	if (shuttingDown) return;
 	shuttingDown = 1;
+	stopGlideWatchdog();
 	logLaunchStats(1);
 	if (spareWaiting) spare_withdraw(spareSlot, getpid());
 	xcleanup();
@@ -3072,6 +3213,49 @@ logLaunchStats(int exiting)
 		write();
 	else
 		dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), write);
+}
+
+/* Once per process, when glides switch to the timer: what the window and the
+ * system were like, so a slowed display link can be explained afterwards. */
+static void
+logDisplayLinkSlow(void)
+{
+	LaunchLine line;
+	double load;
+	struct rusage usage;
+	const char *thermal[] = {"nominal", "fair", "serious", "critical"};
+	NSProcessInfoThermalState state = NSProcessInfo.processInfo.thermalState;
+
+	if (!nativeWindow)
+		return;	/* the headless harness: not the user's log */
+	launchlog_begin(&line, wallclockNow(), getpid(), "st");
+	launchlog_put(&line, "event", "displaylink_slow");
+	launchlog_put(&line, "cmd", launchStats.command[0] ?
+	    launchStats.command : "?");
+	launchlog_ms(&line, "link", glideLinkInterval);
+	launchlog_putf(&line, "fps", "%ld",
+	    (long)(nativeView ? nativeView.preferredFramesPerSecond : 0));
+	launchlog_putf(&line, "visible", "%d",
+	    (nativeWindow.occlusionState & NSWindowOcclusionStateVisible) != 0);
+	launchlog_putf(&line, "key", "%d", nativeWindow.isKeyWindow);
+	if (@available(macOS 12.0, *))
+		launchlog_putf(&line, "screen_fps", "%ld",
+		    (long)nativeWindow.screen.maximumFramesPerSecond);
+	launchlog_putf(&line, "active", "%d", NSApp.isActive);
+	launchlog_put(&line, "thermal", (unsigned)state < LEN(thermal) ?
+	    thermal[state] : "?");
+	if (@available(macOS 12.0, *))
+		launchlog_putf(&line, "lowpower", "%d",
+		    NSProcessInfo.processInfo.isLowPowerModeEnabled);
+	getrusage(RUSAGE_SELF, &usage);
+	launchlog_putf(&line, "maxrss_mb", "%ld", usage.ru_maxrss / (1024 * 1024));
+	if (getloadavg(&load, 1) == 1)
+		launchlog_putf(&line, "load1", "%.2f", load);
+	dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+		char path[PATH_MAX];
+		if (launchlog_path(path, sizeof(path)) == 0)
+			launchlog_append(path, &line, LAUNCHLOG_LIMIT);
+	});
 }
 
 static void

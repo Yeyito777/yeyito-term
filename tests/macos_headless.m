@@ -15,7 +15,9 @@
  *
  * prints, per phase, frame times, main-thread stalls, key-to-screen latency
  * (keys named "mark" type U+00A4 and count until it is on a shown frame),
- * PTY bytes per second and CPU use. */
+ * PTY bytes per second and CPU use.  ST_DISPLAYLINK_THROTTLE_MS=100 slows
+ * the emulated display link (not the display) to one frame per 100 ms, as
+ * macOS once did to a window; the glide watchdog should keep glides on time. */
 #define main st_backend_main
 #include "../macos/backend.m"
 #undef main
@@ -259,6 +261,7 @@ typedef struct {
 	unsigned long long ttyBytes, ttyEvents;
 	double ttySeconds, blocked;
 	unsigned long draws, presents, skipped, glideFrames, glideMissed;
+	unsigned long watchdogFrames;	/* glideWatchdogFrames at the start */
 	unsigned long stalls8, stalls16, stalls33;
 	double maxStall;
 	Samples drawMs, presentMs, latencyMs;
@@ -311,6 +314,7 @@ phaseBegin(const char *name)
 	phase.ttyBytes = ttyStats.bytes;
 	phase.ttyEvents = ttyStats.events;
 	phase.ttySeconds = ttyStats.seconds;
+	phase.watchdogFrames = glideWatchdogFrames;
 	ttyStats.longest = 0;
 	pthread_mutex_unlock(&phaseLock);
 }
@@ -344,6 +348,9 @@ phaseEnd(double origin)
 	    samplesPercentile(&phase.presentMs, 100), phase.glideFrames,
 	    phase.glideMissed, phase.glideFrames ?
 	    100.0 * phase.glideMissed / phase.glideFrames : 0.0);
+	printf("  glide watchdog: %lu frames drawn by the timer%s\n",
+	    glideWatchdogFrames - phase.watchdogFrames,
+	    glideTimerPaced ? ", glides timer-paced" : "");
 	printf("  main thread: busy %.0f%%, stalls >8ms %lu >16ms %lu >33ms %lu "
 	    "max %.1f ms; st CPU %.0f%%, child CPU %.0f%%\n",
 	    100 * (threadCPUSeconds(display.mainThread) - phase.threadCPU) / wall,
@@ -482,6 +489,12 @@ countMarks(void)
 {
 	if (value && headlessOnDemand)
 		display.needsDisplay = 1;
+}
+
+/* The glide watchdog's frames go through the measured path too. */
+- (void)glideDraw
+{
+	[self headlessDraw];
 }
 
 - (void)headlessDraw
