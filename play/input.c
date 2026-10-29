@@ -172,10 +172,11 @@ input_feed(InputParser *parser, const unsigned char *data, size_t length,
 apc_done:
 			parser->state = S_GROUND;
 			if (!parser->overflow && parser->length >= 1 &&
-			    parser->buf[0] == 'G') {
+			    (parser->buf[0] == 'G' || parser->buf[0] == '!')) {
 				InputEvent event;
 				memset(&event, 0, sizeof(event));
-				event.type = INPUT_APC;
+				event.type = parser->buf[0] == 'G' ? INPUT_APC :
+				    INPUT_COMMAND;
 				parser->buf[parser->length] = '\0';
 				event.text = parser->buf + 1;
 				event.length = parser->length - 1;

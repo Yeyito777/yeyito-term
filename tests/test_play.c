@@ -21,6 +21,8 @@ typedef struct {
 	int napc;
 	int da1;
 	int cell_w, cell_h;
+	char command[4][64];
+	int ncommand;
 } Events;
 
 static void
@@ -38,6 +40,11 @@ collect(const InputEvent *e, void *context)
 		break;
 	case INPUT_DA1:
 		ev->da1++;
+		break;
+	case INPUT_COMMAND:
+		if (ev->ncommand < 4)
+			snprintf(ev->command[ev->ncommand++], 64, "%.*s",
+			    (int)e->length, e->text);
 		break;
 	case INPUT_CELL_SIZE:
 		ev->cell_w = e->width;
@@ -89,6 +96,31 @@ TEST(input_replies_between_keys)
 	ASSERT_EQ(1, ev.da1);
 	ASSERT_EQ(10, ev.cell_w);
 	ASSERT_EQ(20, ev.cell_h);
+}
+
+/* Pipe mode: an owner's commands arrive as "ESC _ ! ... ESC \\" among the
+ * terminal replies it relays; neither is taken for the other. */
+TEST(input_pipe_commands_between_replies)
+{
+	const char *s = "\033_!seek 12.5\033\\\033_Gi=7;OK seq=3\033\\"
+	    "\033_!toggle\033\\";
+	size_t split, n = strlen(s);
+
+	for (split = 1; split < n; split++) {
+		InputParser p;
+		Events ev;
+		memset(&ev, 0, sizeof(ev));
+		input_init(&p);
+		input_feed(&p, (const unsigned char *)s, split, collect, &ev);
+		input_feed(&p, (const unsigned char *)s + split, n - split,
+		    collect, &ev);
+		ASSERT_EQ(2, ev.ncommand);
+		ASSERT_STR_EQ("seek 12.5", ev.command[0]);
+		ASSERT_STR_EQ("toggle", ev.command[1]);
+		ASSERT_EQ(1, ev.napc);
+		ASSERT_STR_EQ("i=7;OK seq=3", ev.apc[0]);
+		ASSERT_EQ(0, ev.nkeys);
+	}
 }
 
 TEST(input_reply_split_anywhere)
@@ -769,6 +801,7 @@ main(void)
 	RUN_TEST(input_keys);
 	RUN_TEST(input_replies_between_keys);
 	RUN_TEST(input_reply_split_anywhere);
+	RUN_TEST(input_pipe_commands_between_replies);
 	RUN_TEST(input_lone_escape);
 	RUN_TEST(input_oversized_apc_dropped);
 	RUN_TEST(input_other_strings_skipped);

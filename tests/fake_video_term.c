@@ -24,6 +24,13 @@
  *     --no-graphics      ignore graphics APCs (a terminal without Kitty
  *                        graphics, which answers only DA1)
  *     --decode           decode packets with libavcodec and count errors
+ *     --pipe             run the command on pipes, as st-play --pipe's
+ *                        owner would: its stdout is the terminal's input,
+ *                        replies go to its stdin, and --key names become
+ *                        pipe commands (space: toggle, left/right: skip
+ *                        -5/5, up/down: skip 60/-60, q/esc: quit)
+ *     --command T:TEXT   send the pipe command TEXT at T ("seek 4",
+ *                        "size 320x180", ...); repeatable
  *     --trace            print one line per second
  * FAKE_TERM_DUMP=FILE saves the video packets received (u32 length, i64
  * pts, data; host order); st-play's STPLAY_DUMP saves those it sent.
@@ -76,12 +83,12 @@ static double rel(void) { return now_s() - t0; }
 static int cols = 120, rows = 40, cw = 10, ch = 20;
 static double bw_kbit, rtt_ms, timeout_s = 60;
 static double link_buffer = 4 * 1024 * 1024;
-static int decode, trace, no_video, no_graphics;
+static int decode, trace, no_video, no_graphics, pipe_mode;
 static double signal_at = -1;
 static int signal_number;
 static struct { double t; double kbit; } bw_events[MAX_EVENTS];
 static int nbw;
-static struct { double t; char name[16]; int done; } key_events[MAX_EVENTS];
+static struct { double t; char name[32]; int done; } key_events[MAX_EVENTS];
 static int nkeys;
 static struct { double t; int cols, rows; int done; } resize_events[MAX_EVENTS];
 static int nresize;
@@ -658,9 +665,28 @@ terminal_feed(const unsigned char *d, size_t n)
 	}
 }
 
+/* In --pipe mode keys are the owner's commands to st-play. */
+static const char *
+command_bytes(const char *name)
+{
+	static char buf[64];
+	const char *text = name;
+
+	if (!strcmp(name, "space") || !strcmp(name, "p")) text = "toggle";
+	else if (!strcmp(name, "left")) text = "skip -5";
+	else if (!strcmp(name, "right")) text = "skip 5";
+	else if (!strcmp(name, "up")) text = "skip 60";
+	else if (!strcmp(name, "down")) text = "skip -60";
+	else if (!strcmp(name, "q") || !strcmp(name, "esc")) text = "quit";
+	snprintf(buf, sizeof(buf), "\033_!%s\033\\", text);
+	return buf;
+}
+
 static const char *
 key_bytes(const char *name)
 {
+	if (pipe_mode)
+		return command_bytes(name);
 	if (!strcmp(name, "space")) return " ";
 	if (!strcmp(name, "left")) return "\033[D";
 	if (!strcmp(name, "right")) return "\033[C";
@@ -686,14 +712,17 @@ press(int i)
 	snprintf(m->name, sizeof(m->name), "%s", name);
 	m->pressed = rel();
 	m->effect = m->playing = -1;
-	if (!strcmp(name, "space") || !strcmp(name, "p"))
+	if (!strcmp(name, "space") || !strcmp(name, "p") ||
+	    !strcmp(name, "pause") || !strcmp(name, "resume") ||
+	    !strcmp(name, "toggle"))
 		pending_pause_metric = nkey_metrics;
 	else if (!strcmp(name, "left") || !strcmp(name, "right") ||
 	    !strcmp(name, "up") || !strcmp(name, "down") ||
-	    !strcmp(name, "pgup") || !strcmp(name, "pgdn"))
+	    !strcmp(name, "pgup") || !strcmp(name, "pgdn") ||
+	    !strncmp(name, "seek", 4) || !strncmp(name, "skip", 4))
 		pending_seek_metric = nkey_metrics;
 	else if (!strcmp(name, "q") || !strcmp(name, "esc") ||
-	    !strcmp(name, "ctrl-c"))
+	    !strcmp(name, "ctrl-c") || !strcmp(name, "quit"))
 		pending_quit_metric = nkey_metrics;
 	nkey_metrics++;
 }
@@ -723,7 +752,7 @@ parse_time_arg(const char *s, double *t, const char **rest)
 int
 main(int argc, char **argv)
 {
-	int master, i, status = 0, exited = 0;
+	int master, i, status = 0, exited = 0, rfd, wfd;
 	pid_t pid;
 	char *slave_name;
 	struct winsize ws;
@@ -744,6 +773,7 @@ main(int argc, char **argv)
 		if (!strcmp(a, "--trace")) { trace = 1; continue; }
 		if (!strcmp(a, "--no-video")) { no_video = 1; continue; }
 		if (!strcmp(a, "--no-graphics")) { no_graphics = 1; continue; }
+		if (!strcmp(a, "--pipe")) { pipe_mode = 1; continue; }
 		i++;
 		if (!strcmp(a, "--cols")) cols = atoi(v);
 		else if (!strcmp(a, "--rows")) rows = atoi(v);
@@ -758,10 +788,11 @@ main(int argc, char **argv)
 			bw_events[nbw].t = t;
 			bw_events[nbw].kbit = atof(rest);
 			nbw++;
-		} else if (!strcmp(a, "--key") && parse_time_arg(v, &t, &rest) &&
-		    nkeys < MAX_EVENTS) {
+		} else if ((!strcmp(a, "--key") || !strcmp(a, "--command")) &&
+		    parse_time_arg(v, &t, &rest) && nkeys < MAX_EVENTS) {
 			key_events[nkeys].t = t;
-			snprintf(key_events[nkeys].name, 16, "%s", rest);
+			snprintf(key_events[nkeys].name, sizeof(key_events[nkeys].name),
+			    "%s", rest);
 			nkeys++;
 		} else if (!strcmp(a, "--signal-at") && parse_time_arg(v, &t, &rest)) {
 			signal_at = t;
@@ -784,6 +815,41 @@ main(int argc, char **argv)
 	if (!no_video)
 		graphics_set_video_backend(&backend);
 
+	if (pipe_mode) {
+		int in[2], out[2];
+		if (pipe(in) < 0 || pipe(out) < 0) {
+			perror("pipe");
+			return 1;
+		}
+		t0 = now_s();
+		pid = fork();
+		if (pid < 0) {
+			perror("fork");
+			return 1;
+		}
+		if (pid == 0) {
+			int err = open("/dev/null", O_WRONLY);
+			setsid();
+			dup2(in[0], 0);
+			dup2(out[1], 1);
+			if (getenv("FAKE_TERM_STDERR"))
+				err = open(getenv("FAKE_TERM_STDERR"), O_WRONLY |
+				    O_CREAT | O_APPEND, 0644);
+			dup2(err, 2);
+			close(in[0]); close(in[1]); close(out[0]); close(out[1]);
+			unsetenv("SSH_CONNECTION");
+			unsetenv("SSH_TTY");
+			execvp(argv[i], argv + i);
+			_exit(127);
+		}
+		close(in[0]);
+		close(out[1]);
+		rfd = out[0];
+		wfd = in[1];
+		signal(SIGPIPE, SIG_IGN);
+		master = -1;
+		goto started;
+	}
 	master = posix_openpt(O_RDWR | O_NOCTTY);
 	if (master < 0 || grantpt(master) < 0 || unlockpt(master) < 0 ||
 	    !(slave_name = ptsname(master))) {
@@ -830,12 +896,15 @@ main(int argc, char **argv)
 		execvp(argv[i], argv + i);
 		_exit(127);
 	}
-	fcntl(master, F_SETFL, fcntl(master, F_GETFL) | O_NONBLOCK);
+	rfd = wfd = master;
+started:
+	fcntl(rfd, F_SETFL, fcntl(rfd, F_GETFL) | O_NONBLOCK);
+	fcntl(wfd, F_SETFL, fcntl(wfd, F_GETFL) | O_NONBLOCK);
 
 	for (;;) {
 		double now = now_s(), t = now - t0, next = now + 0.01, owd = rtt_ms / 2000;
 		double kbit = current_bw(t);
-		struct pollfd fd = { master, 0, 0 };
+		struct pollfd fd = { rfd, 0, 0 };
 		int k;
 		Chunk *c;
 
@@ -854,7 +923,8 @@ main(int argc, char **argv)
 				ws.ws_row = (unsigned short)rows;
 				ws.ws_xpixel = (unsigned short)(cols * cw);
 				ws.ws_ypixel = (unsigned short)(rows * ch);
-				ioctl(master, TIOCSWINSZ, &ws);
+				if (master >= 0)
+					ioctl(master, TIOCSWINSZ, &ws);
 			}
 		if (!exited && signal_at >= 0 && t >= signal_at) {
 			kill(pid, signal_number);
@@ -886,7 +956,7 @@ main(int argc, char **argv)
 				free(fifo_pop(&up));
 				continue;
 			}
-			w = write(master, c->data, c->length);
+			w = write(wfd, c->data, c->length);
 			if (w < 0) {
 				reply_blocked++;
 				break;
@@ -954,7 +1024,7 @@ main(int argc, char **argv)
 		}
 		if (fd.revents & POLLIN) {
 			unsigned char buf[65536];
-			ssize_t n = read(master, buf, sizeof(buf));
+			ssize_t n = read(rfd, buf, sizeof(buf));
 			if (n > 0) {
 				double nw = now_s(), start, finish;
 				kbit = current_bw(nw - t0);
@@ -969,12 +1039,12 @@ main(int argc, char **argv)
 			if (r == pid) {
 				exited = 1;
 				child_exit = rel();
-				if (tcgetattr(master, &final_termios) == 0)
+				if (master >= 0 && tcgetattr(master, &final_termios) == 0)
 					have_final_termios = 1;
 				/* Drain what's left in the PTY. */
 				for (;;) {
 					unsigned char buf[65536];
-					ssize_t n = read(master, buf, sizeof(buf));
+					ssize_t n = read(rfd, buf, sizeof(buf));
 					if (n <= 0)
 						break;
 					fifo_push(&down, now_s() + owd, buf, (size_t)n);

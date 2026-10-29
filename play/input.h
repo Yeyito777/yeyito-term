@@ -27,6 +27,7 @@ enum {
 	INPUT_DA1,
 	INPUT_CELL_SIZE,	/* CSI 6 ; height ; width t */
 	INPUT_TEXT_AREA,	/* CSI 4 ; height ; width t */
+	INPUT_COMMAND,	/* text/length: an "ESC _ ! ... ESC \\" body after "!" (--pipe) */
 };
 
 typedef struct {
