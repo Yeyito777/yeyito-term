@@ -1551,30 +1551,69 @@ updateDisplayRate(void)
  * has been seen to slow one window's link to ~10 Hz for good while that
  * window's ordinary redraws stayed fast (Oct 2026: a glide frame every
  * 100 ms in one window, 8.3 ms in every other; a fresh window was fine).
- * While a glide runs, a timer checks twice per frame period.  A frame the
- * link is 1.5 periods late with is drawn by the timer; twice in a row and
- * the window switches to timer-paced glides: the timer draws every frame
- * while the link is behind.  The link keeps running and is timed on its own:
- * after 8 on-time ticks in a row the window goes back to it.  A healthy link
- * always draws first, so there the timer only looks.
+ * While a glide runs, a timer checks twice per frame period and draws any
+ * frame the link is 1.5 periods late with.  Two cases are told apart:
+ *
+ * - A late first tick: the link can take a few frames to wake up when a
+ *   glide starts.  The timer covers them; they are only counted.
+ * - A slow link: 3 link intervals in a row (within glides, across them)
+ *   of 2.5 periods or more.  Glides become timer-paced (the timer draws
+ *   every frame while the link is behind), the link is restarted, and
+ *   event=displaylink_slow is logged.  The link keeps running and is timed
+ *   on its own: after 8 on-time ticks in a row the window goes back to it
+ *   and logs event=displaylink_recovered (how long, how slow, and how many
+ *   slow ticks came after the restart).  At most 20 episodes are logged per process.
  *
  * For tests, in a real window or the headless harness:
  * ST_DISPLAYLINK_THROTTLE_MS=N[:S] lets the link draw at most every N ms
- * (for the first S seconds only, if given); ST_GLIDE_WATCHDOG=0 turns the
- * watchdog off. */
+ * (for the first S seconds only, if given); ST_DISPLAYLINK_START_MS=N holds
+ * each glide's first tick back N ms; ST_GLIDE_WATCHDOG=0 turns the watchdog
+ * off.  Without a window the event lines go to stdout. */
+#define GLIDE_SLOW_RUN 3
+#define GLIDE_SLOW_PERIODS 2.5
+#define GLIDE_ONTIME_RUN 8
+#define GLIDE_EPISODES_LOGGED 20
 static dispatch_source_t glideWatchdog;
+static int glideActive;			/* a glide is running */
 static int glideWatchdogDrawing;	/* the timer is drawing this frame */
 static int glideTimerPaced;		/* the link was found slow */
-static unsigned glideLateRun;		/* frames the timer drew in a row */
 static unsigned glideLinkOnTime;	/* on-time link ticks in a row */
-static double glideLinkLast;		/* last frame the link drew, 0: none yet */
-static double glideLinkInterval;	/* ms between the last two link ticks */
+static unsigned glideLinkSlowRun;	/* slow link intervals in a row */
+static double glideSlowMs[GLIDE_SLOW_RUN];	/* the ones that began an episode */
+static double glideLinkLast;		/* this glide's last link tick, 0: none */
+static double glideStart;		/* when this glide began */
+static double glideFirstTickMs = -1;	/* its first link tick, ms after that */
+static unsigned long glideCount, glideLateStarts;	/* first tick late */
+static unsigned long glideWatchdogFrames;	/* drawn by the timer */
+static struct {
+	unsigned count;			/* episodes in this process */
+	double since;			/* CACurrentMediaTime() it began */
+	unsigned slowTicks;		/* slow link intervals during it */
+	double maxMs;			/* the longest of them */
+	unsigned long timerFrames;	/* glideWatchdogFrames when it began */
+} glideEpisode;
 static double displayLinkThrottle = -1;	/* s; 0 off */
 static double displayLinkThrottleUntil;	/* CACurrentMediaTime(); 0 always */
+static double displayLinkStartDelay;	/* s */
 static int glideWatchdogOff = -1;
-static int glideLinkReported;
-static unsigned long glideWatchdogFrames;	/* drawn by the timer (harness) */
-static void logDisplayLinkSlow(void);
+static void logDisplayLinkSlow(double firstTickMs);
+static void logDisplayLinkRecovered(double now, int exiting);
+
+/* Always on: each glide's frames, so a slow one is in launch.log as
+ * event=glide_slow (p50 over 1.5 periods between its frames, or p90 over 4)
+ * without a frame log running.  At most one line per 2 s, 200 per process. */
+#define GLIDE_SAMPLES 512
+static struct {
+	double lastFrame;		/* this glide's last drawn frame */
+	unsigned frames, linkFrames, timerFrames;
+	unsigned samples, linkSamples;	/* intervals kept below */
+	float interval[GLIDE_SAMPLES];	/* ms between its drawn frames */
+	float link[GLIDE_SAMPLES];	/* ms between its link ticks */
+	double maxWait;			/* longest wait for a drawable, s */
+	double lastLogged;		/* CACurrentMediaTime() of the last line */
+	unsigned logged, suppressed;
+} glideStats;
+static void endGlideStats(double now);
 
 static void
 stopGlideWatchdog(void)
@@ -1604,17 +1643,6 @@ glideWatchdogTick(void)
 	frameLogFlags |= FRAMELOG_WATCHDOG;
 	[nativeView glideDraw];
 	glideWatchdogDrawing = 0;
-	if (glideTimerPaced || ++glideLateRun < 2)
-		return;
-	glideTimerPaced = 1;
-	glideLinkOnTime = 0;
-	if (!glideLinkReported) {
-		glideLinkReported = 1;
-		logDisplayLinkSlow();
-	}
-	/* Restarting the link may be all it needs; the timer covers it if not. */
-	nativeView.paused = YES;
-	nativeView.paused = NO;
 }
 
 static void
@@ -1628,8 +1656,6 @@ startGlideWatchdog(void)
 	}
 	if (glideWatchdog || glideWatchdogOff)
 		return;
-	glideLateRun = 0;
-	glideLinkLast = 0;
 	interval = (uint64_t)(framePeriod() / 2 * NSEC_PER_SEC);
 	glideWatchdog = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
 	    dispatch_get_main_queue());
@@ -1640,34 +1666,80 @@ startGlideWatchdog(void)
 	dispatch_resume(glideWatchdog);
 }
 
+static void
+beginGlideEpisode(double now)
+{
+	glideTimerPaced = 1;
+	glideLinkOnTime = 0;
+	glideLinkSlowRun = 0;
+	glideEpisode.count++;
+	glideEpisode.since = now;
+	glideEpisode.slowTicks = GLIDE_SLOW_RUN;
+	glideEpisode.maxMs = 0;
+	for (int i = 0; i < GLIDE_SLOW_RUN; i++)
+		glideEpisode.maxMs = MAX(glideEpisode.maxMs, glideSlowMs[i]);
+	glideEpisode.timerFrames = glideWatchdogFrames;
+	logDisplayLinkSlow(glideFirstTickMs);
+	/* Restarting the link may be all it needs; the timer covers it if not.
+	 * Not from inside its own draw. */
+	dispatch_async(dispatch_get_main_queue(), ^{
+		if (nativeView && !nativeView.paused) {
+			nativeView.paused = YES;
+			nativeView.paused = NO;
+		}
+	});
+}
+
 /* A frame the display link is about to draw; NO to skip it (throttled). */
 static BOOL
 glideLinkTick(double now)
 {
-	double period = framePeriod();
+	double periodMs = framePeriod() * 1000, ms;
 
 	if (displayLinkThrottle < 0) {
-		const char *ms = getenv("ST_DISPLAYLINK_THROTTLE_MS");
-		const char *seconds = ms ? strchr(ms, ':') : NULL;
-		displayLinkThrottle = ms ? MAX(0.0, atof(ms) / 1000) : 0;
+		const char *throttle = getenv("ST_DISPLAYLINK_THROTTLE_MS");
+		const char *seconds = throttle ? strchr(throttle, ':') : NULL;
+		const char *start = getenv("ST_DISPLAYLINK_START_MS");
+		displayLinkThrottle = throttle ? MAX(0.0, atof(throttle) / 1000) : 0;
 		if (seconds)
 			displayLinkThrottleUntil = now + atof(seconds + 1);
+		displayLinkStartDelay = start ? MAX(0.0, atof(start) / 1000) : 0;
 	}
+	if (!glideLinkLast && now - glideStart < displayLinkStartDelay)
+		return NO;
 	if (displayLinkThrottle > 0 && glideLinkLast &&
 	    (!displayLinkThrottleUntil || now < displayLinkThrottleUntil) &&
 	    now - glideLinkLast < displayLinkThrottle)
 		return NO;
-	if (glideLinkLast) {
-		glideLinkInterval = (now - glideLinkLast) * 1000;
-		if (now - glideLinkLast <= period * 1.25) {
-			if (glideTimerPaced && ++glideLinkOnTime >= 8)
-				glideTimerPaced = 0;
-		} else {
-			glideLinkOnTime = 0;
-		}
+	if (!glideLinkLast) {
+		glideFirstTickMs = (now - glideStart) * 1000;
+		glideLateStarts += glideFirstTickMs >= periodMs * GLIDE_SLOW_PERIODS;
+		glideLinkLast = now;
+		return YES;
 	}
+	ms = (now - glideLinkLast) * 1000;
 	glideLinkLast = now;
-	glideLateRun = 0;
+	if (glideStats.linkSamples < GLIDE_SAMPLES)
+		glideStats.link[glideStats.linkSamples++] = (float)ms;
+	if (ms >= periodMs * GLIDE_SLOW_PERIODS) {
+		glideLinkOnTime = 0;
+		if (glideTimerPaced) {
+			glideEpisode.slowTicks++;
+			glideEpisode.maxMs = MAX(glideEpisode.maxMs, ms);
+		} else if (!glideWatchdogOff) {
+			glideSlowMs[glideLinkSlowRun++] = ms;
+			if (glideLinkSlowRun == GLIDE_SLOW_RUN)
+				beginGlideEpisode(now);
+		}
+		return YES;
+	}
+	glideLinkSlowRun = 0;
+	if (ms > periodMs * 1.25) {
+		glideLinkOnTime = 0;
+	} else if (glideTimerPaced && ++glideLinkOnTime >= GLIDE_ONTIME_RUN) {
+		glideTimerPaced = 0;
+		logDisplayLinkRecovered(now, 0);
+	}
 	return YES;
 }
 
@@ -1679,10 +1751,26 @@ updateSmoothScrollClock(void)
 {
 	BOOL run = smoothscroll_pending();
 
-	if (run && nativeView)
+	if (run && nativeView) {
+		if (!glideActive) {
+			glideActive = 1;
+			glideLinkLast = 0;
+			glideStart = CACurrentMediaTime();
+			glideFirstTickMs = -1;
+			glideCount++;
+			glideStats.lastFrame = 0;
+			glideStats.frames = glideStats.linkFrames = 0;
+			glideStats.timerFrames = 0;
+			glideStats.samples = glideStats.linkSamples = 0;
+			glideStats.maxWait = 0;
+		}
 		startGlideWatchdog();
-	else
+	} else {
+		if (glideActive)
+			endGlideStats(CACurrentMediaTime());
+		glideActive = 0;
 		stopGlideWatchdog();
+	}
 	if (!nativeView || nativeView.paused == !run)
 		return;
 	nativeView.enableSetNeedsDisplay = !run;
@@ -1880,9 +1968,23 @@ frameLogFrame(double start, unsigned long framesBefore, int clocked)
 	lastFrameTime = CACurrentMediaTime();
 	int logging = frameLogActive(lastFrameTime);
 	unsigned long committed = logging ? mac_renderer_frames() : 0;
+	unsigned long before = mac_renderer_frames();
 	drawingFrame = 1;
 	draw();
 	drawingFrame = 0;
+	if (glideActive && mac_renderer_frames() != before) {
+		glideStats.frames++;
+		if (glideWatchdogDrawing)
+			glideStats.timerFrames++;
+		else if (!self.paused)
+			glideStats.linkFrames++;
+		if (glideStats.lastFrame && glideStats.samples < GLIDE_SAMPLES)
+			glideStats.interval[glideStats.samples++] =
+			    (float)((lastFrameTime - glideStats.lastFrame) * 1000);
+		glideStats.lastFrame = lastFrameTime;
+		glideStats.maxWait = MAX(glideStats.maxWait,
+		    mac_renderer_drawable_wait());
+	}
 	if (measuring)
 		launchStatsFrame(begin, frames);
 	if (logging)
@@ -3045,6 +3147,8 @@ cleanupNative(void)
 	if (shuttingDown) return;
 	shuttingDown = 1;
 	stopGlideWatchdog();
+	if (glideTimerPaced)
+		logDisplayLinkRecovered(CACurrentMediaTime(), 1);
 	logLaunchStats(1);
 	if (spareWaiting) spare_withdraw(spareSlot, getpid());
 	xcleanup();
@@ -3215,47 +3319,166 @@ logLaunchStats(int exiting)
 		dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), write);
 }
 
-/* Once per process, when glides switch to the timer: what the window and the
- * system were like, so a slowed display link can be explained afterwards. */
+/* The window's and the system's state, for the display-link event lines. */
 static void
-logDisplayLinkSlow(void)
+putDisplayLinkState(LaunchLine *line)
 {
-	LaunchLine line;
 	double load;
 	struct rusage usage;
 	const char *thermal[] = {"nominal", "fair", "serious", "critical"};
 	NSProcessInfoThermalState state = NSProcessInfo.processInfo.thermalState;
 
-	if (!nativeWindow)
-		return;	/* the headless harness: not the user's log */
-	launchlog_begin(&line, wallclockNow(), getpid(), "st");
-	launchlog_put(&line, "event", "displaylink_slow");
-	launchlog_put(&line, "cmd", launchStats.command[0] ?
-	    launchStats.command : "?");
-	launchlog_ms(&line, "link", glideLinkInterval);
-	launchlog_putf(&line, "fps", "%ld",
+	launchlog_putf(line, "fps", "%ld",
 	    (long)(nativeView ? nativeView.preferredFramesPerSecond : 0));
-	launchlog_putf(&line, "visible", "%d",
-	    (nativeWindow.occlusionState & NSWindowOcclusionStateVisible) != 0);
-	launchlog_putf(&line, "key", "%d", nativeWindow.isKeyWindow);
-	if (@available(macOS 12.0, *))
-		launchlog_putf(&line, "screen_fps", "%ld",
-		    (long)nativeWindow.screen.maximumFramesPerSecond);
-	launchlog_putf(&line, "active", "%d", NSApp.isActive);
-	launchlog_put(&line, "thermal", (unsigned)state < LEN(thermal) ?
+	if (nativeWindow) {
+		launchlog_putf(line, "visible", "%d",
+		    (nativeWindow.occlusionState & NSWindowOcclusionStateVisible) != 0);
+		launchlog_putf(line, "key", "%d", nativeWindow.isKeyWindow);
+		if (@available(macOS 12.0, *))
+			launchlog_putf(line, "screen_fps", "%ld",
+			    (long)nativeWindow.screen.maximumFramesPerSecond);
+	}
+	launchlog_putf(line, "active", "%d", NSApp.isActive);
+	launchlog_put(line, "thermal", (unsigned)state < LEN(thermal) ?
 	    thermal[state] : "?");
 	if (@available(macOS 12.0, *))
-		launchlog_putf(&line, "lowpower", "%d",
+		launchlog_putf(line, "lowpower", "%d",
 		    NSProcessInfo.processInfo.isLowPowerModeEnabled);
 	getrusage(RUSAGE_SELF, &usage);
-	launchlog_putf(&line, "maxrss_mb", "%ld", usage.ru_maxrss / (1024 * 1024));
+	launchlog_putf(line, "maxrss_mb", "%ld", usage.ru_maxrss / (1024 * 1024));
 	if (getloadavg(&load, 1) == 1)
-		launchlog_putf(&line, "load1", "%.2f", load);
-	dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+		launchlog_putf(line, "load1", "%.2f", load);
+}
+
+/* To launch.log; without a window (the headless harness) to stdout. */
+static void
+writeDisplayLinkLine(LaunchLine *source, int now)
+{
+	LaunchLine line = *source;
+
+	if (!nativeWindow) {
+		printf("%.*s\n", (int)line.length, line.text);
+		fflush(stdout);
+		return;
+	}
+	void (^write)(void) = ^{
 		char path[PATH_MAX];
 		if (launchlog_path(path, sizeof(path)) == 0)
 			launchlog_append(path, &line, LAUNCHLOG_LIMIT);
-	});
+	};
+	if (now)
+		write();
+	else
+		dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), write);
+}
+
+/* A slow display link: the intervals that showed it and the state around
+ * it, so it can be explained afterwards. */
+static void
+logDisplayLinkSlow(double firstTickMs)
+{
+	LaunchLine line;
+
+	if (glideEpisode.count > GLIDE_EPISODES_LOGGED)
+		return;
+	launchlog_begin(&line, wallclockNow(), getpid(), "st");
+	launchlog_put(&line, "event", "displaylink_slow");
+	launchlog_putf(&line, "episode", "%u", glideEpisode.count);
+	launchlog_put(&line, "cmd", launchStats.command[0] ?
+	    launchStats.command : "?");
+	launchlog_putf(&line, "link", "%.1f/%.1f/%.1f", glideSlowMs[0],
+	    glideSlowMs[1], glideSlowMs[2]);
+	launchlog_ms(&line, "first_tick", firstTickMs);
+	launchlog_putf(&line, "late_starts", "%lu/%lu", glideLateStarts,
+	    glideCount);
+	launchlog_putf(&line, "timer_frames", "%lu", glideWatchdogFrames);
+	putDisplayLinkState(&line);
+	writeDisplayLinkLine(&line, 0);
+}
+
+/* The end of a slow-link episode: back on the link, or the window closing. */
+static void
+logDisplayLinkRecovered(double now, int exiting)
+{
+	LaunchLine line;
+
+	if (glideEpisode.count > GLIDE_EPISODES_LOGGED)
+		return;
+	launchlog_begin(&line, wallclockNow(), getpid(), "st");
+	launchlog_put(&line, "event", exiting ? "displaylink_slow_at_exit" :
+	    "displaylink_recovered");
+	launchlog_putf(&line, "episode", "%u", glideEpisode.count);
+	launchlog_ms(&line, "duration", (now - glideEpisode.since) * 1000);
+	launchlog_putf(&line, "slow_ticks", "%u", glideEpisode.slowTicks);
+	launchlog_ms(&line, "max_link", glideEpisode.maxMs);
+	launchlog_putf(&line, "timer_frames", "%lu",
+	    glideWatchdogFrames - glideEpisode.timerFrames);
+	/* 0: nothing slow once the link was restarted (it may have done it). */
+	launchlog_putf(&line, "slow_after_restart", "%u",
+	    glideEpisode.slowTicks - GLIDE_SLOW_RUN);
+	putDisplayLinkState(&line);
+	writeDisplayLinkLine(&line, exiting);
+}
+
+static int
+compareFloats(const void *a, const void *b)
+{
+	float x = *(const float *)a, y = *(const float *)b;
+	return (x > y) - (x < y);
+}
+
+/* The p-th percentile of n values, sorting them in place; -1 if none. */
+static double
+percentileOf(float *values, unsigned n, double p)
+{
+	if (!n)
+		return -1;
+	qsort(values, n, sizeof(*values), compareFloats);
+	return values[MIN(n - 1, (unsigned)(p / 100 * n))];
+}
+
+/* A glide ended: one line if its frames came slowly. */
+static void
+endGlideStats(double now)
+{
+	double periodMs = framePeriod() * 1000, p50, p90, max;
+	LaunchLine line;
+
+	if (glideStats.samples < 2)
+		return;
+	p50 = percentileOf(glideStats.interval, glideStats.samples, 50);
+	p90 = percentileOf(glideStats.interval, glideStats.samples, 90);
+	max = glideStats.interval[glideStats.samples - 1];
+	if (p50 <= periodMs * 1.5 && p90 <= periodMs * 4)
+		return;
+	if (glideStats.logged >= 200 || now - glideStats.lastLogged < 2) {
+		glideStats.suppressed++;
+		return;
+	}
+	glideStats.logged++;
+	glideStats.lastLogged = now;
+	launchlog_begin(&line, wallclockNow(), getpid(), "st");
+	launchlog_put(&line, "event", "glide_slow");
+	launchlog_put(&line, "cmd", launchStats.command[0] ?
+	    launchStats.command : "?");
+	launchlog_ms(&line, "duration", (now - glideStart) * 1000);
+	launchlog_putf(&line, "frames", "%u", glideStats.frames);
+	launchlog_putf(&line, "by_link", "%u", glideStats.linkFrames);
+	launchlog_putf(&line, "by_timer", "%u", glideStats.timerFrames);
+	launchlog_ms(&line, "p50", p50);
+	launchlog_ms(&line, "p90", p90);
+	launchlog_ms(&line, "max", max);
+	launchlog_ms(&line, "link_p50", percentileOf(glideStats.link,
+	    glideStats.linkSamples, 50));
+	launchlog_ms(&line, "first_tick", glideFirstTickMs);
+	launchlog_ms(&line, "max_wait", glideStats.maxWait * 1000);
+	launchlog_putf(&line, "timer_paced", "%d", glideTimerPaced);
+	launchlog_putf(&line, "watchdog", "%d", glideWatchdogOff != 1);
+	if (glideStats.suppressed)
+		launchlog_putf(&line, "suppressed", "%u", glideStats.suppressed);
+	glideStats.suppressed = 0;
+	putDisplayLinkState(&line);
+	writeDisplayLinkLine(&line, 0);
 }
 
 static void
