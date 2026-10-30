@@ -288,7 +288,7 @@ static Shortcut shortcuts[] = {
 static KeySym mappedkeys[] = {
 	XK_0, XK_1, XK_2, XK_3, XK_4, XK_5, XK_6, XK_7, XK_8, XK_9, XK_minus,
 	XK_m,
-	XK_O,
+	XK_E, XK_O,
 	XK_bracketleft, XK_bracketright,
 	XK_semicolon,
 	-1
