@@ -48,8 +48,12 @@ On macOS those frames come from the window's display link. macOS has been
 seen to slow one window's link to about 10 Hz for good while its other
 redraws stayed fast (Oct 2026: glides at 10 fps in that window only; a new
 window was fine). A watchdog timer runs during glides and draws any frame the
-link is 1.5 periods late with, so a link slow to wake up when a glide starts
-costs nothing. Three link intervals in a row of 2.5 periods or more (counted
+link is late with: at the display's rate until the link's first tick, then
+whenever the link is 1.5 periods late. A link slow to wake up when a glide
+starts (73-95 ms on a ProMotion panel after an idle moment) costs nothing,
+and a link tick within half a refresh of a timer frame is not drawn. The
+timer is strict (`DISPATCH_TIMER_STRICT`): macOS coalesces ordinary timers,
+and after an idle moment its checks came 20-200 ms late. Three link intervals in a row of 2.5 periods or more (counted
 across glides) make the window's glides timer-paced and restart the link;
 after 8 on-time link ticks in a row they go back to it. Timer frames reach
 the screen like link frames (measured in a real window: 8.33 ms apart,

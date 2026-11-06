@@ -627,8 +627,11 @@ appMain(HeadlessView *view, double seconds, double fps, double every,
 	display.vblankQueue = dispatch_queue_create("st.headless.vblank",
 	    dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL,
 	    QOS_CLASS_USER_INTERACTIVE, 0));
+	/* Strict timers: a display's vblanks are never coalesced, and a run
+	 * from a background process otherwise gets its timers late by up to
+	 * ~200 ms. */
 	display.vblank = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0,
-	    0, display.vblankQueue);
+	    DISPATCH_TIMER_STRICT, display.vblankQueue);
 	dispatch_source_set_timer(display.vblank, DISPATCH_TIME_NOW,
 	    (uint64_t)(display.period * NSEC_PER_SEC), 0);
 	dispatch_source_set_event_handler(display.vblank, ^{ vblankTick(); });
@@ -637,7 +640,7 @@ appMain(HeadlessView *view, double seconds, double fps, double every,
 	/* Main-thread responsiveness: how late a 2 ms heartbeat runs. */
 	display.lastBeat = CACurrentMediaTime();
 	display.heartbeat = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0,
-	    0, dispatch_get_main_queue());
+	    DISPATCH_TIMER_STRICT, dispatch_get_main_queue());
 	dispatch_source_set_timer(display.heartbeat, DISPATCH_TIME_NOW,
 	    2 * NSEC_PER_MSEC, 0);
 	dispatch_source_set_event_handler(display.heartbeat, ^{
