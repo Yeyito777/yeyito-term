@@ -112,6 +112,8 @@ static void ttysend(const Arg *);
 @property(nonatomic) NSRange markedSelection;
 /* Draw a glide frame now, outside the display link (the glide watchdog). */
 - (void)glideDraw;
+/* The view's display link ticked (glide clock, macOS 14+). */
+- (void)glideLinkFired:(id)link;
 @end
 
 TermWindow win;
@@ -168,6 +170,10 @@ static dispatch_source_t controlSource;
 static dispatch_source_t revealSource;
 static int controlFD = -1;
 static char controlPath[sizeof(((struct sockaddr_un *)0)->sun_path)];
+static id glideViewLink;		/* CADisplayLink; nil: none or MTKView's */
+static int glideViewLinkOff = -1;	/* ST_GLIDE_VIEW_LINK=0 */
+static int glideClockRunning;		/* link frames wanted (runGlideClock) */
+static void setGlideLinkRate(void);
 static int spareWaiting;
 static dispatch_source_t spareCheckSource;
 static id<NSObject> spareActivity;
@@ -1545,9 +1551,85 @@ updateDisplayRate(void)
 	if (fps <= 0)
 		fps = 60;
 	nativeView.preferredFramesPerSecond = fps;
+	setGlideLinkRate();
 }
 
-/* Glide watchdog.  Glide frames come from MTKView's display link, and macOS
+/* Glide clock.  Glide frames come from a display link while a glide or a
+ * pending snap needs them; at rest the view draws on demand, so an idle
+ * terminal does no work.  On macOS 14+ that is the view's own CADisplayLink
+ * asking for the display's full rate.  MTKView's link (a CVDisplayLink)
+ * cannot ask for a rate: on a ProMotion panel it ticks at whatever rate the
+ * panel idles at.  Measured on the owner's MacBook (Nov 2026), 100 ms of
+ * frames after 400 ms idle, one per tick: MTKView's link 58-112 ms to its
+ * first tick and then 90-106 ms apart; the view's link at 120 Hz 2-8 ms and
+ * 8.3 ms apart.  ST_GLIDE_VIEW_LINK=0 uses MTKView's link. */
+static void
+setGlideLinkRate(void)
+{
+	if (@available(macOS 14.0, *)) {
+		float fps = (float)nativeView.preferredFramesPerSecond;
+		if (glideViewLink)
+			((CADisplayLink *)glideViewLink).preferredFrameRateRange =
+			    CAFrameRateRangeMake(fps, fps, fps);
+	}
+}
+
+static BOOL
+glideUsesViewLink(void)
+{
+	if (glideViewLinkOff < 0) {
+		const char *on = getenv("ST_GLIDE_VIEW_LINK");
+		glideViewLinkOff = on && !strcmp(on, "0");
+	}
+	if (glideViewLinkOff)
+		return NO;
+	if (@available(macOS 14.0, *))
+		return YES;
+	return NO;
+}
+
+static void
+runGlideClock(BOOL run)
+{
+	if (!nativeView || glideClockRunning == run)
+		return;
+	glideClockRunning = run;
+	nativeView.enableSetNeedsDisplay = !run;
+	if (!glideUsesViewLink()) {
+		nativeView.paused = !run;
+		return;
+	}
+	if (@available(macOS 14.0, *)) {
+		/* No window, no link (the headless harness ticks it itself). */
+		if (run && !glideViewLink && nativeWindow) {
+			CADisplayLink *link = [nativeView
+			    displayLinkWithTarget:nativeView
+			    selector:@selector(glideLinkFired:)];
+			[link addToRunLoop:NSRunLoop.mainRunLoop
+			    forMode:NSRunLoopCommonModes];
+			glideViewLink = link;
+			setGlideLinkRate();
+		}
+		((CADisplayLink *)glideViewLink).paused = !run;
+	}
+}
+
+/* A link that stays slow is replaced: a new view link, or MTKView's paused
+ * and resumed. */
+static void
+restartGlideClock(void)
+{
+	if (!nativeView || !glideClockRunning)
+		return;
+	if (glideViewLink) {
+		[glideViewLink invalidate];
+		glideViewLink = nil;
+	}
+	runGlideClock(NO);
+	runGlideClock(YES);
+}
+
+/* Glide watchdog.  Glide frames come from a display link, and macOS
  * has been seen to slow one window's link to ~10 Hz for good while that
  * window's ordinary redraws stayed fast (Oct 2026: a glide frame every
  * 100 ms in one window, 8.3 ms in every other; a fresh window was fine).
@@ -1578,6 +1660,7 @@ updateDisplayRate(void)
 #define GLIDE_EPISODES_LOGGED 20
 static dispatch_source_t glideWatchdog;
 static int glideActive;			/* a glide is running */
+static int glideLinkDrawing;		/* the view link is drawing this frame */
 static int glideWatchdogDrawing;	/* the timer is drawing this frame */
 static int glideTimerPaced;		/* the link was found slow */
 static unsigned glideLinkOnTime;	/* on-time link ticks in a row */
@@ -1691,12 +1774,7 @@ beginGlideEpisode(double now)
 	logDisplayLinkSlow(glideFirstTickMs);
 	/* Restarting the link may be all it needs; the timer covers it if not.
 	 * Not from inside its own draw. */
-	dispatch_async(dispatch_get_main_queue(), ^{
-		if (nativeView && !nativeView.paused) {
-			nativeView.paused = YES;
-			nativeView.paused = NO;
-		}
-	});
+	dispatch_async(dispatch_get_main_queue(), ^{ restartGlideClock(); });
 }
 
 /* A frame the display link is about to draw; NO to skip it (throttled). */
@@ -1752,9 +1830,7 @@ glideLinkTick(double now)
 	return YES;
 }
 
-/* Animation frames come from MTKView's display link only while a glide or a
- * pending snap needs them; at rest the view returns to on-demand drawing, so
- * an idle terminal does no work. */
+/* Run the glide clock while a glide or a pending snap needs frames. */
 static void
 updateSmoothScrollClock(void)
 {
@@ -1780,10 +1856,7 @@ updateSmoothScrollClock(void)
 		glideActive = 0;
 		stopGlideWatchdog();
 	}
-	if (!nativeView || nativeView.paused == !run)
-		return;
-	nativeView.enableSetNeedsDisplay = !run;
-	nativeView.paused = !run;
+	runGlideClock(run);
 }
 
 /* Frame timing log.  ST_FRAME_LOG=file logs every frame from the start; a
@@ -1962,15 +2035,25 @@ frameLogFrame(double start, unsigned long framesBefore, int clocked)
 	[self draw];
 }
 
+- (void)glideLinkFired:(id)link
+{
+	(void)link;
+	glideLinkDrawing = 1;
+	[self glideDraw];
+	glideLinkDrawing = 0;
+}
+
 - (void)drawInMTKView:(MTKView *)view
 {
 	double tick = CACurrentMediaTime();
+	/* A display link's frame: the view's, or MTKView's while unpaused. */
+	int linked = glideLinkDrawing || (!self.paused && !glideWatchdogDrawing);
 
 	(void)view;
 	/* A link tick right after a timer frame is timed but not drawn: two
 	 * frames in one refresh fill the drawable queue, and every later frame
 	 * of the glide then waits a refresh for a drawable. */
-	if (!self.paused && !glideWatchdogDrawing && (!glideLinkTick(tick) ||
+	if (linked && (!glideLinkTick(tick) ||
 	    tick - glideWatchdogLast < framePeriod() / 2))
 		return;
 	int measuring = launchStats.active;
@@ -1990,7 +2073,7 @@ frameLogFrame(double start, unsigned long framesBefore, int clocked)
 		glideStats.frames++;
 		if (glideWatchdogDrawing)
 			glideStats.timerFrames++;
-		else if (!self.paused)
+		else if (linked)
 			glideStats.linkFrames++;
 		if (glideStats.lastFrame && glideStats.samples < GLIDE_SAMPLES)
 			glideStats.interval[glideStats.samples++] =
@@ -2002,7 +2085,7 @@ frameLogFrame(double start, unsigned long framesBefore, int clocked)
 	if (measuring)
 		launchStatsFrame(begin, frames);
 	if (logging)
-		frameLogFrame(lastFrameTime, committed, !self.paused);
+		frameLogFrame(lastFrameTime, committed, glideClockRunning);
 	updateSmoothScrollClock();
 }
 

@@ -182,7 +182,7 @@ saveSnapshot(const char *path)
  *
  * The backend's tty source and redraw requests run unchanged.  The display
  * is emulated: a view marked for display draws when the run loop is about to
- * wait (as AppKit displays it), an unpaused view draws at every vblank, and
+ * wait (as AppKit displays it), a running glide clock draws at every vblank, and
  * frames render into three textures that, like a CAMetalLayer's drawables,
  * only come back once a newer frame has been shown at a vblank, so drawing
  * ahead of the display blocks as nextDrawable does. */
@@ -456,11 +456,17 @@ vblankTick(void)
 		display.lastMoving = next->moving;
 	}
 	pthread_mutex_unlock(&display.lock);
-	if (!display.view.isPaused && !display.vblankDrawQueued) {
+	/* The glide clock: the view's link (st's default), or MTKView's while
+	 * unpaused (ST_GLIDE_VIEW_LINK=0). */
+	if (glideClockRunning && !display.vblankDrawQueued) {
 		display.vblankDrawQueued = 1;
 		dispatch_async(dispatch_get_main_queue(), ^{
 			display.vblankDrawQueued = 0;
-			if (!display.view.isPaused)
+			if (!glideClockRunning)
+				return;
+			if (glideUsesViewLink())
+				[display.view glideLinkFired:nil];
+			else if (!display.view.isPaused)
 				[display.view headlessDraw];
 		});
 	}
