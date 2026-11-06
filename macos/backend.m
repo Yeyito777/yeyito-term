@@ -1552,10 +1552,13 @@ updateDisplayRate(void)
  * window's ordinary redraws stayed fast (Oct 2026: a glide frame every
  * 100 ms in one window, 8.3 ms in every other; a fresh window was fine).
  * While a glide runs, a timer checks twice per frame period and draws any
- * frame the link is 1.5 periods late with.  Two cases are told apart:
+ * frame the link is late with: at the display's rate until the link's first
+ * tick, then whenever it is 1.5 periods late.  Two cases are told apart:
  *
  * - A late first tick: the link can take a few frames to wake up when a
- *   glide starts.  The timer covers them; they are only counted.
+ *   glide starts (73-95 ms on the owner's ProMotion panel after an idle
+ *   moment, Nov 2026).  The timer covers them, so a glide from idle starts
+ *   within a frame; they are only counted.
  * - A slow link: 3 link intervals in a row (within glides, across them)
  *   of 2.5 periods or more.  Glides become timer-paced (the timer draws
  *   every frame while the link is behind), the link is restarted, and
@@ -1585,6 +1588,7 @@ static double glideStart;		/* when this glide began */
 static double glideFirstTickMs = -1;	/* its first link tick, ms after that */
 static unsigned long glideCount, glideLateStarts;	/* first tick late */
 static unsigned long glideWatchdogFrames;	/* drawn by the timer */
+static double glideWatchdogLast;	/* when the timer last drew */
 static struct {
 	unsigned count;			/* episodes in this process */
 	double since;			/* CACurrentMediaTime() it began */
@@ -1633,13 +1637,16 @@ glideWatchdogTick(void)
 		stopGlideWatchdog();
 		return;
 	}
-	if (now - lastFrameTime < period * (glideTimerPaced ? 0.9 : 1.5))
+	if (now - lastFrameTime < period * 0.9)
 		return;
-	/* A link that has recovered draws its own frames, not two per refresh. */
-	if (glideTimerPaced && glideLinkOnTime && now - glideLinkLast < period * 1.5)
+	/* A link that has recovered draws its own frames, not two per refresh;
+	 * one that is on time needs no help. */
+	if (glideTimerPaced ? glideLinkOnTime && now - glideLinkLast < period * 1.5
+	    : glideLinkLast && now - glideLinkLast < period * 1.5)
 		return;
 	glideWatchdogDrawing = 1;
 	glideWatchdogFrames++;
+	glideWatchdogLast = now;
 	frameLogFlags |= FRAMELOG_WATCHDOG;
 	[nativeView glideDraw];
 	glideWatchdogDrawing = 0;
@@ -1656,11 +1663,13 @@ startGlideWatchdog(void)
 	}
 	if (glideWatchdog || glideWatchdogOff)
 		return;
+	/* Strict: macOS otherwise coalesces this timer, and after an idle
+	 * moment its first check came 20-200 ms late.  The first check runs at
+	 * once: a glide that began outside a frame (the wheel) draws now. */
 	interval = (uint64_t)(framePeriod() / 2 * NSEC_PER_SEC);
-	glideWatchdog = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
-	    dispatch_get_main_queue());
-	dispatch_source_set_timer(glideWatchdog,
-	    dispatch_time(DISPATCH_TIME_NOW, (int64_t)interval), interval,
+	glideWatchdog = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0,
+	    DISPATCH_TIMER_STRICT, dispatch_get_main_queue());
+	dispatch_source_set_timer(glideWatchdog, DISPATCH_TIME_NOW, interval,
 	    NSEC_PER_MSEC / 2);
 	dispatch_source_set_event_handler(glideWatchdog, ^{ glideWatchdogTick(); });
 	dispatch_resume(glideWatchdog);
@@ -1955,9 +1964,14 @@ frameLogFrame(double start, unsigned long framesBefore, int clocked)
 
 - (void)drawInMTKView:(MTKView *)view
 {
+	double tick = CACurrentMediaTime();
+
 	(void)view;
-	if (!self.paused && !glideWatchdogDrawing &&
-	    !glideLinkTick(CACurrentMediaTime()))
+	/* A link tick right after a timer frame is timed but not drawn: two
+	 * frames in one refresh fill the drawable queue, and every later frame
+	 * of the glide then waits a refresh for a drawable. */
+	if (!self.paused && !glideWatchdogDrawing && (!glideLinkTick(tick) ||
+	    tick - glideWatchdogLast < framePeriod() / 2))
 		return;
 	int measuring = launchStats.active;
 	double begin = measuring ? CACurrentMediaTime() : 0;
