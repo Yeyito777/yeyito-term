@@ -481,7 +481,7 @@ test: test_video_linux
 endif
 ifeq ($(UNAME_S),Darwin)
 test: test_macos_image_occlusion test_macos_video test_macos_mouse_cursor test_macos_pty test_macos_reveal test_macos_spare test_macos_launchlog test_macos_aerospace test_macos_control test_macos_text_input test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522
-test: test_macos_symbol_input
+test: test_macos_symbol_input macos_headless
 endif
 	@echo "Running tests..."
 	@./tests/test_vimnav
@@ -520,11 +520,20 @@ ifeq ($(UNAME_S),Darwin)
 	@./tests/test_macos_glyph_layout
 	@./tests/test_macos_emoji
 	@./tests/test_macos_pasteboard5522
+	@$(MAKE) -s test_macos_frame_parse
 endif
+
+# A frame drawn while the app's output waits in the PTY ring shows it
+# (macos/backend.m ttyParseBeforeFrame).
+test_macos_frame_parse: macos_headless
+	@out=$$(./tests/macos_headless -A -c 80 -r 24 -t 3 -o $${TMPDIR:-/tmp}/st-frame-parse \
+	    -F 0.4:frame-check-mark -- sh -c 'sleep 1; printf frame-check-mark; sleep 5') \
+	    && echo "test_macos_frame_parse: ok" \
+	    || { echo "$$out" | grep "frame check"; echo "test_macos_frame_parse: FAILED"; exit 1; }
 
 clean-tests:
 	rm -f tests/test_macos_symbol_input tests/test_macos_symbol_input.o tests/macos_symbol_sender
 	rm -f tests/*.o tests/macos_headless tests/test_macos_image_occlusion tests/test_macos_video tests/test_macos_mouse_cursor tests/test_image_occlusion tests/test_vimnav tests/test_sshind tests/test_scrollback tests/test_cwd tests/test_notif tests/test_persist tests/test_search tests/test_cmdline_layout tests/test_mode_reset tests/test_sync tests/test_clipboard5522 tests/test_graphics tests/test_video tests/test_video_linux tests/test_play tests/fake_video_term tests/pty_throttle tests/test_smoothscroll tests/test_macos_pty tests/test_macos_reveal tests/test_macos_spare tests/test_macos_launchlog tests/test_macos_aerospace tests/test_macos_control tests/test_macos_text_input tests/test_macos_locale tests/test_macos_glyph_layout tests/test_macos_emoji tests/test_macos_pasteboard5522
 
 .PHONY: all app install-app uninstall-app install-hint clean dist install uninstall test test_image_occlusion test_smoothscroll test_macos_image_occlusion test_macos_video test_macos_mouse_cursor test_gpu_regressions test_aerospace_launcher test_mode_reset test_sync test_graphics test_video test_video_linux test_macos_pty test_macos_reveal test_macos_spare test_macos_launchlog test_macos_aerospace test_macos_control test_macos_text_input test_macos_locale test_macos_glyph_layout test_macos_emoji test_macos_pasteboard5522 clean-tests
-.PHONY: test_macos_symbol_input macos_headless test_play test_play_e2e
+.PHONY: test_macos_symbol_input macos_headless test_play test_play_e2e test_macos_frame_parse
