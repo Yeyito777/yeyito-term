@@ -26,7 +26,7 @@ as judder and the traffic stays tiny even when the application runs remotely.
 | `CSI ? 2032 h` | Turn app-driven smooth scrolling on. |
 | `CSI ? 2032 l` | Turn it off (also clears everything below). RIS turns it off. |
 | `OSC 2032 ; r ; T,L,B,R ; T,L,B,R … ST` | The moving rectangles: rows `T`..`B`, columns `L`..`R`, 1-based and inclusive, at most 8. Replaces the previous set; no rectangles moves nothing. |
-| `OSC 2032 ; m ; dA ; B ; D ST` | Move: the offset's base changes by `dA`, and an easing term of `B` starts now and eases out to 0 over `D` ms (st's cubic ease-out). `B` and `D` may be left out. Values in thousandths of a row; positive draws the content lower. |
+| `OSC 2032 ; m ; dA ; B ; D ST` | Move: the offset's base changes by `dA`, and an easing term of `B` starts now and eases out to 0 over `D` ms (st's cubic ease-out). `B` and `D` may be left out. Values in thousandths of a row; positive draws the content lower. st applies `o` and `m` values exactly, however far past the terminal they reach, so its base is always the application's arithmetic; only what it draws is held (to the lines it kept). |
 | `OSC 2032 ; o ; N ST` | Set the base to `N` and drop every easing term (start over, no animation). `0` is at rest. |
 | `OSC 2032 ; c ST` | Clear: offset 0, no rectangles, no clip regions, no kept lines. |
 | `OSC 2032 ; k ; T,L,B,R ; T,L,B,R … ST` | Image clip regions (same form as `r`, at most 8): an image whose anchor cell lies in one never draws outside the clip regions on its anchor row, at rest or while gliding. Replaces the previous set; no regions clears it. See [Image clip regions](#image-clip-regions). |

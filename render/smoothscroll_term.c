@@ -492,7 +492,6 @@ smoothscroll_app_osc(int narg, char **args)
 	case 'o':
 		if (narg < 3 || !parseint(args[2], &v))
 			return;
-		v = MAX(-1000 * trow(), MIN(1000 * trow(), v));
 		app.base = v / 1000.0;
 		app.nterms = 0;
 		appoffset(nowms());
@@ -503,8 +502,10 @@ smoothscroll_app_osc(int narg, char **args)
 			return;
 		if (narg >= 5 && (!parseint(args[3], &b) || !parseint(args[4], &d)))
 			return;
-		v = MAX(-1000 * trow(), MIN(1000 * trow(), v));
-		b = MAX(-1000 * trow(), MIN(1000 * trow(), b));
+		/* Exactly as sent, however far: the base is the app's
+		 * arithmetic (a value held to the terminal's height left it
+		 * rows off at rest for good).  What is drawn never passes
+		 * the kept lines (appoffset). */
 		app.base += v / 1000.0;
 		if (b != 0 && d > 0) {
 			if (app.nterms == APP_MAXTERMS) {	/* oldest jumps */
