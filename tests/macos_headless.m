@@ -187,7 +187,7 @@ saveSnapshot(const char *path)
  *
  * The backend's tty source and redraw requests run unchanged.  The display
  * is emulated: a view marked for display draws when the run loop is about to
- * wait (as AppKit displays it), an unpaused view draws at every vblank, and
+ * wait (as AppKit displays it), a running glide clock draws at every vblank, and
  * frames render into three textures that, like a CAMetalLayer's drawables,
  * only come back once a newer frame has been shown at a vblank, so drawing
  * ahead of the display blocks as nextDrawable does. */
@@ -412,7 +412,7 @@ displayAcquire(void)
 	return (__bridge void *)slot->texture;
 }
 
-/* -I: a frame to show or an unpaused view wakes the display at the next
+/* -I: a frame to show or a running glide clock wakes the display at the next
  * vblank of its old phase. */
 static void
 displayWake(void)
@@ -494,17 +494,23 @@ vblankTick(void)
 	}
 	pthread_mutex_unlock(&display.lock);
 	if (display.idleFaithful && waiting <= (next != NULL) &&
-	    display.view.isPaused && ++display.idleTicks >= 2) {
+	    !glideClockRunning && ++display.idleTicks >= 2) {
 		display.asleep = 1;
 		dispatch_suspend(display.vblank);
-	} else if (next || !display.view.isPaused) {
+	} else if (next || glideClockRunning) {
 		display.idleTicks = 0;
 	}
-	if (!display.view.isPaused && !display.vblankDrawQueued) {
+	/* The glide clock: the view's link (st's default), or MTKView's while
+	 * unpaused (ST_GLIDE_VIEW_LINK=0). */
+	if (glideClockRunning && !display.vblankDrawQueued) {
 		display.vblankDrawQueued = 1;
 		dispatch_async(dispatch_get_main_queue(), ^{
 			display.vblankDrawQueued = 0;
-			if (!display.view.isPaused)
+			if (!glideClockRunning)
+				return;
+			if (glideUsesViewLink())
+				[display.view glideLinkFired:nil];
+			else if (!display.view.isPaused)
 				[display.view headlessDraw];
 		});
 	}
@@ -533,7 +539,12 @@ countMarks(void)
 		displayWake();
 }
 - (BOOL)enableSetNeedsDisplay { return headlessOnDemand; }
-- (void)setEnableSetNeedsDisplay:(BOOL)value { headlessOnDemand = value; }
+- (void)setEnableSetNeedsDisplay:(BOOL)value
+{
+	headlessOnDemand = value;
+	if (!value)	/* the glide clock started (either link) */
+		displayWake();
+}
 - (void)setNeedsDisplay:(BOOL)value
 {
 	if (value && headlessOnDemand)

@@ -44,7 +44,11 @@ window is on (X11: the monitor's mode from XRandR; macOS: the screen's
 a term is running. It never goes past the lines st kept for that side (see
 below): beyond them the offset is held at that many rows.
 
-On macOS those frames come from the window's display link. macOS has been
+On macOS those frames come from the view's display link (macOS 14+: a
+CADisplayLink asking for the display's full rate; MTKView's own CVDisplayLink
+cannot ask, and on a ProMotion panel it ticked at the panel's idle rate,
+first tick 58-112 ms late and then ~100 ms apart; `ST_GLIDE_VIEW_LINK=0`
+uses it anyway). macOS has been
 seen to slow one window's link to about 10 Hz for good while its other
 redraws stayed fast (Oct 2026: glides at 10 fps in that window only; a new
 window was fine). A watchdog timer runs during glides and draws any frame the
