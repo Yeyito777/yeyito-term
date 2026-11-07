@@ -2189,6 +2189,9 @@ tsetmode(int priv, int set, const int *args, int narg)
 			case 5522: /* DEC private paste-event mode */
 				xsetmode(set, MODE_PASTEEVENT);
 				break;
+			case 7778: /* modifier change reports (docs/modifier-report.md) */
+				xsetmode(set, MODE_MODREPORT);
+				break;
 			/* Not implemented mouse modes. See comments there. */
 			case 1001: /* mouse highlight mode; can hang the
 				      terminal by design when implemented. */
@@ -2271,10 +2274,11 @@ csihandle(void)
 		return;
 	}
 	if (csiescseq.priv &&
-		(csiescseq.arg[0] == 2026 || csiescseq.arg[0] == 5522) &&
+		(csiescseq.arg[0] == 2026 || csiescseq.arg[0] == 5522 ||
+		csiescseq.arg[0] == 7778) &&
 		csiescseq.mode[0] == '$' && csiescseq.mode[1] == 'p') {
-		unsigned int flag = csiescseq.arg[0] == 2026 ?
-		    MODE_SYNC : MODE_PASTEEVENT;
+		unsigned int flag = csiescseq.arg[0] == 2026 ? MODE_SYNC :
+		    csiescseq.arg[0] == 5522 ? MODE_PASTEEVENT : MODE_MODREPORT;
 		len = snprintf(buf, sizeof(buf), "\033[?%d;%d$y",
 			csiescseq.arg[0], xismode(flag) ? 1 : 2);
 		ttywrite(buf, len, 0);
