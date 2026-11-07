@@ -87,6 +87,24 @@ TEST(view_tracks_motion_and_cursor_updates)
 	ASSERT([view respondsToSelector:@selector(mouseMoved:)]);
 }
 
+TEST(shift_mouse_reaches_apps_option_forces_selection)
+{
+	uint saved = win.mode;
+	win.mode |= MODE_MOUSEBTN | MODE_MOUSESGR;
+	ASSERT(appGetsMouse(0));
+	ASSERT(appGetsMouse(ShiftMask));
+	ASSERT(appGetsMouse(ShiftMask | ControlMask));
+	ASSERT(!appGetsMouse(Mod1Mask));
+	ASSERT(!appGetsMouse(ShiftMask | Mod1Mask));
+	/* Option+drag is a plain native selection, not a rectangular one. */
+	ASSERT_EQ(SEL_REGULAR, selectionType(Button1Mask | Mod1Mask));
+	win.mode &= ~MODE_MOUSE;
+	ASSERT(!appGetsMouse(0));
+	ASSERT(!appGetsMouse(ShiftMask));
+	/* Without app mouse reporting, Option+drag stays rectangular. */
+	win.mode = saved;
+}
+
 int
 main(void)
 {
@@ -94,6 +112,7 @@ main(void)
 		printf("macOS mouse cursor tests\n");
 		RUN_TEST(osc_shapes_map_to_cocoa_cursors);
 		RUN_TEST(no_key_window_never_claims_the_pointer);
+		RUN_TEST(shift_mouse_reaches_apps_option_forces_selection);
 		device = MTLCreateSystemDefaultDevice();
 		if (!device) {
 			puts("SKIP: view cursor tests require a Metal device");

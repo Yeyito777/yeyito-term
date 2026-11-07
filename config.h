@@ -223,7 +223,14 @@ static unsigned int defaultattr = 11;
  * Note that if you want to use ShiftMask with selmasks, set this to an other
  * modifier, set to 0 to not use it.
  */
+#ifdef __APPLE__
+/* Option, so Shift+click and Shift+motion reach apps that ask for the mouse
+ * (Exocortex opens a subagent on Shift+click); Option+drag selects natively. */
+static uint forcemousemod = Mod1Mask;
+#else
+/* Shift: dwm's MODKEY is Alt, and dwm takes Alt+click before st sees it. */
 static uint forcemousemod = ShiftMask;
+#endif
 
 /*
  * Internal mouse shortcuts.

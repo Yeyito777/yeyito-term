@@ -1441,6 +1441,14 @@ buttonMask(uint button)
 	    button == Button5 ? Button5Mask : 0;
 }
 
+/* Mouse input goes to an app that asked for it, unless forcemousemod is held
+ * to select or scroll natively. */
+static int
+appGetsMouse(uint state)
+{
+	return IS_SET(MODE_MOUSE) && !(state & forcemousemod);
+}
+
 static int
 mouseAction(uint button, uint state, int release)
 {
@@ -2090,7 +2098,7 @@ frameLogFrame(double start, unsigned long framesBefore, int clocked)
 	uint state = nativeModifiers(event), button = Button1;
 	pressedButtons |= 1U << (button - 1);
 	int x = eventColumn(event), y = eventRow(event);
-	if (IS_SET(MODE_MOUSE) && !(state & forcemousemod)) {
+	if (appGetsMouse(state)) {
 		mouseReport(0, button, state, x, y); return;
 	}
 	if (mouseAction(button, state, 0)) return;
@@ -2104,7 +2112,7 @@ frameLogFrame(double start, unsigned long framesBefore, int clocked)
 {
 	uint state = nativeModifiers(event);
 	int x = eventColumn(event), y = eventRow(event);
-	if (IS_SET(MODE_MOUSE) && !(state & forcemousemod))
+	if (appGetsMouse(state))
 		mouseReport(2, Button1, state, x, y);
 	else {
 		selextend(x, y, selectionType(state), 0);
@@ -2117,7 +2125,7 @@ frameLogFrame(double start, unsigned long framesBefore, int clocked)
 	uint state = nativeModifiers(event), button = Button1;
 	pressedButtons &= ~(1U << (button - 1));
 	int x = eventColumn(event), y = eventRow(event);
-	if (IS_SET(MODE_MOUSE) && !(state & forcemousemod)) {
+	if (appGetsMouse(state)) {
 		mouseReport(1, button, state, x, y); return;
 	}
 	if (mouseAction(button, state, 1)) return;
@@ -2133,7 +2141,7 @@ frameLogFrame(double start, unsigned long framesBefore, int clocked)
 {
 	uint button = Button3, state = nativeModifiers(event);
 	pressedButtons |= 1U << (button - 1);
-	if (IS_SET(MODE_MOUSE) && !(state & forcemousemod))
+	if (appGetsMouse(state))
 		mouseReport(0, button, state, eventColumn(event), eventRow(event));
 	else mouseAction(button, state, 0);
 }
@@ -2141,7 +2149,7 @@ frameLogFrame(double start, unsigned long framesBefore, int clocked)
 - (void)rightMouseDragged:(NSEvent *)event
 {
 	uint state = nativeModifiers(event);
-	if (IS_SET(MODE_MOUSE) && !(state & forcemousemod))
+	if (appGetsMouse(state))
 		mouseReport(2, Button3, state, eventColumn(event), eventRow(event));
 }
 
@@ -2149,7 +2157,7 @@ frameLogFrame(double start, unsigned long framesBefore, int clocked)
 {
 	uint button = Button3, state = nativeModifiers(event);
 	pressedButtons &= ~(1U << (button - 1));
-	if (IS_SET(MODE_MOUSE) && !(state & forcemousemod))
+	if (appGetsMouse(state))
 		mouseReport(1, button, state, eventColumn(event), eventRow(event));
 	else mouseAction(button, state, 1);
 }
@@ -2159,7 +2167,7 @@ frameLogFrame(double start, unsigned long framesBefore, int clocked)
 	uint button = event.buttonNumber == 2 ? Button2 : Button3;
 	uint state = nativeModifiers(event);
 	pressedButtons |= 1U << (button - 1);
-	if (IS_SET(MODE_MOUSE) && !(state & forcemousemod))
+	if (appGetsMouse(state))
 		mouseReport(0, button, state, eventColumn(event), eventRow(event));
 	else mouseAction(button, state, 0);
 }
@@ -2169,7 +2177,7 @@ frameLogFrame(double start, unsigned long framesBefore, int clocked)
 	uint button = event.buttonNumber == 2 ? Button2 : Button3;
 	uint state = nativeModifiers(event);
 	pressedButtons &= ~(1U << (button - 1));
-	if (IS_SET(MODE_MOUSE) && !(state & forcemousemod))
+	if (appGetsMouse(state))
 		mouseReport(1, button, state, eventColumn(event), eventRow(event));
 	else mouseAction(button, state, 1);
 }
@@ -2178,7 +2186,7 @@ frameLogFrame(double start, unsigned long framesBefore, int clocked)
 {
 	uint button = event.buttonNumber == 2 ? Button2 : Button3;
 	uint state = nativeModifiers(event);
-	if (IS_SET(MODE_MOUSE) && !(state & forcemousemod))
+	if (appGetsMouse(state))
 		mouseReport(2, button, state, eventColumn(event), eventRow(event));
 }
 
@@ -2192,7 +2200,7 @@ frameLogFrame(double start, unsigned long framesBefore, int clocked)
 {
 	double delta = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.deltaY;
 	uint state = nativeModifiers(event);
-	if (!(IS_SET(MODE_MOUSE) && !(state & forcemousemod)) &&
+	if (!appGetsMouse(state) &&
 	    nativePreciseScroll(event, state)) {
 		macos_request_redraw();
 		return;
@@ -2202,7 +2210,7 @@ frameLogFrame(double start, unsigned long framesBefore, int clocked)
 	int steps = MAX(1, (int)ceil(fabs(delta) / (event.hasPreciseScrollingDeltas ? 8.0 : 1.0)));
 	steps = MIN(steps, 8);
 	for (int i = 0; i < steps; i++) {
-		if (IS_SET(MODE_MOUSE) && !(state & forcemousemod))
+		if (appGetsMouse(state))
 			mouseReport(0, button, state, eventColumn(event), eventRow(event));
 		else if (!mouseAction(button, state, 0))
 			(button == Button4 ? kscrollup : kscrolldown)(&(Arg){.i=1});
