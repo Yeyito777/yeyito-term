@@ -27,6 +27,7 @@ static int writeErrorReported;
 static PtyChunk *head;
 static PtyChunk *tail;
 static size_t pendingBytes;
+static unsigned long writeCount;
 static char writerQueueKey;
 
 static void
@@ -125,6 +126,12 @@ macos_pty_start(int fd)
 	return 0;
 }
 
+unsigned long
+macos_pty_writes(void)
+{
+	return writeCount;
+}
+
 void
 macos_pty_write(const char *data, size_t length)
 {
@@ -134,6 +141,7 @@ macos_pty_write(const char *data, size_t length)
 
 	if (!queue || !data || !length)
 		return;
+	writeCount++;
 	copyLength = length > PTY_PENDING_LIMIT ? PTY_PENDING_LIMIT : length;
 	if (!(chunk = malloc(sizeof(*chunk) + copyLength))) {
 		fprintf(stderr, "st: unable to queue %zu PTY output bytes\n", length);

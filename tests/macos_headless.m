@@ -17,7 +17,12 @@
  * (keys named "mark" type U+00A4 and count until it is on a shown frame),
  * PTY bytes per second and CPU use.  ST_DISPLAYLINK_THROTTLE_MS=100 slows
  * the emulated display link (not the display) to one frame per 100 ms, as
- * macOS once did to a window; the glide watchdog should keep glides on time. */
+ * macOS once did to a window; the glide watchdog should keep glides on time.
+ *
+ * -I keeps the process idle between frames as a real st is: no main-thread
+ * heartbeat (no stall counts) and an emulated display that sleeps while it
+ * has nothing to show.  Without it, those wakeups also run the timers macOS
+ * would otherwise defer, which hides late timers after an idle moment. */
 #define main st_backend_main
 #include "../macos/backend.m"
 #undef main
@@ -248,6 +253,9 @@ static struct {
 	double period, lastPresent, lastBeat;
 	unsigned long sequence;
 	int lastMoving, vblankDrawQueued, needsDisplay;
+	/* -I: the vblank timer sleeps when idle; vblanks keep their phase */
+	int idleFaithful, asleep, idleTicks;
+	double origin;
 	/* key-to-screen latency */
 	double markSent[4096];
 	int marksSent, marksShown, marksBaseline;
@@ -404,6 +412,30 @@ displayAcquire(void)
 	return (__bridge void *)slot->texture;
 }
 
+/* -I: a frame to show or an unpaused view wakes the display at the next
+ * vblank of its old phase. */
+static void
+displayWake(void)
+{
+	if (!display.idleFaithful)
+		return;
+	dispatch_async(display.vblankQueue, ^{
+		double now, next;
+
+		if (!display.asleep)
+			return;
+		display.asleep = display.idleTicks = 0;
+		now = CACurrentMediaTime();
+		next = display.origin + ceil((now - display.origin) /
+		    display.period) * display.period;
+		dispatch_source_set_timer(display.vblank,
+		    dispatch_time(DISPATCH_TIME_NOW,
+		    (int64_t)((next - now) * NSEC_PER_SEC)),
+		    (uint64_t)(display.period * NSEC_PER_SEC), 0);
+		dispatch_resume(display.vblank);
+	});
+}
+
 static void
 displayDone(void *texture)
 {
@@ -412,6 +444,7 @@ displayDone(void *texture)
 		if ((__bridge void *)display.slots[i].texture == texture)
 			display.slots[i].state = SLOT_DONE;
 	pthread_mutex_unlock(&display.lock);
+	displayWake();
 }
 
 /* A vblank: show the oldest finished frame; the one it replaces becomes
@@ -421,12 +454,16 @@ vblankTick(void)
 {
 	double now = CACurrentMediaTime();
 	DisplaySlot *next = NULL, *old;
+	int waiting = 0;
 
 	pthread_mutex_lock(&display.lock);
 	for (int i = 0; i < DISPLAY_SLOTS; i++)
 		if (display.slots[i].state == SLOT_DONE &&
 		    (!next || display.slots[i].sequence < next->sequence))
 			next = &display.slots[i];
+	for (int i = 0; i < DISPLAY_SLOTS; i++)
+		waiting += display.slots[i].state == SLOT_DONE ||
+		    display.slots[i].state == SLOT_DRAWING;
 	if (next) {
 		old = display.shown;
 		next->state = SLOT_SHOWN;
@@ -456,6 +493,13 @@ vblankTick(void)
 		display.lastMoving = next->moving;
 	}
 	pthread_mutex_unlock(&display.lock);
+	if (display.idleFaithful && waiting <= (next != NULL) &&
+	    display.view.isPaused && ++display.idleTicks >= 2) {
+		display.asleep = 1;
+		dispatch_suspend(display.vblank);
+	} else if (next || !display.view.isPaused) {
+		display.idleTicks = 0;
+	}
 	if (!display.view.isPaused && !display.vblankDrawQueued) {
 		display.vblankDrawQueued = 1;
 		dispatch_async(dispatch_get_main_queue(), ^{
@@ -482,7 +526,12 @@ countMarks(void)
 	BOOL headlessPaused, headlessOnDemand;
 }
 - (BOOL)isPaused { return headlessPaused; }
-- (void)setPaused:(BOOL)paused { headlessPaused = paused; }
+- (void)setPaused:(BOOL)paused
+{
+	headlessPaused = paused;
+	if (!paused)
+		displayWake();
+}
 - (BOOL)enableSetNeedsDisplay { return headlessOnDemand; }
 - (void)setEnableSetNeedsDisplay:(BOOL)value { headlessOnDemand = value; }
 - (void)setNeedsDisplay:(BOOL)value
@@ -632,6 +681,7 @@ appMain(HeadlessView *view, double seconds, double fps, double every,
 	 * ~200 ms. */
 	display.vblank = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0,
 	    DISPATCH_TIMER_STRICT, display.vblankQueue);
+	display.origin = CACurrentMediaTime();
 	dispatch_source_set_timer(display.vblank, DISPATCH_TIME_NOW,
 	    (uint64_t)(display.period * NSEC_PER_SEC), 0);
 	dispatch_source_set_event_handler(display.vblank, ^{ vblankTick(); });
@@ -639,22 +689,25 @@ appMain(HeadlessView *view, double seconds, double fps, double every,
 
 	/* Main-thread responsiveness: how late a 2 ms heartbeat runs. */
 	display.lastBeat = CACurrentMediaTime();
-	display.heartbeat = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0,
+	display.heartbeat = display.idleFaithful ? NULL :
+	    dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0,
 	    DISPATCH_TIMER_STRICT, dispatch_get_main_queue());
-	dispatch_source_set_timer(display.heartbeat, DISPATCH_TIME_NOW,
-	    2 * NSEC_PER_MSEC, 0);
-	dispatch_source_set_event_handler(display.heartbeat, ^{
-		double now = CACurrentMediaTime();
-		double stall = now - display.lastBeat - 0.002;
-		display.lastBeat = now;
-		pthread_mutex_lock(&phaseLock);
-		phase.stalls8 += stall > 0.008;
-		phase.stalls16 += stall > 0.016;
-		phase.stalls33 += stall > 0.033;
-		phase.maxStall = MAX(phase.maxStall, stall * 1000);
-		pthread_mutex_unlock(&phaseLock);
-	});
-	dispatch_resume(display.heartbeat);
+	if (display.heartbeat) {
+		dispatch_source_set_timer(display.heartbeat, DISPATCH_TIME_NOW,
+		    2 * NSEC_PER_MSEC, 0);
+		dispatch_source_set_event_handler(display.heartbeat, ^{
+			double now = CACurrentMediaTime();
+			double stall = now - display.lastBeat - 0.002;
+			display.lastBeat = now;
+			pthread_mutex_lock(&phaseLock);
+			phase.stalls8 += stall > 0.008;
+			phase.stalls16 += stall > 0.016;
+			phase.stalls33 += stall > 0.033;
+			phase.maxStall = MAX(phase.maxStall, stall * 1000);
+			pthread_mutex_unlock(&phaseLock);
+		});
+		dispatch_resume(display.heartbeat);
+	}
 
 	/* AppKit displays views marked for display when the run loop is
 	 * about to wait. */
@@ -684,7 +737,9 @@ appMain(HeadlessView *view, double seconds, double fps, double every,
 					    CACurrentMediaTime();
 				pthread_mutex_unlock(&display.lock);
 			}
+			unsigned long writes = macos_pty_writes();
 			ttywrite(key->bytes, key->length, 1);
+			keyRedraw(writes);	/* as nativeHandleKey does */
 		});
 	}
 	if (!phaseMarkCount) {
@@ -713,14 +768,17 @@ appMain(HeadlessView *view, double seconds, double fps, double every,
 	dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
 	    (int64_t)(seconds * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
 		finished = 1;
+		CFRunLoopStop(CFRunLoopGetMain());
 	});
 
 	while (!finished)
-		CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, false);
+		CFRunLoopRunInMode(kCFRunLoopDefaultMode,
+		    display.idleFaithful ? 1.0 : 0.05, false);
 
 	char status[1024], path[PATH_MAX];
 	phaseEnd(origin);
-	dispatch_source_cancel(display.heartbeat);
+	if (display.heartbeat)
+		dispatch_source_cancel(display.heartbeat);
 	snprintf(path, sizeof(path), "%s/shot-final.png", outdir);
 	snapshotShown(path, 1);
 	mac_video_describe(status, sizeof(status));
@@ -743,9 +801,10 @@ main(int argc, char **argv)
 	double seconds = 20, every = 2, fps = 60, pointsWide = 0, pointsHigh = 0;
 	const char *outdir = "/tmp/st-headless";
 
-	while ((opt = getopt(argc, argv, "c:r:t:s:o:f:ak:K:Ag:p:")) != -1) {
+	while ((opt = getopt(argc, argv, "c:r:t:s:o:f:ak:K:Ag:p:I")) != -1) {
 		switch (opt) {
 		case 'A': app = 1; break;
+		case 'I': display.idleFaithful = 1; break;
 		case 'g':
 			if (sscanf(optarg, "%lfx%lf", &pointsWide, &pointsHigh) != 2) {
 				fprintf(stderr, "bad size %s\n", optarg);
@@ -783,7 +842,7 @@ main(int argc, char **argv)
 		default:
 			fprintf(stderr, "usage: %s [-A] [-c cols] [-r rows] "
 			    "[-g WIDTHxHEIGHT points] [-t seconds] [-s snapshot-every] "
-			    "[-f fps] [-o dir] [-a] [-k secs:key]... "
+			    "[-f fps] [-o dir] [-a] [-I] [-k secs:key]... "
 			    "[-K start:end:hz:key]... [-p secs:phase]... -- command...\n",
 			    argv[0]);
 			return 2;
