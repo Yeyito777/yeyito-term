@@ -1410,10 +1410,10 @@ handleKeyEvent(KeySym symbol, uint state, const char *buffer, int length,
 	return 0;
 }
 
+/* The cell under a point in the view's coordinates. */
 static int
-eventColumn(NSEvent *event)
+viewColumn(NSPoint point)
 {
-	NSPoint point = [nativeView convertPoint:event.locationInWindow fromView:nil];
 	int column = (int)((point.x - borderpx) / cellWidth());
 	int columns = win.cw ? MAX(1, win.tw / win.cw) : 1;
 	LIMIT(column, 0, columns - 1);
@@ -1421,14 +1421,25 @@ eventColumn(NSEvent *event)
 }
 
 static int
-eventRow(NSEvent *event)
+viewRow(NSPoint point)
 {
-	NSPoint point = [nativeView convertPoint:event.locationInWindow fromView:nil];
 	double shift = ss_device_round(smoothscroll_view_shift() * cellHeight(),
 	    mac_renderer_scale());
 	int row = (int)floor((point.y - borderpx - shift) / cellHeight());
 	LIMIT(row, 0, MAX(0, trow() - 1));
 	return row;
+}
+
+static int
+eventColumn(NSEvent *event)
+{
+	return viewColumn([nativeView convertPoint:event.locationInWindow fromView:nil]);
+}
+
+static int
+eventRow(NSEvent *event)
+{
+	return viewRow([nativeView convertPoint:event.locationInWindow fromView:nil]);
 }
 
 static uint
@@ -1475,14 +1486,20 @@ selectionType(uint state)
 	return SEL_REGULAR;
 }
 
+/* Where mouse reports go; tests capture them. */
+static void (*mouseReportWrite)(const char *, size_t, int) = ttywrite;
+
 static void
 mouseReport(int type, uint button, uint state, int x, int y)
 {
 	static int oldX, oldY;
+	static uint oldMods;
+	uint mods = state & (ShiftMask | Mod1Mask | ControlMask);
 	int code = 0, selectedButton = button;
 	char buffer[40];
 	if (type == 2) {
-		if (x == oldX && y == oldY) return;
+		/* Motion on the same cell counts only when the reported modifiers change. */
+		if (x == oldX && y == oldY && mods == oldMods) return;
 		if (!IS_SET(MODE_MOUSEMOTION) && !IS_SET(MODE_MOUSEMANY)) return;
 		if (IS_SET(MODE_MOUSEMOTION) && pressedButtons == 0) return;
 		for (selectedButton = 1; selectedButton <= 11 &&
@@ -1493,7 +1510,7 @@ mouseReport(int type, uint button, uint state, int x, int y)
 		if (type == 1 && IS_SET(MODE_MOUSEX10)) return;
 		if (type == 1 && (button == 4 || button == 5)) return;
 	}
-	oldX = x; oldY = y;
+	oldX = x; oldY = y; oldMods = mods;
 	if ((!IS_SET(MODE_MOUSESGR) && type == 1) || selectedButton == 12)
 		code += 3;
 	else if (selectedButton >= 8) code += 128 + selectedButton - 8;
@@ -1511,7 +1528,20 @@ mouseReport(int type, uint button, uint state, int x, int y)
 		length = snprintf(buffer, sizeof(buffer), "\033[M%c%c%c",
 		    32 + code, 32 + x + 1, 32 + y + 1);
 	else return;
-	ttywrite(buffer, length, 0);
+	mouseReportWrite(buffer, length, 0);
+}
+
+/* A modifier pressed or let go with the pointer still: report a motion at
+ * the pointer's cell with the new modifiers, so an app tracking motion sees
+ * Shift+hover at once. mouseReport drops it when motion tracking is off
+ * (1002 also needs a button held) or the reported modifiers did not change. */
+static void
+modifierMotion(uint state, int x, int y)
+{
+	if (!IS_SET(MODE_MOUSE)) return;
+	/* A forced native selection drag stays st's own. */
+	if (pressedButtons && (state & forcemousemod)) return;
+	mouseReport(2, 12, state, x, y);
 }
 
 /* Trackpads (and other precise devices) scroll the scrollback by pixels and
@@ -2032,6 +2062,11 @@ frameLogFrame(double start, unsigned long framesBefore, int clocked)
 		if (down && !rightShiftDown)
 			handleKeyEvent(XK_Shift_R, nativeModifiers(event), "", 0, 1, 0);
 		rightShiftDown = down;
+	}
+	if (nativePointerInView()) {
+		NSPoint point = [nativeView convertPoint:[nativeWindow
+		    convertPointFromScreen:NSEvent.mouseLocation] fromView:nil];
+		modifierMotion(nativeModifiers(event), viewColumn(point), viewRow(point));
 	}
 }
 
