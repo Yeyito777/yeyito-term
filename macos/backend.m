@@ -18,9 +18,11 @@
 #include <limits.h>
 #include <locale.h>
 #include <mach/mach.h>
+#include <mach-o/dyld.h>
 #include <math.h>
 #include <pthread.h>
 #include <signal.h>
+#include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -126,8 +128,12 @@ static size_t paletteCount;
 static int ttyfd = -1;
 static int drawingFrame;
 static int redrawPending;
+static double redrawDeadline;	/* when the pending redraw runs */
+static dispatch_source_t redrawTimer;
 static double lastFrameTime;	/* CACurrentMediaTime() of the last draw */
 static double framePeriod(void);
+static void redrawAfter(double delay);
+static void keyRedraw(unsigned long writesBefore);
 /* What asked for frames since the last one (the frame timing log). */
 enum {
 	FRAMELOG_VIDEO = 1 << 0,
@@ -896,9 +902,10 @@ xsetmode(int set, unsigned int flags)
 					xsetmode(0, MODE_SYNC);
 			});
 		} else {
-			/* Present all mutations accumulated since BSU as one frame. */
+			/* Present all mutations accumulated since BSU as one frame,
+			 * without waiting for more: the update is complete. */
 			tfulldirt();
-			macos_request_redraw();
+			redrawAfter(0);
 		}
 	}
 }
@@ -2107,7 +2114,16 @@ frameLogFrame(double start, unsigned long framesBefore, int clocked)
 	self.markedSelection = selected;
 	macos_request_redraw();
 }
-- (void)unmarkText { [self.marked.mutableString setString:@""]; macos_request_redraw(); }
+/* insertText: calls it for every typed character: without marked text to
+ * clear there is nothing to redraw, and the key's own redraw waits for the
+ * echo (keyRedraw). */
+- (void)unmarkText
+{
+	if (!self.marked.length)
+		return;
+	[self.marked.mutableString setString:@""];
+	macos_request_redraw();
+}
 - (NSArray<NSAttributedStringKey> *)validAttributesForMarkedText { return @[]; }
 - (NSAttributedString *)attributedSubstringForProposedRange:(NSRange)range actualRange:(NSRangePointer)actual
 {
@@ -2354,13 +2370,14 @@ nativeHandleKey(NSEvent *event, int release)
 	}
 	NSEventModifierFlags flags = event.modifierFlags &
 	    NSEventModifierFlagDeviceIndependentFlagsMask;
+	unsigned long writes = macos_pty_writes();
 	if (!release && macos_is_em_dash_keystroke(event.keyCode,
 	    (flags & NSEventModifierFlagShift) != 0,
 	    (flags & NSEventModifierFlagOption) != 0,
 	    (flags & NSEventModifierFlagControl) != 0,
 	    (flags & NSEventModifierFlagCommand) != 0)) {
 		ttywrite("\xe2\x80\x94", 3, 1);
-		macos_request_redraw();
+		keyRedraw(writes);
 		return;
 	}
 	KeySym symbol = nativeKeysym(event);
@@ -2373,7 +2390,7 @@ nativeHandleKey(NSEvent *event, int release)
 	    release ? 3 : 1, event.isARepeat);
 	if (!release && !consumed)
 		[nativeView interpretKeyEvents:@[event]];
-	macos_request_redraw();
+	keyRedraw(writes);
 }
 
 static void
@@ -2478,21 +2495,51 @@ framePeriod(void)
 	return 1.0 / (fps > 0 ? fps : 60);
 }
 
+/* Redraw at least delay seconds from now and a refresh after the last
+ * frame; an earlier request moves a pending redraw up.  The timer is strict:
+ * macOS defers ordinary timers by up to 100 ms in a throttled process and
+ * by a millisecond or so otherwise, and an echo should not wait for that. */
+static void
+redrawAfter(double delay)
+{
+	double now, at;
+
+	if (!nativeView || IS_SET(MODE_SYNC)) return;
+	now = CACurrentMediaTime();
+	at = now + MAX(MAX(0.0, delay), lastFrameTime + framePeriod() - now);
+	if (redrawPending && redrawDeadline <= at) return;
+	if (!redrawTimer) {
+		redrawTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0,
+		    DISPATCH_TIMER_STRICT, dispatch_get_main_queue());
+		dispatch_source_set_event_handler(redrawTimer, ^{
+			redrawPending = 0;
+			[nativeView setNeedsDisplay:YES];
+		});
+		dispatch_resume(redrawTimer);
+	}
+	redrawPending = 1;
+	redrawDeadline = at;
+	dispatch_source_set_timer(redrawTimer, dispatch_time(DISPATCH_TIME_NOW,
+	    (int64_t)((at - now) * NSEC_PER_SEC)), DISPATCH_TIME_FOREVER, 0);
+}
+
 void
 macos_request_redraw(void)
 {
-	double delay;
+	redrawAfter(MAX(0.0, minlatency) / 1000);
+}
 
-	if (!nativeView || redrawPending || IS_SET(MODE_SYNC)) return;
-	redrawPending = 1;
-	delay = MAX(MAX(0.0, minlatency) / 1000,
-	    lastFrameTime + framePeriod() - CACurrentMediaTime());
-	dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-	    (int64_t)(delay * NSEC_PER_SEC)),
-	    dispatch_get_main_queue(), ^{
-		redrawPending = 0;
-		[nativeView setNeedsDisplay:YES];
-	});
+/* After a key event.  One the program was sent is usually echoed within a
+ * few milliseconds, and the echo asks for its own redraw: the key's frame
+ * waits up to a refresh for it.  Drawn first, it showed nothing new and held
+ * the echo to the next refresh. */
+static void
+keyRedraw(unsigned long writesBefore)
+{
+	if (macos_pty_writes() != writesBefore)
+		redrawAfter(framePeriod());
+	else
+		macos_request_redraw();
 }
 
 void
@@ -3649,9 +3696,47 @@ claimSpare(const char *payload, size_t length, double received)
 	});
 }
 
+extern char **environ;
+/* libsystem's, declared in its private spawn header. */
+int posix_spawnattr_setprocesstype_np(posix_spawnattr_t *, const int);
+#define POSIX_SPAWN_PROC_TYPE_APP_DEFAULT 0x100
+
+/* A process started by a background one (a LaunchAgent with ProcessType
+ * Background, such as the Exocortex daemon, and everything it runs, like
+ * `aerospace spawn` from an agent's shell) inherits its process type: every
+ * thread clamped to background QoS at priority 4, ordinary timers up to
+ * 100 ms late, for the window's whole life, focused or not.  Typing echoed
+ * up to 70 ms late, and the shell and its programs inherit it too.  Execute
+ * st again in place, same pid, as an app. */
+static void
+leaveBackgroundProcessType(char *argv[])
+{
+	char path[PATH_MAX];
+	uint32_t size = sizeof(path);
+	posix_spawnattr_t attributes;
+
+	if (getenv("ST_LEFT_BACKGROUND")) {
+		unsetenv("ST_LEFT_BACKGROUND");	/* once: never loop */
+		return;
+	}
+	if (qos_class_self() > QOS_CLASS_UTILITY ||
+	    _NSGetExecutablePath(path, &size) != 0)
+		return;
+	setenv("ST_LEFT_BACKGROUND", "1", 1);
+	posix_spawnattr_init(&attributes);
+	posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETEXEC);
+	posix_spawnattr_setprocesstype_np(&attributes,
+	    POSIX_SPAWN_PROC_TYPE_APP_DEFAULT);
+	posix_spawn(NULL, path, NULL, &attributes, argv, environ);
+	/* Still here: it failed; carry on as we are. */
+	posix_spawnattr_destroy(&attributes);
+	unsetenv("ST_LEFT_BACKGROUND");
+}
+
 int
 main(int argc, char *argv[])
 {
+	leaveBackgroundProcessType(argv);
 	/* Parse native long options before suckless arg.h. */
 	for (int i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--from-save") && i + 1 < argc) {

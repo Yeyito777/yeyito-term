@@ -53,6 +53,15 @@ frame per display refresh; a glide or snap runs MTKView's display link at
 the screen's refresh rate. The renderer lays out each rune with CoreText
 once and keeps its glyphs, and puts a frame's vertices in one pooled buffer.
 
+Output waits `minlatency` (2 ms) for more before its frame, the end of a
+synchronized update (DEC 2026, as Neovim sends) none, and a key sent to the
+program up to a refresh for its echo, which then draws it; all on one strict
+timer, as macOS defers ordinary ones. An st started by a background process
+(a LaunchAgent with `ProcessType` `Background`, or anything it runs, such as
+`aerospace spawn` from an agent's shell) inherits its process type: every
+thread at background QoS and timers up to 100 ms late. st then executes
+itself again in place, same pid, as an app.
+
 `ST_FRAME_LOG=FILE` logs every frame from launch. A running st logs while
 `$TMPDIR/st-frames.log` exists (it looks once a second while drawing), so a
 window already in use can be measured, and every st appends to that file

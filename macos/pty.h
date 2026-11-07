@@ -11,6 +11,8 @@
 int macos_pty_start(int fd);
 void macos_pty_stop(void);
 void macos_pty_write(const char *data, size_t length);
+/* How many writes were queued so far (on the main thread). */
+unsigned long macos_pty_writes(void);
 
 /* Exposed for diagnostics and the backpressure regression test. */
 size_t macos_pty_pending(void);
