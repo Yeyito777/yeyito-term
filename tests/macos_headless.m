@@ -598,6 +598,32 @@ typedef struct {
 static PhaseMark phaseMarks[64];
 static int phaseMarkCount;
 
+/* -F SECS:TEXT: at SECS, hold the main thread until the child's output is
+ * waiting in st's PTY ring (as a glide whose every frame waits for a drawable
+ * holds it), then draw one frame: it must show TEXT.  A frame drawn while the
+ * app's output waits unparsed shows a stale screen; holding a key through
+ * such a glide once applied an app's rows 3-4 at a time every ~115 ms. */
+static double frameCheckAt = -1;
+static const char *frameCheckText;
+static int frameCheckShown;
+
+static int
+gridContains(const char *text)
+{
+	size_t length = strlen(text);
+	for (int y = 0; y < trow(); y++) {
+		Line line = tlineviewline(y);
+		for (int x = 0; line && x + (int)length <= tcol(); x++) {
+			size_t i = 0;
+			while (i < length && line[x + i].u == (Rune)(unsigned char)text[i])
+				i++;
+			if (i == length)
+				return 1;
+		}
+	}
+	return 0;
+}
+
 /* Snapshot the frame on screen without holding up the main thread. */
 static void
 snapshotShown(const char *path, int wait)
@@ -753,6 +779,26 @@ appMain(HeadlessView *view, double seconds, double fps, double every,
 			keyRedraw(writes);	/* as nativeHandleKey does */
 		});
 	}
+	if (frameCheckText) {
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+		    (int64_t)(frameCheckAt * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+			double until = CACurrentMediaTime() + 3;
+			size_t queued = 0;
+			while (!queued && CACurrentMediaTime() < until) {
+				pthread_mutex_lock(&ttyRing.lock);
+				queued = ttyRing.length;
+				pthread_mutex_unlock(&ttyRing.lock);
+				if (!queued)
+					usleep(1000);
+			}
+			usleep(50000);	/* the reader takes the rest */
+			[view headlessDraw];
+			frameCheckShown = gridContains(frameCheckText);
+			printf("frame check: %zu bytes waiting, the frame %s them\n",
+			    queued, frameCheckShown ? "shows" : "does NOT show");
+			fflush(stdout);
+		});
+	}
 	if (!phaseMarkCount) {
 		phaseMarks[0] = (PhaseMark){0, "all"};
 		phaseMarkCount = 1;
@@ -802,7 +848,7 @@ appMain(HeadlessView *view, double seconds, double fps, double every,
 	dispatch_source_cancel(display.vblank);
 	graphics_reset();
 	[NSProcessInfo.processInfo endActivity:activity];
-	return 0;
+	return frameCheckText && !frameCheckShown ? 1 : 0;
 }
 
 int
@@ -812,7 +858,7 @@ main(int argc, char **argv)
 	double seconds = 20, every = 2, fps = 60, pointsWide = 0, pointsHigh = 0;
 	const char *outdir = "/tmp/st-headless";
 
-	while ((opt = getopt(argc, argv, "c:r:t:s:o:f:ak:K:Ag:p:I")) != -1) {
+	while ((opt = getopt(argc, argv, "c:r:t:s:o:f:ak:K:Ag:p:IF:")) != -1) {
 		switch (opt) {
 		case 'A': app = 1; break;
 		case 'I': display.idleFaithful = 1; break;
@@ -830,6 +876,14 @@ main(int argc, char **argv)
 			}
 			phaseMarks[phaseMarkCount++] = (PhaseMark){atof(optarg),
 			    strchr(optarg, ':') + 1};
+			break;
+		case 'F':
+			if (!strchr(optarg, ':')) {
+				fprintf(stderr, "bad frame check %s\n", optarg);
+				return 2;
+			}
+			frameCheckAt = atof(optarg);
+			frameCheckText = strchr(optarg, ':') + 1;
 			break;
 		case 'K':
 			if (!parseRepeat(optarg)) {
@@ -854,7 +908,7 @@ main(int argc, char **argv)
 			fprintf(stderr, "usage: %s [-A] [-c cols] [-r rows] "
 			    "[-g WIDTHxHEIGHT points] [-t seconds] [-s snapshot-every] "
 			    "[-f fps] [-o dir] [-a] [-I] [-k secs:key]... "
-			    "[-K start:end:hz:key]... [-p secs:phase]... -- command...\n",
+			    "[-K start:end:hz:key]... [-p secs:phase]... [-F secs:text] -- command...\n",
 			    argv[0]);
 			return 2;
 		}
