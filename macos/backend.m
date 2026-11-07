@@ -135,6 +135,7 @@ static dispatch_source_t redrawTimer;
 static double lastFrameTime;	/* CACurrentMediaTime() of the last draw */
 static double framePeriod(void);
 static void redrawAfter(double delay);
+static void ttyParseBeforeFrame(void);
 static void keyRedraw(unsigned long writesBefore);
 /* What asked for frames since the last one (the frame timing log). */
 enum {
@@ -2105,6 +2106,7 @@ frameLogFrame(double start, unsigned long framesBefore, int clocked)
 	int linked = glideLinkDrawing || (!self.paused && !glideWatchdogDrawing);
 
 	(void)view;
+	ttyParseBeforeFrame();
 	/* A link tick right after a timer frame is timed but not drawn: two
 	 * frames in one refresh fill the drawable queue, and every later frame
 	 * of the glide then waits a refresh for a drawable. */
@@ -3192,6 +3194,29 @@ ttyParseRing(void *context)
 			pthread_mutex_unlock(&ttyRing.lock);
 		});
 	}
+}
+
+/*
+ * Output the reader has queued is parsed before a frame is drawn, so a frame
+ * never shows a screen older than what the app has sent.  Left to its turn
+ * on the main queue, the parse could wait out a whole glide: once every glide
+ * frame waited most of a refresh for a drawable, the display link's frames
+ * ran back to back and the queued parse got in only when the glide paused,
+ * so an app scrolling a row per key had its rows applied 3-4 at a time every
+ * ~115 ms (Exocortex, a held Ctrl+Y after reversing, Nov 7 2026).
+ */
+static void
+ttyParseBeforeFrame(void)
+{
+	int waiting;
+
+	if (!ttyRing.data)
+		return;
+	pthread_mutex_lock(&ttyRing.lock);
+	waiting = ttyRing.length > 0 && !ttyRing.closed;
+	pthread_mutex_unlock(&ttyRing.lock);
+	if (waiting)
+		ttyParseRing(NULL);
 }
 
 static void
