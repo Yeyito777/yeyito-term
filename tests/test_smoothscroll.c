@@ -1179,6 +1179,38 @@ osc4(char *cmd, char *a, char *b, char *c)
 	smoothscroll_app_osc(5, args);
 }
 
+/* The Exocortex TUI restarting a glide after a jump further than the
+ * terminal (gg held, Nov 7): the base before the frame's step, then the
+ * step back with the glide's easing, then a row at a time.  st must do the
+ * same arithmetic: holding each value to the terminal's height left its base
+ * rows short, so the offset rested there for good, showing the bottom lines
+ * the scrolls had kept above the prompt and hiding as many at the top. */
+TEST(app_values_past_the_terminal_add_up_exactly)
+{
+	int i;
+
+	app_reset();
+	osc("o", "30000", NULL);		/* the app's base: 30 rows */
+	osc4("m", "-23000", "-7000", "100");	/* its step: base 7, easing in */
+	for (i = 0; i < 7; i++) {		/* each row the glide lays out */
+		region_scroll(0, 7, 0, -1);
+		osc("m", "-1000", NULL);
+	}
+	frame_at(5000);				/* long after the easing */
+	ASSERT(NEAR(0.0, smoothscroll_shift(6, 3)));
+	ASSERT(!smoothscroll_pending());
+	smoothscroll_drawextra();
+	ASSERT_EQ(0, ndrawn);			/* no kept line left showing */
+	/* An easing term past the terminal eases out as sent, too. */
+	app_reset();
+	region_scroll(0, 7, 0, -4);
+	osc4("m", "0", "-15000", "100");
+	frame_at(1000);
+	ASSERT(NEAR(-4.0, smoothscroll_shift(6, 3)));	/* drawn: the kept lines */
+	frame_at(1050);
+	ASSERT(NEAR(-15.0 / 8, smoothscroll_shift(6, 3)));
+}
+
 TEST(app_moves_are_timed_by_st)
 {
 	app_reset();
@@ -1449,6 +1481,7 @@ TEST_SUITE(smoothscroll_app)
 	RUN_TEST(app_rectangles_with_different_tops_split_rows);
 	RUN_TEST(app_state_clears_on_resize_and_bad_input_is_ignored);
 	RUN_TEST(app_moves_are_timed_by_st);
+	RUN_TEST(app_values_past_the_terminal_add_up_exactly);
 	RUN_TEST(app_moves_add_up_and_never_pass_the_kept_lines);
 	RUN_TEST(images_leave_with_their_lines);
 	RUN_TEST(nothing_clips_or_splits_at_rest);
