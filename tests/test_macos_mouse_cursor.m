@@ -129,63 +129,49 @@ resetReports(void)
 	reportCount = 0;
 }
 
-TEST(modifier_change_reports_one_motion_with_its_bits)
+TEST(modifier_changes_report_only_with_mode_7778)
 {
 	uint saved = win.mode;
 	mouseReportWrite = captureReport;
 	pressedButtons = 0;
-	win.mode = (win.mode & ~MODE_MOUSE) | MODE_MOUSEMANY | MODE_MOUSESGR;
+	/* Any-motion SGR mouse tracking on, as Exocortex runs. */
+	win.mode = (win.mode & ~(MODE_MOUSE | MODE_MODREPORT)) | MODE_MOUSEMANY | MODE_MOUSESGR;
 
-	/* Shift pressed over cell (4, 2): one SGR motion, button 3 (none) + 32 + Shift 4. */
+	/* Mode off: Shift down and up send nothing, and never a mouse motion. */
 	resetReports();
-	modifierMotion(ShiftMask, 4, 2);
+	modifierChange(ShiftMask, 1, 4, 2);
+	modifierChange(0, 1, 4, 2);
+	ASSERT_EQ(0, reportCount);
+
+	/* Mode on: one report per change, with Shift/Option/Control as 1/2/4 and a 1-based cell. */
+	win.mode |= MODE_MODREPORT;
+	resetReports();
+	modifierChange(ShiftMask, 1, 4, 2);
 	ASSERT_EQ(1, reportCount);
-	ASSERT(strcmp(reports, "\033[<39;5;3M") == 0);
-	/* The same modifiers again, or only ones st does not report (Caps Lock, Command): nothing. */
+	ASSERT(strcmp(reports, "\033[?7778;1;5;3~") == 0);
+	/* Caps Lock or Command alone changes nothing reported. */
 	resetReports();
-	modifierMotion(ShiftMask, 4, 2);
-	modifierMotion(ShiftMask | LockMask | Mod4Mask, 4, 2);
+	modifierChange(ShiftMask | LockMask, 1, 4, 2);
+	modifierChange(ShiftMask | LockMask | Mod4Mask, 1, 4, 2);
 	ASSERT_EQ(0, reportCount);
-	/* Shift let go: one plain motion. Control: its own bit. */
 	resetReports();
-	modifierMotion(0, 4, 2);
-	ASSERT(strcmp(reports, "\033[<35;5;3M") == 0);
+	modifierChange(ShiftMask | ControlMask | Mod1Mask, 1, 7, 0);
+	ASSERT(strcmp(reports, "\033[?7778;7;8;1~") == 0);
 	resetReports();
-	modifierMotion(ControlMask, 4, 2);
-	ASSERT(strcmp(reports, "\033[<51;5;3M") == 0);
+	modifierChange(0, 1, 7, 0);
+	ASSERT(strcmp(reports, "\033[?7778;0;8;1~") == 0);
+	ASSERT(strstr(reports, "\033[<") == NULL);
 
-	/* Without 1006, the legacy encoding. */
-	win.mode &= ~MODE_MOUSESGR;
+	/* The pointer outside the view: nothing, and the next change inside still reports. */
 	resetReports();
-	modifierMotion(ShiftMask, 4, 2);
+	modifierChange(ShiftMask, 0, 0, 0);
+	ASSERT_EQ(0, reportCount);
+	modifierChange(0, 1, 4, 2);
 	ASSERT_EQ(1, reportCount);
-	ASSERT(reportsLength == 6 && memcmp(reports, "\033[M", 3) == 0);
-	ASSERT_EQ(32 + 39, (unsigned char)reports[3]);
-	ASSERT_EQ(32 + 5, (unsigned char)reports[4]);
-	ASSERT_EQ(32 + 3, (unsigned char)reports[5]);
-	win.mode |= MODE_MOUSESGR;
+	ASSERT(strcmp(reports, "\033[?7778;0;5;3~") == 0);
 
-	/* 1002 reports motion only with a button held. */
-	win.mode = (win.mode & ~MODE_MOUSE) | MODE_MOUSEMOTION | MODE_MOUSESGR;
-	resetReports();
-	modifierMotion(0, 4, 2);
-	ASSERT_EQ(0, reportCount);
-	pressedButtons = 1U << (Button1 - 1);
-	modifierMotion(ControlMask, 4, 2);
-	ASSERT(strcmp(reports, "\033[<48;5;3M") == 0);
-	/* A drag that forces native selection is st's own. */
-	resetReports();
-	modifierMotion(forcemousemod, 4, 2);
-	ASSERT_EQ(0, reportCount);
-	pressedButtons = 0;
-
-	/* Mouse reporting off: nothing. */
-	win.mode &= ~MODE_MOUSE;
-	resetReports();
-	modifierMotion(ShiftMask, 6, 2);
-	modifierMotion(0, 6, 2);
-	ASSERT_EQ(0, reportCount);
-
+	/* An application boundary clears the mode. */
+	ASSERT(MODE_APPRESET & MODE_MODREPORT);
 	win.mode = saved;
 	mouseReportWrite = ttywrite;
 }
@@ -196,7 +182,7 @@ TEST(flags_change_without_the_pointer_in_a_window_reports_nothing)
 	STMetalView *view = [[STMetalView alloc]
 	    initWithFrame:NSMakeRect(0, 0, 200, 100) device:device];
 	mouseReportWrite = captureReport;
-	win.mode = (win.mode & ~MODE_MOUSE) | MODE_MOUSEMANY | MODE_MOUSESGR;
+	win.mode = (win.mode & ~MODE_MOUSE) | MODE_MOUSEMANY | MODE_MOUSESGR | MODE_MODREPORT;
 	resetReports();
 	NSEvent *shift = [NSEvent keyEventWithType:NSEventTypeFlagsChanged
 	    location:NSZeroPoint modifierFlags:NSEventModifierFlagShift timestamp:0
@@ -216,7 +202,7 @@ main(void)
 		RUN_TEST(osc_shapes_map_to_cocoa_cursors);
 		RUN_TEST(no_key_window_never_claims_the_pointer);
 		RUN_TEST(shift_mouse_reaches_apps_option_forces_selection);
-		RUN_TEST(modifier_change_reports_one_motion_with_its_bits);
+		RUN_TEST(modifier_changes_report_only_with_mode_7778);
 		device = MTLCreateSystemDefaultDevice();
 		if (!device) {
 			puts("SKIP: view cursor tests require a Metal device");

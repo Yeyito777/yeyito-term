@@ -1486,20 +1486,17 @@ selectionType(uint state)
 	return SEL_REGULAR;
 }
 
-/* Where mouse reports go; tests capture them. */
+/* Where mouse and modifier reports go; tests capture them. */
 static void (*mouseReportWrite)(const char *, size_t, int) = ttywrite;
 
 static void
 mouseReport(int type, uint button, uint state, int x, int y)
 {
 	static int oldX, oldY;
-	static uint oldMods;
-	uint mods = state & (ShiftMask | Mod1Mask | ControlMask);
 	int code = 0, selectedButton = button;
 	char buffer[40];
 	if (type == 2) {
-		/* Motion on the same cell counts only when the reported modifiers change. */
-		if (x == oldX && y == oldY && mods == oldMods) return;
+		if (x == oldX && y == oldY) return;
 		if (!IS_SET(MODE_MOUSEMOTION) && !IS_SET(MODE_MOUSEMANY)) return;
 		if (IS_SET(MODE_MOUSEMOTION) && pressedButtons == 0) return;
 		for (selectedButton = 1; selectedButton <= 11 &&
@@ -1510,7 +1507,7 @@ mouseReport(int type, uint button, uint state, int x, int y)
 		if (type == 1 && IS_SET(MODE_MOUSEX10)) return;
 		if (type == 1 && (button == 4 || button == 5)) return;
 	}
-	oldX = x; oldY = y; oldMods = mods;
+	oldX = x; oldY = y;
 	if ((!IS_SET(MODE_MOUSESGR) && type == 1) || selectedButton == 12)
 		code += 3;
 	else if (selectedButton >= 8) code += 128 + selectedButton - 8;
@@ -1531,17 +1528,30 @@ mouseReport(int type, uint button, uint state, int x, int y)
 	mouseReportWrite(buffer, length, 0);
 }
 
-/* A modifier pressed or let go with the pointer still: report a motion at
- * the pointer's cell with the new modifiers, so an app tracking motion sees
- * Shift+hover at once. mouseReport drops it when motion tracking is off
- * (1002 also needs a button held) or the reported modifiers did not change. */
-static void
-modifierMotion(uint state, int x, int y)
+/* Shift, Option and Control as mode 7778 reports them: 1, 2 and 4. */
+static uint
+reportedModifiers(uint state)
 {
-	if (!IS_SET(MODE_MOUSE)) return;
-	/* A forced native selection drag stays st's own. */
-	if (pressedButtons && (state & forcemousemod)) return;
-	mouseReport(2, 12, state, x, y);
+	return (state & ShiftMask ? 1 : 0) | (state & Mod1Mask ? 2 : 0) |
+	    (state & ControlMask ? 4 : 0);
+}
+
+/* A modifier pressed or let go (docs/modifier-report.md): with mode 7778 on
+ * and the pointer over the view, tell the app the new Shift/Option/Control
+ * state and the pointer's cell. Nothing for other modifiers (Caps Lock,
+ * Command), and never a mouse report: the pointer did not move. */
+static void
+modifierChange(uint state, int inView, int x, int y)
+{
+	static uint previous;
+	uint mods = reportedModifiers(state);
+	char buffer[48];
+	if (mods == previous) return;
+	previous = mods;
+	if (!IS_SET(MODE_MODREPORT) || !inView) return;
+	int length = snprintf(buffer, sizeof(buffer), "\033[?7778;%u;%d;%d~",
+	    mods, x + 1, y + 1);
+	mouseReportWrite(buffer, length, 0);
 }
 
 /* Trackpads (and other precise devices) scroll the scrollback by pixels and
@@ -2063,11 +2073,14 @@ frameLogFrame(double start, unsigned long framesBefore, int clocked)
 			handleKeyEvent(XK_Shift_R, nativeModifiers(event), "", 0, 1, 0);
 		rightShiftDown = down;
 	}
-	if (nativePointerInView()) {
+	int inView = nativePointerInView(), x = 0, y = 0;
+	if (inView) {
 		NSPoint point = [nativeView convertPoint:[nativeWindow
 		    convertPointFromScreen:NSEvent.mouseLocation] fromView:nil];
-		modifierMotion(nativeModifiers(event), viewColumn(point), viewRow(point));
+		x = viewColumn(point);
+		y = viewRow(point);
 	}
+	modifierChange(nativeModifiers(event), inView, x, y);
 }
 
 - (void)insertText:(id)value replacementRange:(NSRange)range
