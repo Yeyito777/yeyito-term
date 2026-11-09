@@ -1211,6 +1211,82 @@ TEST(app_values_past_the_terminal_add_up_exactly)
 	ASSERT(NEAR(-15.0 / 8, smoothscroll_shift(6, 3)));
 }
 
+/* The Exocortex TUI's bytes when the bottom of its history grows or shrinks
+ * while followed (the live tool-call block, Nov 9): content that moved by
+ * itself is a region scroll plus an easing term from where it was drawn
+ * (SU k, m;0;k), then, in the same write, the rows laid out back next to the
+ * glide (SD k-1, m;-(k-1)) and a row at a time as it eases (SU 1, m;1).  A
+ * shrink is SD k, m;0;-k.  Key scrolls move the base with a cancelling term
+ * (m;s;-s).  Whatever the mix, st must come to rest at offset 0 with nothing
+ * but the grid drawn (Nov 7: a base left rows off kept the pushed-out lines
+ * painted above the prompt for good). */
+static void
+bottom_moves_rest_at_zero(int panel)
+{
+	int i;
+
+	app_reset();
+	if (panel)	/* the Tasks panel's columns move only below it */
+		osc("r", "1,5,8,8", "4,9,8,12");
+	/* Grows by 3: the content is drawn where it was, then eases up. */
+	region_scroll(0, 7, 0, 3);
+	osc4("m", "0", "3000", "100");
+	region_scroll(0, 7, 0, -2);
+	osc("m", "-2000", NULL);
+	frame_at(1000);
+	ASSERT_EQ(103, altstore[2][5].u);	/* old row 3, laid out a row up */
+	ASSERT(NEAR(1.0, smoothscroll_shift(5, 2)));	/* ... drawn at row 3 */
+	frame_at(1030);
+	region_scroll(0, 7, 0, 1);
+	osc("m", "1000", NULL);
+	/* Grows by 2 more while that glide runs. */
+	frame_at(1040);
+	region_scroll(0, 7, 0, 2);
+	osc4("m", "0", "2000", "100");
+	region_scroll(0, 7, 0, -2);
+	osc("m", "-2000", NULL);
+	for (i = 0; i < 3; i++) {
+		frame_at(1060 + 20 * i);
+		region_scroll(0, 7, 0, 1);
+		osc("m", "1000", NULL);
+	}
+	frame_at(1200);
+	/* Shrinks by 4: rows come back down from above. */
+	region_scroll(0, 7, 0, -4);
+	osc4("m", "0", "-4000", "100");
+	frame_at(1210);
+	ASSERT(smoothscroll_pending());
+	/* The user scrolls up 3 rows and back down mid-glide. */
+	frame_at(1250);
+	osc4("m", "3000", "-3000", "100");
+	for (i = 0; i < 3; i++) {
+		frame_at(1260 + 10 * i);
+		region_scroll(0, 7, 0, -1);
+		osc("m", "-1000", NULL);
+	}
+	osc4("m", "-3000", "3000", "100");
+	for (i = 0; i < 3; i++) {
+		frame_at(1300 + 10 * i);
+		region_scroll(0, 7, 0, 1);
+		osc("m", "1000", NULL);
+	}
+	frame_at(5000);			/* long after every easing term */
+	ASSERT(NEAR(0.0, smoothscroll_shift(5, 6)));
+	ASSERT(NEAR(0.0, smoothscroll_shift(9, 6)));
+	ASSERT(!smoothscroll_pending());
+	frame_at(5010);			/* the frame back at rest redraws all */
+	ASSERT(!smoothscroll_needs_full());
+	ndrawn = 0;
+	smoothscroll_drawextra();
+	ASSERT_EQ(0, ndrawn);		/* no kept line left showing */
+}
+
+TEST(app_bottom_growing_and_shrinking_rests_at_zero)
+{
+	bottom_moves_rest_at_zero(0);
+	bottom_moves_rest_at_zero(1);
+}
+
 TEST(app_moves_are_timed_by_st)
 {
 	app_reset();
@@ -1302,7 +1378,7 @@ TEST(nothing_clips_or_splits_at_rest)
 	ASSERT(!smoothscroll_clip(6, 5, &top, &end, &left, &right));
 	smoothscroll_image(altstore[5]);
 	ASSERT(!smoothscroll_clip(6, 5, &top, &end, &left, &right));
-	ASSERT(NEAR(0.0, smoothscroll_shift(6, 5)));
+	ASSERT(NEAR(0.0, smoothscroll_shift(5, 6)));
 	smoothscroll_image(NULL);
 	ASSERT_EQ(12, smoothscroll_segment(5, 0, 12));
 	ASSERT(!smoothscroll_needs_full());
@@ -1482,6 +1558,7 @@ TEST_SUITE(smoothscroll_app)
 	RUN_TEST(app_state_clears_on_resize_and_bad_input_is_ignored);
 	RUN_TEST(app_moves_are_timed_by_st);
 	RUN_TEST(app_values_past_the_terminal_add_up_exactly);
+	RUN_TEST(app_bottom_growing_and_shrinking_rests_at_zero);
 	RUN_TEST(app_moves_add_up_and_never_pass_the_kept_lines);
 	RUN_TEST(images_leave_with_their_lines);
 	RUN_TEST(nothing_clips_or_splits_at_rest);
