@@ -292,11 +292,10 @@ chpwd  # report initial directory
 ssh() {
   local host="${@: -1}"
   printf '\033]778;ssh;%s\007' "$host"
-  command ssh "$@"
-  local ret=$?
-  # Also tells st to discard remote TUI input modes if SSH disconnected
+  # The always block runs even when Ctrl+C kills ssh before it connects
+  # (zsh aborts the function then, so a plain trailing printf is skipped).
+  # Exit also tells st to discard remote TUI input modes if SSH disconnected
   # before the remote application could restore them.
-  printf '\033]778;ssh;exit\007'
-  return $ret
+  { command ssh "$@" } always { printf '\033]778;ssh;exit\007' }
 }
 ```
