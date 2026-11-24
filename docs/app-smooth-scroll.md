@@ -98,11 +98,12 @@ Images anchored in a rectangle move with it. Selection, search highlights and
 the cursor are keyed by grid cells, so they move with their cells.
 
 The strip a shifted rectangle uncovers at its top (o > 0) or bottom (o < 0)
-shows the lines st's own scrolls pushed out of the scroll region, when that
-edge of the rectangle is the edge of the region, nearest line first. Past
-those, or for an edge inside the region (a rectangle starting below a panel),
-it is filled with the background of the row just beyond the edge, so a glide
-never uncovers bare terminal background.
+shows the lines st's own scrolls pushed out of that edge (the scroll region's
+lines when aligned with it, and each rectangle's own departing lines for an edge
+inside the region, such as below or above a floating panel, when `OSC 2032 ; r`
+is declared before the scroll), nearest line first. Past those, it is filled
+with the background of the rectangle's own edge row, so a glide never uncovers
+bare terminal background or a neighbouring panel's background.
 
 st keeps those lines while mode 2032 is on: every scroll of a region (`CSI n
 S`/`T`, IND/LF at the bottom margin, RI at the top margin, IL/DL with the

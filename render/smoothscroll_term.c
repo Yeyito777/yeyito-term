@@ -82,10 +82,15 @@ static struct {
 typedef struct {
 	int top, bot, left, right;	/* rows top..bot, columns [left, right) */
 } AppRect;
+typedef struct {
+	Glyph **above, **below;
+	int nabove, nbelow, cap;
+} AppRectGhosts;
 static struct {
 	int on;
 	int nrects;
 	AppRect rect[APP_MAXRECTS];
+	AppRectGhosts rghost[APP_MAXRECTS];
 	/* Image clip regions (OSC 2032 ; k): an image anchored in one never
 	 * draws outside the clip regions on its anchor row, at rest or gliding. */
 	int nclip;
@@ -261,11 +266,30 @@ copyline(int y, int cols)
 	return copy;
 }
 
+static Glyph *
+copyfillline(int y, int cols)
+{
+	Line src = tviewline(MAX(0, MIN(trow() - 1, y)));
+	Glyph *copy = malloc(cols * sizeof(Glyph));
+
+	if (!copy)
+		return NULL;
+	for (int x = 0; x < cols; x++) {
+		Glyph g = src ? src[x] : (Glyph){ 0 };
+		copy[x] = (Glyph){ .u = ' ', .mode = g.mode & ATTR_REVERSE,
+		    .fg = g.fg, .bg = g.bg };
+		if (!src)
+			copy[x].fg = defaultfg, copy[x].bg = defaultbg;
+	}
+	return copy;
+}
+
 /* Drop the first `drop` copies, then put copies of the `n` departing rows
- * (y0, y0 + step, ...) first, keeping at most a band height of copies. */
+ * (y0, y0 + step, ...) first, keeping at most a band height of copies.
+ * Rows outside [rtop, rbot] fall back to a blank fill matching `fillrow`. */
 static void
-ghostspushn(Glyph **list, int *count, int cap, int cols, int drop, int y0,
-		int step, int n)
+ghostspushrect(Glyph **list, int *count, int cap, int cols, int drop, int y0,
+		int step, int n, int rtop, int rbot, int fillrow)
 {
 	int i, keep;
 
@@ -277,9 +301,22 @@ ghostspushn(Glyph **list, int *count, int cap, int cols, int drop, int y0,
 	keep = MIN(*count, cap - n);
 	ghostsfree(list, count, MAX(0, keep));
 	memmove(list + n, list, *count * sizeof(*list));
-	for (i = 0; i < n; i++)
-		list[i] = copyline(y0 + i * step, cols);
+	for (i = 0; i < n; i++) {
+		int y = y0 + i * step;
+		list[i] = (y >= rtop && y <= rbot)
+		    ? copyline(y, cols) : copyfillline(fillrow, cols);
+	}
 	*count += n;
+}
+
+/* Drop the first `drop` copies, then put copies of the `n` departing rows
+ * (y0, y0 + step, ...) first, keeping at most a band height of copies. */
+static void
+ghostspushn(Glyph **list, int *count, int cap, int cols, int drop, int y0,
+		int step, int n)
+{
+	ghostspushrect(list, count, cap, cols, drop, y0, step, n,
+	    0, trow() - 1, 0);
 }
 
 static void
@@ -291,6 +328,24 @@ ghostspush(Glyph **list, int *count, int drop, int y0, int step, int n)
 /* ---- App-driven smooth scrolling ---- */
 
 static void
+apprectghostfree(AppRectGhosts *g)
+{
+	ghostsfree(g->above, &g->nabove, 0);
+	ghostsfree(g->below, &g->nbelow, 0);
+	free(g->above);
+	free(g->below);
+	g->above = g->below = NULL;
+	g->cap = 0;
+}
+
+static void
+apprectghostsfree(void)
+{
+	for (int i = 0; i < APP_MAXRECTS; i++)
+		apprectghostfree(&app.rghost[i]);
+}
+
+static void
 appghostsfree(void)
 {
 	ghostsfree(app.above, &app.nabove, 0);
@@ -298,6 +353,7 @@ appghostsfree(void)
 	free(app.above);
 	free(app.below);
 	app.above = app.below = NULL;
+	apprectghostsfree();
 	app.gtop = app.gbot = -1;
 	app.gcols = app.cap = 0;
 }
@@ -342,6 +398,10 @@ appcapture(int top, int bot, int orig, int n)
 	if (distance >= height) {	/* nothing adjacent survives */
 		ghostsfree(app.above, &app.nabove, 0);
 		ghostsfree(app.below, &app.nbelow, 0);
+		for (i = 0; i < app.nrects; i++) {
+			ghostsfree(app.rghost[i].above, &app.rghost[i].nabove, 0);
+			ghostsfree(app.rghost[i].below, &app.rghost[i].nbelow, 0);
+		}
 		return;
 	}
 	if (n > 0) {
@@ -354,6 +414,45 @@ appcapture(int top, int bot, int orig, int n)
 		    bot - distance + 1, 1, distance);
 		ghostspushn(app.above, &app.nabove, app.cap, app.gcols,
 		    distance, 0, 0, 0);
+	}
+	/* Also keep departing lines for any moving rectangle whose edge lies
+	 * inside the region (e.g. below or above a floating panel/card), so
+	 * scrolling past the panel shows real text instead of empty space. */
+	for (i = 0; i < app.nrects; i++) {
+		const AppRect *r = &app.rect[i];
+		AppRectGhosts *g = &app.rghost[i];
+		int need_top = r->top > top && r->top <= bot;
+		int need_bot = r->bot < bot && r->bot >= top;
+
+		if (!need_top && !need_bot)
+			continue;
+		if (g->cap != app.cap) {
+			apprectghostfree(g);
+			g->above = calloc(app.cap, sizeof(*g->above));
+			g->below = calloc(app.cap, sizeof(*g->below));
+			if (!g->above || !g->below) {
+				apprectghostfree(g);
+				continue;
+			}
+			g->cap = app.cap;
+		}
+		if (n > 0) {
+			if (need_top)
+				ghostspushrect(g->above, &g->nabove, g->cap,
+				    app.gcols, 0, r->top + n - 1, -1, distance,
+				    r->top, r->bot, r->top);
+			if (need_bot)
+				ghostspushn(g->below, &g->nbelow, g->cap,
+				    app.gcols, distance, 0, 0, 0);
+		} else {
+			if (need_bot)
+				ghostspushrect(g->below, &g->nbelow, g->cap,
+				    app.gcols, 0, r->bot - distance + 1, 1,
+				    distance, r->top, r->bot, r->bot);
+			if (need_top)
+				ghostspushn(g->above, &g->nabove, g->cap,
+				    app.gcols, distance, 0, 0, 0);
+		}
 	}
 	/* Images on the departing lines leave with them (the scroll would
 	 * drop them).  Over the top only the rows that left go along: the
@@ -436,6 +535,10 @@ appoffset(double now)
 	if (o == 0.0 && app.nterms == 0 && app.base == 0.0) {
 		ghostsfree(app.above, &app.nabove, 0);
 		ghostsfree(app.below, &app.nbelow, 0);
+		for (i = 0; i < app.nrects; i++) {
+			ghostsfree(app.rghost[i].above, &app.rghost[i].nabove, 0);
+			ghostsfree(app.rghost[i].below, &app.rghost[i].nbelow, 0);
+		}
 	}
 }
 
@@ -483,9 +586,28 @@ smoothscroll_app_osc(int narg, char **args)
 	    app.alt != tisaltscreen())
 		appclear();
 	switch (args[1][0]) {
-	case 'r':
-		app.nrects = parserects(narg, args, app.rect);
+	case 'r': {
+		AppRect next[APP_MAXRECTS];
+		AppRectGhosts ng[APP_MAXRECTS] = { 0 };
+		int n = parserects(narg, args, next);
+		for (int i = 0; i < n; i++) {
+			for (int j = 0; j < app.nrects; j++) {
+				if (app.rect[j].top == next[i].top &&
+				    app.rect[j].bot == next[i].bot &&
+				    app.rect[j].left == next[i].left &&
+				    app.rect[j].right == next[i].right) {
+					ng[i] = app.rghost[j];
+					app.rghost[j] = (AppRectGhosts){ 0 };
+					break;
+				}
+			}
+		}
+		apprectghostsfree();
+		memcpy(app.rect, next, n * sizeof(next[0]));
+		memcpy(app.rghost, ng, n * sizeof(ng[0]));
+		app.nrects = n;
 		break;
+	}
 	case 'k':
 		app.nclip = parserects(narg, args, app.clip);
 		break;
@@ -623,10 +745,11 @@ appfillline(int y)
 	return fill;
 }
 
-/* Past a shifted rectangle's edge: the lines the scroll pushed out, when the
- * edge is the scrolled region's edge; past those (or for an edge inside the
- * region, such as below a panel) the background of the row beyond the edge,
- * so a fast glide never uncovers bare terminal background. */
+/* Past a shifted rectangle's edge: the lines the scroll pushed out of that
+ * edge (region-wide when aligned with the scroll region, per-rectangle for an
+ * edge inside it, such as below or above a floating panel); past those, the
+ * background of the rectangle's own edge row, never bare terminal background
+ * or a neighbouring panel's background. */
 static void
 appdrawextra(void)
 {
@@ -638,19 +761,22 @@ appdrawextra(void)
 		return;
 	for (i = 0; i < app.nrects; i++) {
 		const AppRect *r = &app.rect[i];
+		const AppRectGhosts *g = &app.rghost[i];
 		if (o > 0) {
-			kept = r->top == app.gtop ? app.nabove : 0;
+			Glyph **src = r->top == app.gtop ? app.above : g->above;
+			kept = r->top == app.gtop ? app.nabove : g->nabove;
 			for (k = 1; k <= kept && k < o + 1; k++)
-				drawappghost(app.above[k - 1], app.gcols, r, r->top, o - k);
-			if (k < o + 1 && (fill = appfillline(r->top - 1)))
+				drawappghost(src[k - 1], app.gcols, r, r->top, o - k);
+			if (k < o + 1 && (fill = appfillline(r->top)))
 				for (; k < o + 1; k++)
 					drawappghost(fill, tcol(), r, r->top, o - k);
 		}
 		if (o < 0) {
-			kept = r->bot == app.gbot ? app.nbelow : 0;
+			Glyph **src = r->bot == app.gbot ? app.below : g->below;
+			kept = r->bot == app.gbot ? app.nbelow : g->nbelow;
 			for (k = 1; k <= kept && k + o < 1; k++)
-				drawappghost(app.below[k - 1], app.gcols, r, r->bot, o + k);
-			if (k + o < 1 && (fill = appfillline(r->bot + 1)))
+				drawappghost(src[k - 1], app.gcols, r, r->bot, o + k);
+			if (k + o < 1 && (fill = appfillline(r->bot)))
 				for (; k + o < 1; k++)
 					drawappghost(fill, tcol(), r, r->bot, o + k);
 		}

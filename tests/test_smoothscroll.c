@@ -1521,31 +1521,65 @@ TEST(clip_regions_are_replaced_and_cleared_like_the_rest)
 	ASSERT(!smoothscroll_image_clip(6, 3, &top, &end, &left, &right));
 }
 
-/* A rectangle whose top is inside the region (below a panel) has no kept
- * lines: the strip it uncovers takes the background of the row above it,
- * never bare terminal background. */
-TEST(strips_without_kept_lines_take_the_background_of_the_row_beyond)
+/* A rectangle whose edge is inside the scrolled region (below or above a
+ * floating panel/card) keeps the lines that left its own edge, so scrolling
+ * past the panel glides real content instead of empty space; any strip beyond
+ * the kept lines fills with the rectangle's own edge row background, never
+ * the panel's background or bare terminal background. */
+TEST(interior_rectangle_edges_keep_departing_lines_and_fill_with_own_bg)
 {
 	alt_reset(1);
 	smoothscroll_app_mode(1);
 	osc("r", "1,5,8,8", "4,9,8,12");
-	for (int x = 0; x < FAKE_COLS; x++)	/* row 2: the panel's last row */
-		altstore[2][x] = (Glyph){ .u = 'P', .bg = 5 };
-	region_scroll(0, 7, 0, 2);
+	for (int x = 0; x < FAKE_COLS; x++) {
+		altstore[2][x] = (Glyph){ .u = 'P', .bg = 5 };	/* panel's last row */
+		altstore[3][x] = (Glyph){ .u = 103, .bg = 2 };	/* pane row below panel */
+		altstore[4][x] = (Glyph){ .u = 104, .bg = 2 };
+	}
+	region_scroll(0, 7, 0, 2);	/* rows 3,4 leave r1's top edge */
 	osc("o", "1500", NULL);
 	frame_at(1000);
 	smoothscroll_drawextra();
-	/* Left rectangle: the two lines that left; right one: two fills. */
+	/* Left rect: rows 1,0 that left top; right rect: rows 4,3 that left row 3. */
 	ASSERT_EQ(4, ndrawn);
 	ASSERT_EQ(4, drawnx1[0]);
-	ASSERT(drawnid[0] != ' ');
+	ASSERT_EQ(101, drawnid[0]);
+	ASSERT_EQ(100, drawnid[1]);
 	ASSERT_EQ(8, drawnx1[2]);
 	ASSERT_EQ(12, drawnx2[2]);
-	ASSERT_EQ(' ', drawnid[2]);
-	ASSERT(drawnplain[2]);
+	ASSERT_EQ(104, drawnid[2]);	/* nearest departing line below panel */
 	ASSERT(NEAR(0.5, drawnshift[2]));
-	ASSERT_EQ(' ', drawnid[3]);
+	ASSERT_EQ(103, drawnid[3]);	/* second departing line below panel */
 	ASSERT(NEAR(-0.5, drawnshift[3]));
+
+	/* Also works on an interior bottom edge (above a middle/bottom float). */
+	alt_reset(1);
+	smoothscroll_app_mode(1);
+	osc("r", "1,5,5,12", NULL);	/* rows 0..4 inside 0..7 region */
+	region_scroll(0, 7, 0, -2);	/* content down 2: rows 3,4 leave r->bot */
+	osc("o", "-1500", NULL);
+	frame_at(1000);
+	smoothscroll_drawextra();
+	ASSERT_EQ(2, ndrawn);
+	ASSERT_EQ(103, drawnid[0]);
+	ASSERT_EQ(104, drawnid[1]);
+
+	/* Fallback fill when rectangles arrive after the scroll (no per-rect copies)
+	 * uses the rectangle's own edge row (row 3), not the panel's (row 2). */
+	alt_reset(1);
+	smoothscroll_app_mode(1);
+	for (int x = 0; x < FAKE_COLS; x++) {
+		altstore[2][x] = (Glyph){ .u = 'P', .bg = 5 };
+		altstore[3][x] = (Glyph){ .u = 'A', .bg = 2 };
+	}
+	region_scroll(0, 7, 0, 2);
+	osc("r", "1,5,8,8", "4,9,8,12");
+	osc("o", "1500", NULL);
+	frame_at(1000);
+	smoothscroll_drawextra();
+	ASSERT_EQ(4, ndrawn);
+	ASSERT_EQ(' ', drawnid[2]);
+	ASSERT_EQ(' ', drawnid[3]);
 }
 
 TEST_SUITE(smoothscroll_app)
@@ -1566,7 +1600,7 @@ TEST_SUITE(smoothscroll_app)
 	RUN_TEST(images_in_clip_regions_never_draw_outside_them);
 	RUN_TEST(images_clip_to_the_clip_regions_on_their_row);
 	RUN_TEST(clip_regions_are_replaced_and_cleared_like_the_rest);
-	RUN_TEST(strips_without_kept_lines_take_the_background_of_the_row_beyond);
+	RUN_TEST(interior_rectangle_edges_keep_departing_lines_and_fill_with_own_bg);
 }
 
 int
